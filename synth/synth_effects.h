@@ -55,6 +55,56 @@ constexpr uint32_t max_effect_mod_params = 32;
 constexpr uint32_t max_fir_effect_bands       = 4;
 constexpr uint32_t num_fir_effect_band_params = max_fir_effect_bands * 4;
 
+// Active band-binding count for a FIR effect slot, the one type-aware statement
+// of the dual-layout policy: the plain fir keeps its legacy layout (band 0's
+// gain plus each extra band's four values; a count of 0 or 1 is the single-band
+// marker with no active band-array params), while fir_multiband reads the array
+// uniformly at four bindings per band with a zeroed count meaning one.  Other
+// types carry no band array.  Callers clamp or refuse out-of-bound counts
+// before use, per their own contract.
+constexpr uint32_t fir_active_band_param_count(EffectType type, uint32_t band_count)
+{
+    if (type == EffectType::fir_multiband) {
+        return 4 * (band_count < 1 ? 1 : band_count);
+    }
+    if (type == EffectType::fir) {
+        return band_count <= 1 ? 0 : 1 + 4 * (band_count - 1);
+    }
+    return 0;
+}
+
+// Band-array binding count that can carry a reference, the one bound shared by
+// load validation, reclaim rooting and reference scans: the plain fir is
+// dormant-inclusive (all 16 bindings, its dormant seam can carry authored
+// bindings), while a fir_multiband covers only its clamped active bands (its
+// dormant tail is always zeroed).  The clamp is a no-op for validation, which
+// refuses oversized counts first.
+constexpr uint32_t fir_reference_band_param_count(EffectType type, uint32_t band_count)
+{
+    return type == EffectType::fir
+               ? num_fir_effect_band_params
+               : fir_active_band_param_count(type,
+                                             band_count > max_fir_effect_bands ? max_fir_effect_bands : band_count);
+}
+
+// Whether the slot's legacy scalar bindings (bindings[0..num_params)) carry live
+// parameters.  A fir_multiband keeps them only as unused stored shape (its band
+// array carries the parameters), so they validate but are never counted, built,
+// rooted or walked as references.
+constexpr bool effect_reads_legacy_params(EffectType type)
+{
+    return type != EffectType::fir_multiband;
+}
+
+// The two FIR effect types share the coefficient-staging machinery; the band
+// array's index meaning differs (the plain FIR's dormant legacy order vs the
+// multiband's uniform center/spread/gain/slope), so every type gate and the
+// staging dispatch key on this one predicate.
+constexpr bool is_fir_effect_type(EffectType type)
+{
+    return type == EffectType::fir || type == EffectType::fir_multiband;
+}
+
 // Storage-buffer offset alignment, pinned to the Vulkan spec minimum of
 // minStorageBufferOffsetAlignment; the runtime asserts the device honors it.
 constexpr uint32_t effect_state_alignment = 256;
@@ -69,8 +119,8 @@ constexpr uint32_t effect_fir_reserve =
     (max_oscillators - 1) * (((num_fir_taps * sizeof(float) + effect_state_round) & ~effect_state_round) +
                              (((num_fir_taps - 1) * sizeof(float) + effect_state_round) & ~effect_state_round));
 constexpr uint32_t effect_output_reserve =
-    (max_channels + 1) * ((rt_step_samples * 2 * sizeof(float) + effect_state_round) & ~effect_state_round)
-    + max_oscillators * ((rt_step_samples * sizeof(float) + effect_state_round) & ~effect_state_round);
+    (max_channels + 1) * ((rt_step_samples * 2 * sizeof(float) + effect_state_round) & ~effect_state_round) +
+    max_oscillators * ((rt_step_samples * sizeof(float) + effect_state_round) & ~effect_state_round);
 // Device bytes reserved for the per-oscillator string wave state regions.
 constexpr uint32_t effect_string_reserve =
     (max_oscillators - 1) * ((string_state_floats * sizeof(float) + effect_state_round) & ~effect_state_round);
@@ -131,5 +181,16 @@ bool stage_fir_multiband_coeff_entry(uint32_t             taps_offs,
                                      uint8_t              band_count,
                                      const float*         band_params,
                                      FirEffectCoeffEntry* entry);
+
+// The one center/spread -> edge policy of a multiband band: highpass = center -
+// spread/2 (NaN or nonpositive reads as off, 0), lowpass = center + spread/2
+// clamped to Nyquist.  Callers apply the band-activity predicate first.
+void fir_multiband_band_edges(float center_hz, float spread_hz, float* highpass, float* lowpass);
+
+// The band-activity predicate: both center and spread positive (NaN reads as absent).
+constexpr bool fir_multiband_band_active(const float center_hz, const float spread_hz)
+{
+    return spread_hz > 0.0f && center_hz > 0.0f;
+}
 
 } // namespace Synth

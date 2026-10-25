@@ -23,7 +23,7 @@ struct EffectParams {
     uint  type;
     uint  sound_offs;   // float index into data[], interleaved stereo, read + write in place
     uint  state_offs;   // float index into data[] for persistent state
-    uint  pad;          // keep params[] 16-byte aligned for std430
+    uint  bypass;       // FIR types: 1 = no staged entry, pass the dry input through; keeps params[] 16-byte aligned for std430
     float params[5];    // effect's tweakable values, uploaded every step
 };
 
@@ -357,7 +357,7 @@ vec2 apply_compressor(in EffectParams eff)
 // layout: coeff buffer [num_taps], a stereo input-history ring of num_taps - 1 frames,
 // then a write-position counter.  The ring holds the most recent num_taps - 1 dry input
 // samples per channel for cross-step continuity.
-vec2 apply_fir(in EffectParams eff)
+vec2 apply_fir(in EffectParams eff, const bool bypass)
 {
     const uint fir_ring     = eff.state_offs + num_taps;
     const uint fir_ring_len = num_taps - 1u;
@@ -367,22 +367,32 @@ vec2 apply_fir(in EffectParams eff)
     float acc_left  = 0.0;
     float acc_right = 0.0;
 
-    // Taps whose input[n - k] lies in this step: read from shared.
-    for (uint tap = 0u; tap <= gl_LocalInvocationID.x; tap++) {
-        const float coeff = data[eff.state_offs + tap];
-        acc_left  += coeff * samples_left[gl_LocalInvocationID.x - tap];
-        acc_right += coeff * samples_right[gl_LocalInvocationID.x - tap];
+    // A bypassed filter skips the convolution and passes the dry input
+    // through unchanged: the history ring and its write position still
+    // advance on the dry input, so a later reactivation resumes from
+    // continuous recent history instead of stale pre-inactive samples.
+    if (bypass) {
+        acc_left  = samples_left[gl_LocalInvocationID.x];
+        acc_right = samples_right[gl_LocalInvocationID.x];
     }
+    else {
+        // Taps whose input[n - k] lies in this step: read from shared.
+        for (uint tap = 0u; tap <= gl_LocalInvocationID.x; tap++) {
+            const float coeff = data[eff.state_offs + tap];
+            acc_left += coeff * samples_left[gl_LocalInvocationID.x - tap];
+            acc_right += coeff * samples_right[gl_LocalInvocationID.x - tap];
+        }
 
-    // Taps whose input[n - k] lies in a prior step: read from the history ring.
-    for (uint tap = gl_LocalInvocationID.x + 1u; tap < num_taps; tap++) {
-        const float coeff = data[eff.state_offs + tap];
+        // Taps whose input[n - k] lies in a prior step: read from the history ring.
+        for (uint tap = gl_LocalInvocationID.x + 1u; tap < num_taps; tap++) {
+            const float coeff = data[eff.state_offs + tap];
 
-        // Adding fir_ring_len keeps the frame non-negative before the modulo without
-        // shifting the position (it is a whole number of ring wraps).
-        const uint read_frame = (fir_base_pos + gl_LocalInvocationID.x + fir_ring_len - tap) % fir_ring_len;
-        acc_left  += coeff * data[fir_ring + read_frame * 2];
-        acc_right += coeff * data[fir_ring + read_frame * 2 + 1];
+            // Adding fir_ring_len keeps the frame non-negative before the modulo without
+            // shifting the position (it is a whole number of ring wraps).
+            const uint read_frame = (fir_base_pos + gl_LocalInvocationID.x + fir_ring_len - tap) % fir_ring_len;
+            acc_left += coeff * data[fir_ring + read_frame * 2];
+            acc_right += coeff * data[fir_ring + read_frame * 2 + 1];
+        }
     }
 
     barrier();
@@ -456,15 +466,19 @@ void main()
         result = apply_compressor(eff);
     }
     else if (eff.type == effect_fir) {
-        result = apply_fir(eff);
+        // Plain fir never consults bypass: its behavior is byte-identical legacy
+        // (a failed multi-band staging keeps the pre-existing drop-the-entry  semantics).
+        result = apply_fir(eff, false);
     }
     else if (eff.type == effect_ring_mod) {
         result = apply_ring_mod(eff);
     }
     else if (eff.type == effect_fir_multiband) {
         // The staged coefficient entry already carries every band, so the
-        // multiband type runs the same filter engine.
-        result = apply_fir(eff);
+        // multiband type runs the same filter engine.  When no band staged,
+        // the host sets bypass and the dry input passes through while the
+        // history keeps advancing.
+        result = apply_fir(eff, eff.bypass != 0u);
     }
 
     data[eff.sound_offs + gl_LocalInvocationID.x * 2]     = result.x;

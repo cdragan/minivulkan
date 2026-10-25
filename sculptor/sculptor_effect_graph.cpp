@@ -106,7 +106,8 @@ static const Sculptor::EffectTypeInfo effect_type_table[Synth::num_effect_types]
 
 // Neutral, audible defaults: a freshly added effect must change the sound
 // predictably and stay DSP-safe (delay feedback below unity, compressor
-// ratio at or above one, FIR highpass disabled).
+// ratio at or above one, FIR highpass disabled, multi-band FIR inactive until
+// Center/Spread are set).
 static const float effect_default_params[Synth::num_effect_types][Synth::max_effect_param_floats] = {
     { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },      // none
     { 1.0f, 1.0f, 1.0f, 0.0f, 0.0f },      // distortion
@@ -141,6 +142,14 @@ static const Sculptor::EffectParamInfo fx_band_spread_info = { "Spread (Hz)",
                                                                22050.0f,
                                                                false,
                                                                "Band width around its center (in Hz)" };
+
+// One projected FIR band row's location facts, shared by the wire loops and
+// the edit-disabled stamping so both walk the same rows.
+struct FxBandRowLocation {
+    uint32_t band;     // 0-based band index
+    uint32_t row;      // row inside the band (the band's four bindings, in order)
+    uint32_t row_slot; // base-value slot of the row
+};
 } // anonymous namespace
 
 static void effect_layout_name(const Synth::EffectChainBinding& chain,
@@ -441,17 +450,29 @@ bool Sculptor::translate_effect_lfo_title(char (&name)[32], const uint16_t* lfo_
     return true;
 }
 
+// How many legacy bindings and band-array bindings of a slot can carry a
+// reference (the band bound is Synth::fir_reference_band_param_count's).
+static void fx_reference_binding_counts(const Synth::EffectSlotBinding& effect,
+                                        uint32_t*                       legacy_count,
+                                        uint32_t*                       band_count)
+{
+    *legacy_count = Synth::effect_reads_legacy_params(effect.type) ? Synth::get_effect_param_floats(effect.type) : 0;
+    *band_count   = Synth::fir_reference_band_param_count(effect.type, effect.fir_bands.band_count);
+}
+
 bool Sculptor::effect_chain_uses_lfo(const Synth::EffectChainBinding& chain, uint32_t desc)
 {
     for (uint32_t slot = 0; slot < chain.num_effects; ++slot) {
-        const uint32_t num_params = Synth::get_effect_param_floats(chain.effects[slot].type);
+        uint32_t num_params;
+        uint32_t num_band_params;
+        fx_reference_binding_counts(chain.effects[slot], &num_params, &num_band_params);
         for (uint32_t param = 0; param < num_params; ++param) {
             if (chain.effects[slot].bindings[param].lfo_desc_id == desc) {
                 return true;
             }
         }
         // The FIR band bindings ride the same reference rule.
-        for (uint32_t band_param = 0; band_param < Synth::num_fir_effect_band_params; ++band_param) {
+        for (uint32_t band_param = 0; band_param < num_band_params; ++band_param) {
             if (chain.effects[slot].fir_bands.bands[band_param].lfo_desc_id == desc) {
                 return true;
             }
@@ -486,8 +507,10 @@ uint16_t Sculptor::fx_chain_wired_cc_mask(const Synth::EffectChainBinding& chain
     for (uint32_t slot = 0; slot < chain.num_effects; ++slot) {
         // The enable routing joins the registry: a CC wired to the Enabled
         // row refuses removal like a wired param source.
-        mask                      = static_cast<uint16_t>(mask | fx_cc_mask_bit(chain.effects[slot].enable_input));
-        const uint32_t num_params = Synth::get_effect_param_floats(chain.effects[slot].type);
+        mask = static_cast<uint16_t>(mask | fx_cc_mask_bit(chain.effects[slot].enable_input));
+        uint32_t num_params;
+        uint32_t num_band_params;
+        fx_reference_binding_counts(chain.effects[slot], &num_params, &num_band_params);
         for (uint32_t param = 0; param < num_params; ++param) {
             const Synth::EffectParamBinding& binding = chain.effects[slot].bindings[param];
             for (uint32_t input = 0; input < binding.num_inputs; ++input) {
@@ -495,7 +518,7 @@ uint16_t Sculptor::fx_chain_wired_cc_mask(const Synth::EffectChainBinding& chain
             }
         }
         // The FIR band bindings ride the same registry rule.
-        for (uint32_t band_param = 0; band_param < Synth::num_fir_effect_band_params; ++band_param) {
+        for (uint32_t band_param = 0; band_param < num_band_params; ++band_param) {
             const Synth::EffectParamBinding& binding = chain.effects[slot].fir_bands.bands[band_param];
             for (uint32_t input = 0; input < binding.num_inputs; ++input) {
                 mask = static_cast<uint16_t>(mask | fx_cc_mask_bit(binding.inputs[input]));
@@ -664,14 +687,17 @@ static uint32_t fx_row_free_input(const Sculptor::Graph& graph,
 // (sculptor_effect_graph.h) reads the slot's FirEffectBands bindings: the
 // plain FIR keeps band 0's Gain row first and bands 1..3's
 // Lowpass/Highpass/Gain/Slope rows after, the multiband node reads the
-// array uniformly.  Returns false for slots that edit no binding: the Enabled row,
+// array uniformly as Center/Spread/Gain/Slope.  Returns false for slots that edit no binding: the Enabled row,
 // the band headers and their [-]/[+] click slots, and slots past the
-// projected rows.  *fir_row names the row's FIR parameter (0 lowpass,
-// 1 highpass, 2 gain, 3 slope); non-FIR rows reuse the parameter index.
+// projected rows. *fir_row names the row's FIR parameter (0 center,
+// 1 spread, 2 gain, 3 slope on the multiband node; 0 lowpass, 1 highpass,
+// 2 gain, 3 slope on the plain FIR); non-FIR rows reuse the parameter index.
 // The decode is slot arithmetic against the effect type: whether a band
 // row is currently projected is the caller's guard. Public seam: the
 // wiring validator, the drop-command consumer and the derived generator
 // title classify endpoints through this decoder instead of legacy modulo
+// arithmetic.
+
 // The FirEffectBands array index of band `band`'s row `row` (0..3).  The
 // plain FIR keeps its dormant legacy order (band 0's gain first, bands 1..3
 // lowpass/highpass/gain/slope after); the multiband type reads the array
@@ -684,7 +710,6 @@ static uint32_t fx_band_binding_ordinal(const Synth::EffectSlotBinding& effect, 
     return band == 0 ? 0u : 1u + 4u * (band - 1u) + row;
 }
 
-// arithmetic.
 bool Sculptor::fx_decode_row_slot(Synth::EffectSlotBinding&   effect,
                                   uint32_t                    slot_idx,
                                   Synth::EffectParamBinding** binding,
@@ -712,8 +737,7 @@ bool Sculptor::fx_decode_row_slot(Synth::EffectSlotBinding&   effect,
         return true;
     }
 
-    if ((effect.type != Synth::EffectType::fir && effect.type != Synth::EffectType::fir_multiband) ||
-        slot_idx < Sculptor::fx_band_region_first_slot(effect.type)) {
+    if (! Synth::is_fir_effect_type(effect.type) || slot_idx < Sculptor::fx_band_region_first_slot(effect.type)) {
         return false;
     }
 
@@ -729,14 +753,6 @@ bool Sculptor::fx_decode_row_slot(Synth::EffectSlotBinding&   effect,
     *binding = &effect.fir_bands.bands[fx_band_binding_ordinal(effect, band, row)];
     return true;
 }
-
-// One projected FIR band row's location facts, shared by the wire loops and
-// the edit-disabled stamping so both walk the same rows.
-struct FxBandRowLocation {
-    uint32_t band;     // 0-based band index
-    uint32_t row;      // row inside the band (the band's four bindings, in order)
-    uint32_t row_slot; // base-value slot of the row
-};
 
 // The FIR band region's single visibility gate.  Only the Multi-band FIR
 // effect node projects band rows; the plain FIR keeps its legacy rows only,
@@ -917,8 +933,7 @@ bool Sculptor::fx_effect_slot_hidden(const Synth::EffectSlotBinding& effect,
     // The band region belongs to the FIR effects only: a five-parameter
     // effect's rows share the slot range, so the legacy decode below
     // answers for them.
-    if ((effect.type == Synth::EffectType::fir || effect.type == Synth::EffectType::fir_multiband) &&
-        slot_idx >= Sculptor::fx_band_region_first_slot(effect.type)) {
+    if (Synth::is_fir_effect_type(effect.type) && slot_idx >= Sculptor::fx_band_region_first_slot(effect.type)) {
         // FIR band rows: the headers and their click slots always render,
         // and a band row's unconnected modulator fields hide like the
         // legacy parameter rows'.
@@ -1260,8 +1275,13 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
         if (mapping->lfo_nodes[desc - 1] == pool_no_slot) {
             continue;
         }
+        // The legacy traversals walk the projected legacy parameter rows
+        // (effect_type_info().num_params), not the stored slot shape
+        // (get_effect_param_floats): the multiband type's ride-along scalars project
+        // no legacy rows, so modulation stored in those unused bindings must
+        // not project legacy wires onto the band tree.
         for (uint32_t slot = 0; slot < chain_ref.num_effects; ++slot) {
-            const uint32_t num_params = Synth::get_effect_param_floats(chain_ref.effects[slot].type);
+            const uint32_t num_params = effect_type_info(chain_ref.effects[slot].type).num_params;
             for (uint32_t param = 0; param < num_params; ++param) {
                 if (chain_ref.effects[slot].bindings[param].lfo_desc_id != desc) {
                     continue;
@@ -1288,7 +1308,7 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
     // per-source dot.
     if (mapping->midi_node != pool_no_slot) {
         for (uint32_t slot = 0; slot < chain_ref.num_effects; ++slot) {
-            const uint32_t num_params = Synth::get_effect_param_floats(chain_ref.effects[slot].type);
+            const uint32_t num_params = effect_type_info(chain_ref.effects[slot].type).num_params;
             for (uint32_t param = 0; param < num_params; ++param) {
                 const Synth::EffectParamBinding& binding = chain_ref.effects[slot].bindings[param];
                 for (uint32_t input = 0; input < binding.num_inputs; ++input) {
@@ -1343,7 +1363,7 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
     // above are authoritative, so the flags settle after them.
     for (uint32_t i = 0; i < num_projected; ++i) {
         const uint32_t slot       = slots[i];
-        const uint32_t num_params = Synth::get_effect_param_floats(chain_ref.effects[slot].type);
+        const uint32_t num_params = effect_type_info(chain_ref.effects[slot].type).num_params;
         for (uint32_t param = 0; param < num_params; ++param) {
             for (uint32_t input = 0; input < Synth::max_mod_inputs; ++input) {
                 const uint32_t dot_idx = fx_param_src_dot(param, input);
@@ -1658,16 +1678,13 @@ static bool fx_drop_prev_modulator_wire(const Sculptor::Graph&              grap
 
 // The FirEffectBands binding of band `band`'s parameter `kind` (0 lowpass,
 // 1 highpass, 2 gain, 3 slope on the plain FIR; 0 center, 1 spread, 2 gain,
-// 3 slope on the multiband node).  The plain FIR's band 0 keeps its edges
-// and slope in the slot's legacy bindings and its gain in FirEffectBands
-// index 0, so the legacy single-band form stays byte-identical; the
-// multiband node reads the array uniformly (4 * band + kind).
+// 3 slope on the multiband node).  Plain FIR band 0 keeps its edges/slope in
+// the legacy bindings (and its gain in FirEffectBands index 0, so the legacy
+// single-band form stays byte-identical); every other lookup, multiband
+// included, is the ordinal mapping.
 static Synth::EffectParamBinding* fx_band_param(Synth::EffectSlotBinding& effect, uint32_t band, uint32_t kind)
 {
-    if (effect.type == Synth::EffectType::fir_multiband) {
-        return &effect.fir_bands.bands[fx_band_binding_ordinal(effect, band, kind)];
-    }
-    if (band == 0) {
+    if (band == 0 && effect.type != Synth::EffectType::fir_multiband) {
         switch (kind) {
             case 0:
                 return &effect.bindings[0]; // Lowpass Hz
@@ -1720,8 +1737,7 @@ static bool apply_fx_band_edit(Synth::InstrumentBank*              bank,
     }
 
     Synth::EffectSlotBinding& effect = Sculptor::fx_graph_chain(bank, mapping.chain).effects[slot];
-    if ((effect.type != Synth::EffectType::fir && effect.type != Synth::EffectType::fir_multiband) ||
-        ! Sculptor::is_fx_band_button_slot(effect.type, change.slot_idx)) {
+    if (! Synth::is_fir_effect_type(effect.type) || ! Sculptor::is_fx_band_button_slot(effect.type, change.slot_idx)) {
         return false;
     }
 
@@ -1752,10 +1768,12 @@ static bool apply_fx_band_edit(Synth::InstrumentBank*              bank,
             copy_fx_band(effect, b - 1u, b);
         }
         copy_fx_band(effect, band, band + 1u);
-        if (band == 0) {
-            // A copy out of band 0 seeds the copy's gain when band 0's gain
-            // is unwired and zero (the loaded legacy form keeps a zeroed
-            // gain binding): the copy must not stage a silent band.
+        if (band == 0 && effect.type == Synth::EffectType::fir) {
+            // A plain-FIR copy out of band 0 seeds the copy's gain when band
+            // 0's gain is unwired and zero (the loaded legacy form keeps a
+            // zeroed gain binding): the copy must not stage a silent band.
+            // The multiband keeps a deliberate unwired zero gain: its gain
+            // rows are ordinary uniform bindings, not a legacy marker.
             Synth::EffectParamBinding* copy_gain = fx_band_param(effect, 1, 2);
             if (copy_gain->lfo_desc_id == 0 && copy_gain->num_inputs == 0 && copy_gain->base_value == 0.0f) {
                 copy_gain->base_value = 1.0f;
@@ -1859,7 +1877,7 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                     return false;
                 }
                 const Synth::EffectType effect_type = chain.effects[slot].type;
-                if ((effect_type == Synth::EffectType::fir || effect_type == Synth::EffectType::fir_multiband) &&
+                if (Synth::is_fir_effect_type(effect_type) &&
                     Sculptor::is_fx_band_button_slot(effect_type, change.slot_idx)) {
                     // The band headers' click edits rewrite the stored bands
                     // in place (insert a copy after band N, or remove band N
@@ -1889,8 +1907,7 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                         // for lowpass and highpass alike.
                         // The synth keeps the raw Hz values untouched.
                         float      base_value      = live_slot.value.real;
-                        const bool fir_effect_slot = chain.effects[slot].type == Synth::EffectType::fir ||
-                                                     chain.effects[slot].type == Synth::EffectType::fir_multiband;
+                        const bool fir_effect_slot = Synth::is_fir_effect_type(chain.effects[slot].type);
                         if (fir_effect_slot) {
                             if (fir_row == 3) {
                                 // The FIR slope percent is an integer 1..100; its slider
@@ -3337,9 +3354,8 @@ uint32_t Sculptor::fx_band_click_boundary(const GraphChange*           changes,
         if (effect_slot < 0) {
             continue;
         }
-        const Synth::EffectType effect_type = bank.channel_chains[mapping.chain].effects[effect_slot].type;
-        if ((effect_type != Synth::EffectType::fir && effect_type != Synth::EffectType::fir_multiband) ||
-            ! is_fx_band_button_slot(effect_type, change.slot_idx)) {
+        const Synth::EffectType effect_type = chain_at(bank, mapping.chain).effects[effect_slot].type;
+        if (! Synth::is_fir_effect_type(effect_type) || ! is_fx_band_button_slot(effect_type, change.slot_idx)) {
             continue;
         }
         apply_count = index + 1;
@@ -3395,7 +3411,7 @@ bool Sculptor::apply_effect_graph_batch(const Synth::InstrumentEditorBank* sourc
                     // type's region base: a five-parameter effect's rows
                     // share the slot range and replay like any legacy row.
                     const Synth::EffectType sweep_type = sweep_chain.effects[effect_slot].type;
-                    if ((sweep_type == Synth::EffectType::fir || sweep_type == Synth::EffectType::fir_multiband) &&
+                    if (Synth::is_fir_effect_type(sweep_type) &&
                         slot >= Sculptor::fx_band_region_first_slot(sweep_type)) {
                         continue;
                     }
@@ -3505,18 +3521,26 @@ bool Sculptor::change_effect_type_candidate(const Synth::InstrumentEditorBank* s
     effects_candidate                  = *source;
     Synth::EffectChainBinding& chain   = fx_graph_chain(&effects_candidate.bank, owner);
     const bool                 enabled = chain.effects[slot].enabled;
-    // The fir <-> fir_multiband conversion ports the plain FIR's audible
-    // behavior before the retype wipes the slot, per the wave 3 porting
-    // table: the legacy Lowpass/Highpass/Slope become the band set that
-    // reproduces the plain FIR's staging exactly, with every created band
-    // carrying the legacy slope (wire included) and the neutral gain 1.0.
-    // Back conversion reads band 0's derived edges only; bands 2..4 drop and
+    // The fir <-> fir_multiband conversion ports the plain FIR's filtering
+    // intent before the retype wipes the slot: the legacy Lowpass/Highpass/
+    // Slope become the band set that covers the same audible ranges (the
+    // reject mapping turns a crossed or colliding edge pair into the two
+    // half-open bands 0..lowpass and highpass..Nyquist), with every created
+    // band carrying the legacy slope (wire included) and the neutral gain
+    // 1.0.  This is intent-porting, not bit-exact staging equivalence.
+    // Authored cutoffs bind to the range the runtime actually stages:
+    // clamp_cutoff_hz clamps positive values to [1, Nyquist - 1] Hz
+    // (synth_parameters.cpp), and an unclamped edge at or above Nyquist would
+    // convert into a spread the multiband staging refuses - an inactive
+    // dry-passthrough node instead of the plain FIR's clamped edge.
+    // Nonpositive values and NaN keep their off semantics.
+    // Back conversion reads band 0's derived edges only; bands 1..3 (UI Band 2-4) drop and
     // the conversion is always allowed.
     const Synth::EffectSlotBinding previous = chain.effects[slot];
     fx_init_slot(&chain, slot, type);
     if (previous.type == Synth::EffectType::fir && type == Synth::EffectType::fir_multiband) {
-        const float lowpass_hz  = previous.bindings[0].base_value;
-        const float highpass_hz = previous.bindings[1].base_value;
+        const float lowpass_hz  = Synth::clamp_cutoff_hz(previous.bindings[0].base_value);
+        const float highpass_hz = Synth::clamp_cutoff_hz(previous.bindings[1].base_value);
         const float nyquist_hz  = static_cast<float>(Synth::rt_sampling_rate / 2);
         const bool  hp_set      = highpass_hz > 0.0f; // NaN reads as off
         const bool  lp_set      = lowpass_hz > 0.0f;
@@ -3569,21 +3593,23 @@ bool Sculptor::change_effect_type_candidate(const Synth::InstrumentEditorBank* s
         const float center_hz     = previous.fir_bands.bands[0].base_value;
         const float spread_hz     = previous.fir_bands.bands[1].base_value;
         const float nyquist_hz    = static_cast<float>(Synth::rt_sampling_rate / 2);
-        float       highpass_edge = center_hz - spread_hz * 0.5f;
-        float       lowpass_edge  = center_hz + spread_hz * 0.5f;
-        if (! (highpass_edge > 0.0f)) {
-            highpass_edge = 0.0f; // NaN reads as off
+        float       highpass_edge = 0.0f;
+        float       lowpass_edge  = 0.0f;
+        // An inactive band 1 (the staging predicate) stages nothing, so it
+        // converts to the passthrough pair rather than a derived band-stop.
+        if (Synth::fir_multiband_band_active(center_hz, spread_hz)) {
+            Synth::fir_multiband_band_edges(center_hz, spread_hz, &highpass_edge, &lowpass_edge);
         }
-        if (lowpass_edge > nyquist_hz) {
-            lowpass_edge = nyquist_hz;
+        if (! (lowpass_edge > 0.0f)) {
+            lowpass_edge = 0.0f; // NaN reads as off, mirroring the highpass edge
         }
         const bool hp_set = highpass_edge > 0.0f;
         const bool at_top = lowpass_edge >= nyquist_hz;
         // Full-range band: both cutoffs 0 (passthrough).  Pure low band:
         // lowpass = edge, highpass = 0.  Pure high band: highpass = edge,
         // lowpass = 0.  Ordinary band: both edges.
-        chain.effects[slot].bindings[0].base_value = at_top ? 0.0f : lowpass_edge;
-        chain.effects[slot].bindings[1].base_value = hp_set ? highpass_edge : 0.0f;
+        chain.effects[slot].bindings[0].base_value = at_top ? 0.0f : Synth::clamp_cutoff_hz(lowpass_edge);
+        chain.effects[slot].bindings[1].base_value = hp_set ? Synth::clamp_cutoff_hz(highpass_edge) : 0.0f;
         chain.effects[slot].bindings[2]            = previous.fir_bands.bands[3];
     }
     chain.effects[slot].enabled = enabled;

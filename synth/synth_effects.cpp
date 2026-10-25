@@ -10,6 +10,31 @@ static bool fir_effect_band_active(const float lowpass_hz, const float highpass_
     return highpass_hz > 0.0f && highpass_hz < lowpass_hz;
 }
 
+// The staging loops' shared tail: clamps the modulated gain to [0, 1] (a
+// gain <= 0 or NaN stages a zero-gain band, mirroring the oscillator's
+// band loop), then writes the quantized edge pair into the next compacted
+// band slot. Edge derivation and quantization stay with the callers.
+static void stage_fir_coeff_band(Synth::FirEffectCoeffEntry* entry,
+                                 uint32_t*                   num_bands,
+                                 const uint32_t              highpass,
+                                 const uint32_t              lowpass,
+                                 const float                 slope_percent,
+                                 float                       gain)
+{
+    if (gain > 1.0f) {
+        gain = 1.0f;
+    }
+    if (! (gain > 0.0f)) {
+        gain = 0.0f;
+    }
+    Synth::FirEffectCoeffBand* out = &entry->bands[*num_bands];
+    (*num_bands)++;
+    out->highpass_cutoff_freq = highpass;
+    out->lowpass_cutoff_freq  = lowpass;
+    out->window_span          = Synth::fir_effective_span(slope_percent);
+    out->gain                 = gain;
+}
+
 bool Synth::stage_fir_effect_coeff_entry(const uint32_t       taps_offs,
                                          const uint8_t        band_count,
                                          const float          band0_lowpass_hz,
@@ -51,31 +76,30 @@ bool Synth::stage_fir_effect_coeff_entry(const uint32_t       taps_offs,
         if (! band_active) {
             continue;
         }
-        // The modulated gain clamps to [0, 1]; a gain <= 0 or NaN stages a zero-gain band,
-        // mirroring the oscillator's band loop.
-        if (gain > 1.0f) {
-            gain = 1.0f;
-        }
-        if (! (gain > 0.0f)) {
-            gain = 0.0f;
-        }
         uint32_t lowpass  = cutoff_hz_to_int(lowpass_hz);
         uint32_t highpass = cutoff_hz_to_int(highpass_hz);
         // The guard widens a post-conversion zero-bandwidth or double-clamped pair the way
         // the oscillator's band loop does.
         oscillator_fir_band_guard(&lowpass, &highpass);
-        FirEffectCoeffBand* out = &entry->bands[num_bands];
-        num_bands++;
-        out->highpass_cutoff_freq = highpass;
-        out->lowpass_cutoff_freq  = lowpass;
-        out->window_span          = fir_effective_span(slope_percent);
-        out->gain                 = gain;
+        stage_fir_coeff_band(entry, &num_bands, highpass, lowpass, slope_percent, gain);
     }
     if (num_bands == 0) {
         return false;
     }
     entry->band_count = num_bands;
     return true;
+}
+
+void Synth::fir_multiband_band_edges(const float center_hz, const float spread_hz, float* highpass, float* lowpass)
+{
+    *highpass = center_hz - spread_hz * 0.5f;
+    *lowpass  = center_hz + spread_hz * 0.5f;
+    if (! (*highpass > 0.0f)) {
+        *highpass = 0.0f;
+    }
+    if (*lowpass > static_cast<float>(Synth::rt_sampling_rate / 2)) {
+        *lowpass = static_cast<float>(Synth::rt_sampling_rate / 2);
+    }
 }
 
 bool Synth::stage_fir_multiband_coeff_entry(const uint32_t       taps_offs,
@@ -110,25 +134,12 @@ bool Synth::stage_fir_multiband_coeff_entry(const uint32_t       taps_offs,
         // and a lowpass edge at or above Nyquist is a pure high band, staged
         // with the lowpass cutoff 0 so no lowpass kernel runs (matching the
         // plain FIR's edge-off semantics exactly).
-        if (! (spread_hz > 0.0f && center_hz > 0.0f)) {
+        if (! fir_multiband_band_active(center_hz, spread_hz)) {
             continue;
         }
-        float highpass_hz = center_hz - spread_hz * 0.5f;
-        float lowpass_hz  = center_hz + spread_hz * 0.5f;
-        if (! (highpass_hz > 0.0f)) {
-            highpass_hz = 0.0f;
-        }
-        if (lowpass_hz > nyquist_hz) {
-            lowpass_hz = nyquist_hz;
-        }
-        // The modulated gain clamps to [0, 1]; a gain <= 0 or NaN stages a zero-gain band,
-        // mirroring the oscillator's band loop.
-        if (gain > 1.0f) {
-            gain = 1.0f;
-        }
-        if (! (gain > 0.0f)) {
-            gain = 0.0f;
-        }
+        float highpass_hz;
+        float lowpass_hz;
+        fir_multiband_band_edges(center_hz, spread_hz, &highpass_hz, &lowpass_hz);
         uint32_t highpass = cutoff_hz_to_int(highpass_hz);
         uint32_t lowpass;
         if (lowpass_hz >= nyquist_hz) {
@@ -140,12 +151,7 @@ bool Synth::stage_fir_multiband_coeff_entry(const uint32_t       taps_offs,
             // pair the way the oscillator's band loop does.
             oscillator_fir_band_guard(&lowpass, &highpass);
         }
-        FirEffectCoeffBand* out = &entry->bands[num_bands];
-        num_bands++;
-        out->highpass_cutoff_freq = highpass;
-        out->lowpass_cutoff_freq  = lowpass;
-        out->window_span          = fir_effective_span(slope_percent);
-        out->gain                 = gain;
+        stage_fir_coeff_band(entry, &num_bands, highpass, lowpass, slope_percent, gain);
     }
     if (num_bands == 0) {
         return false;

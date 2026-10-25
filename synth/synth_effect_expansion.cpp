@@ -203,53 +203,34 @@ bool Synth::preflight_effect_expansion(const InstrumentBank& bank, EffectExpansi
                     *error = "effect chain carries an invalid parameter binding";
                     return false;
                 }
-                if (param_binding.lfo_desc_id || param_binding.num_inputs) {
+                // A multiband's legacy bindings are unused (its bands carry the
+                // parameters; reference discovery ignores them), so they validate
+                // but consume no modulation capacity and build no nodes.
+                if (Synth::effect_reads_legacy_params(binding.type) &&
+                    (param_binding.lfo_desc_id || param_binding.num_inputs)) {
                     ++num_modulated;
                     plan.num_nodes += 1 + (param_binding.lfo_desc_id ? 1u : 0u);
                 }
             }
 
             // FIR band bindings ride the same acceptance and node-counting rules as the scalar
-            // params.  Dormant bands (beyond the count, or band 0's gain on the legacy single-band
-            // form, whose staging ignores it) validate but count nothing.  A fir_multiband slot
-            // reads the band array uniformly, so every band of its clamped count is active.
-            if (binding.type == EffectType::fir) {
+            // params.  Dormant bands (beyond the type's active count, or all of them on the
+            // legacy single-band form, whose staging ignores band 0's gain) validate but count
+            // nothing; remap and canonicalize zero them like the params tail.
+            if (is_fir_effect_type(binding.type)) {
                 if (binding.fir_bands.band_count > max_fir_effect_bands) {
-                    *error = "fir effect names too many bands";
+                    *error = binding.type == EffectType::fir ? "fir effect names too many bands"
+                                                             : "multi-band fir effect names too many bands";
                     return false;
                 }
-                // Active band params: band 0's gain plus each band 1..count-1's four values.
                 const uint32_t active_band_params =
-                    binding.fir_bands.band_count <= 1 ? 0 : 1 + 4 * (binding.fir_bands.band_count - 1);
-                // Dormant band bindings are ignored like the params tail; remap and
-                // canonicalize zero them.
+                    fir_active_band_param_count(binding.type, binding.fir_bands.band_count);
                 for (uint32_t band_param = 0; band_param < active_band_params; band_param++) {
                     const EffectParamBinding& band_binding = binding.fir_bands.bands[band_param];
                     if (! validate_effect_param_binding(band_binding, bank.lfos.num_allocated)) {
-                        *error = "fir effect carries an invalid band binding";
-                        return false;
-                    }
-                    if (band_binding.lfo_desc_id || band_binding.num_inputs) {
-                        ++num_modulated;
-                        plan.num_nodes += 1 + (band_binding.lfo_desc_id ? 1u : 0u);
-                    }
-                }
-            }
-            else if (binding.type == EffectType::fir_multiband) {
-                if (binding.fir_bands.band_count > max_fir_effect_bands) {
-                    *error = "multi-band fir effect names too many bands";
-                    return false;
-                }
-                // A zeroed count is the single-band marker the runtime reads as 1.
-                uint32_t band_count = binding.fir_bands.band_count;
-                if (band_count < 1) {
-                    band_count = 1;
-                }
-                const uint32_t active_band_params = 4 * band_count;
-                for (uint32_t band_param = 0; band_param < active_band_params; band_param++) {
-                    const EffectParamBinding& band_binding = binding.fir_bands.bands[band_param];
-                    if (! validate_effect_param_binding(band_binding, bank.lfos.num_allocated)) {
-                        *error = "multi-band fir effect carries an invalid band binding";
+                        *error = binding.type == EffectType::fir
+                                     ? "fir effect carries an invalid band binding"
+                                     : "multi-band fir effect carries an invalid band binding";
                         return false;
                     }
                     if (band_binding.lfo_desc_id || band_binding.num_inputs) {
@@ -435,6 +416,12 @@ void Synth::commit_effect_expansion(const InstrumentBank&      bank,
             const uint32_t state_bytes = get_effect_state_bytes(slot_binding.type);
             const uint32_t num_params  = get_effect_param_floats(slot_binding.type);
             for (uint32_t param = 0; param < num_params; param++) {
+                if (slot_binding.type == EffectType::fir_multiband) {
+                    // Unused legacy binding: keep the stored value, build no node.
+                    instance.params[param]       = slot_binding.bindings[param].base_value;
+                    instance.src_param_id[param] = 0;
+                    continue;
+                }
                 instance.src_param_id[param] = commit_effect_param(slot_binding.bindings[param],
                                                                    bank,
                                                                    writer,
@@ -443,37 +430,29 @@ void Synth::commit_effect_expansion(const InstrumentBank&      bank,
             }
 
             // FIR band values commit through the same wiring; the preflight counted a node per
-            // modulated active-band parameter.  A plain FIR commits only above the legacy
-            // single band; a fir_multiband reads the band array uniformly, so every band of
-            // its clamped count commits.
-            if (slot_binding.type == EffectType::fir && slot_binding.fir_bands.band_count > 1) {
+            // modulated active-band parameter.  The shared count drives one commit loop for
+            // both FIR types: a plain FIR commits only above the legacy single band (its
+            // legacy single-band instance block stays zeroed), a fir_multiband reads the
+            // band array uniformly, so every band of its clamped count commits.
+            if (is_fir_effect_type(slot_binding.type)) {
                 assert(slot_binding.fir_bands.band_count <= max_fir_effect_bands);
-                instance.fir_bands.band_count     = slot_binding.fir_bands.band_count;
-                const uint32_t active_band_params = 1 + 4 * (slot_binding.fir_bands.band_count - 1);
-                for (uint32_t band_param = 0; band_param < active_band_params; band_param++) {
-                    instance.fir_bands.src_param_id[band_param] =
-                        commit_effect_param(slot_binding.fir_bands.bands[band_param],
-                                            bank,
-                                            writer,
-                                            midi_channel,
-                                            &instance.fir_bands.params[band_param]);
-                }
-            }
-            else if (slot_binding.type == EffectType::fir_multiband) {
-                uint32_t band_count = slot_binding.fir_bands.band_count;
-                if (band_count < 1) {
-                    band_count = 1; // the zeroed count is the single-band marker
-                }
-                assert(band_count <= max_fir_effect_bands);
-                instance.fir_bands.band_count     = static_cast<uint8_t>(band_count);
-                const uint32_t active_band_params = 4 * band_count;
-                for (uint32_t band_param = 0; band_param < active_band_params; band_param++) {
-                    instance.fir_bands.src_param_id[band_param] =
-                        commit_effect_param(slot_binding.fir_bands.bands[band_param],
-                                            bank,
-                                            writer,
-                                            midi_channel,
-                                            &instance.fir_bands.params[band_param]);
+                const uint32_t active_band_params =
+                    fir_active_band_param_count(slot_binding.type, slot_binding.fir_bands.band_count);
+                if (active_band_params) {
+                    // The zeroed count is the multiband's single-band marker; the plain
+                    // fir only reaches this write above the legacy single band.
+                    instance.fir_bands.band_count = static_cast<uint8_t>(
+                        slot_binding.type == EffectType::fir_multiband && slot_binding.fir_bands.band_count < 1
+                            ? 1
+                            : slot_binding.fir_bands.band_count);
+                    for (uint32_t band_param = 0; band_param < active_band_params; band_param++) {
+                        instance.fir_bands.src_param_id[band_param] =
+                            commit_effect_param(slot_binding.fir_bands.bands[band_param],
+                                                bank,
+                                                writer,
+                                                midi_channel,
+                                                &instance.fir_bands.params[band_param]);
+                    }
                 }
             }
 

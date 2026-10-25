@@ -406,7 +406,7 @@ struct ShaderParams {
         uint32_t type;
         uint32_t sound_offs;
         uint32_t state_offs;
-        uint32_t pad;
+        uint32_t bypass;
         float    params[Synth::max_effect_param_floats];
     };
 
@@ -1821,6 +1821,10 @@ struct EffectTarget {
 // Runs the targets as dependency-depth waves: wave d = the d-th enabled effect of
 // every target, packed into one dispatch; a barrier precedes each wave.  Chains are
 // sequential per buffer, but the buffers are distinct, so one wave has no conflicts.
+// Defined below apply_effects; the dispatch needs a FIR effect's staging
+// result to drive the shader's bypass flag.
+static bool stage_effect_fir_entry(const EffectInstance& instance, Synth::FirEffectCoeffEntry* entry);
+
 static void apply_effects(const EffectTarget* targets, uint32_t num_targets)
 {
     for (uint32_t depth = 0;; depth++) {
@@ -1860,7 +1864,16 @@ static void apply_effects(const EffectTarget* targets, uint32_t num_targets)
             param.type       = static_cast<uint32_t>(wave_instances[wave_idx]->type);
             param.sound_offs = wave_sound_offs[wave_idx];
             param.state_offs = wave_instances[wave_idx]->state_offs / 4;
-            param.pad        = 0;
+            param.bypass     = 0;
+            // A multiband FIR whose coefficient entry failed to stage (all
+            // bands inactive) dispatches as pass-through instead of
+            // convolving with a stale kernel; the shader keeps the history
+            // advancing.  The plain FIR never reads the flag.
+            Synth::FirEffectCoeffEntry fir_entry;
+            if (wave_instances[wave_idx]->type == Synth::EffectType::fir_multiband &&
+                ! stage_effect_fir_entry(*wave_instances[wave_idx], &fir_entry)) {
+                param.bypass = 1;
+            }
             memcpy(param.params, wave_instances[wave_idx]->params, sizeof(param.params));
         }
 
@@ -1885,15 +1898,6 @@ static void apply_effects(const EffectTarget* targets, uint32_t num_targets)
 // FIR coefficient staging and snapshot live in the file's anonymous
 // namespace above; compute_fir_coefficients builds, compares and dispatches
 // the block.
-
-// The two FIR effect types share the coefficient-staging machinery; the band
-// array's index meaning differs (the plain FIR's dormant legacy order vs the
-// multiband's uniform center/spread/gain/slope), so every type gate and the
-// staging dispatch key on this one predicate.
-static bool is_fir_effect_type(const Synth::EffectType type)
-{
-    return type == Synth::EffectType::fir || type == Synth::EffectType::fir_multiband;
-}
 
 // Copies each modulated effect param's current graph value into the param float the effect shader
 // reads (and compute_fir_coefficients reads for the FIR effect).  Unmodulated params (src_param_id

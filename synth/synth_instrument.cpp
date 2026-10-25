@@ -136,11 +136,7 @@ void Synth::remap_effect_chain(const EffectChainBinding& src, const uint16_t* lf
             band_count = max_fir_effect_bands;
         // A fir_multiband slot reads the band array uniformly, so every band of
         // its clamped count is active (a zeroed count is the single-band marker).
-        const uint32_t multiband_band_params =
-            slot.type == EffectType::fir_multiband ? 4 * (band_count < 1 ? 1 : band_count) : 0;
-        const uint32_t active_band_params = multiband_band_params                            ? multiband_band_params
-                                            : slot.type == EffectType::fir && band_count > 1 ? 1 + 4 * (band_count - 1)
-                                                                                             : 0;
+        const uint32_t active_band_params = fir_active_band_param_count(slot.type, band_count);
         for (uint32_t band_param = 0; band_param < active_band_params; band_param++) {
             EffectParamBinding& band_binding = slot.fir_bands.bands[band_param];
             if (band_binding.lfo_desc_id) {

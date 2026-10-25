@@ -597,24 +597,37 @@ void Synth::oscillator_fir_band_guard(uint32_t* lowpass_cutoff_freq, uint32_t* h
     }
 }
 
-// Rounds a cutoff in Hz to the int the coeff shader wants; <= 0 disables the edge, else
-// clamped to [1, Nyquist - 1].  Shared by the oscillator and the effect FIR staging.
-uint32_t Synth::cutoff_hz_to_int(const float value)
+// The one cutoff range: positive values clamp to [1, Nyquist - 1] Hz; nonpositive
+// values and NaN pass through unchanged (they mean "edge off").
+float Synth::clamp_cutoff_hz(const float value)
 {
     if (! (value > 0.0f)) {
-        return 0;
+        return value;
     }
 
-    constexpr uint32_t min_cutoff_hz = 1;
+    constexpr float min_cutoff_hz = 1.0f;
 
-    if (value <= static_cast<float>(min_cutoff_hz)) {
+    if (value <= min_cutoff_hz) {
         return min_cutoff_hz;
     }
     if (value >= static_cast<float>(Synth::max_cutoff_hz)) {
-        return Synth::max_cutoff_hz;
+        return static_cast<float>(Synth::max_cutoff_hz);
     }
 
-    return static_cast<uint32_t>(value + 0.5f);
+    return value;
+}
+
+// Rounds a cutoff in Hz to the int the coeff shader wants; <= 0 disables the edge, else
+// clamped by clamp_cutoff_hz.  Shared by the oscillator and the effect FIR staging.
+uint32_t Synth::cutoff_hz_to_int(const float value)
+{
+    const float clamped = clamp_cutoff_hz(value);
+
+    if (! (clamped > 0.0f)) {
+        return 0;
+    }
+
+    return static_cast<uint32_t>(clamped + 0.5f);
 }
 
 uint32_t Synth::fir_effective_span(const float slope_percent)

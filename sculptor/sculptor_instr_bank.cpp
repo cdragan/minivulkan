@@ -236,48 +236,35 @@ static bool validate_effect_chain(const Synth::EffectChainBinding& chain,
                 return false;
             }
 
-            if (binding.lfo_desc_id || binding.num_inputs) {
+            // A multiband's legacy bindings are unused: validated above, never
+            // counted against the modulation capacity (matches expansion).
+            if (Synth::effect_reads_legacy_params(effect.type) && (binding.lfo_desc_id || binding.num_inputs)) {
                 (*num_modulated)++;
             }
         }
 
         // FIR band bindings ride the same acceptance and node-counting rules as
         // the scalar params, so load-time and expansion-time acceptance stay
-        // identical.  Dormant bands (beyond the count, or band 0's gain on the
-        // legacy single-band form, whose staging ignores it) validate but count
-        // nothing.  A fir_multiband slot reads the band array uniformly, so every
-        // band of its clamped count is active.
-        if (effect.type == Synth::EffectType::fir) {
+        // identical.  Only the active band bindings count (the plain FIR's
+        // band 0 gain on the legacy single-band form, whose staging ignores
+        // it, and bands beyond the count count nothing).  A deliberate policy
+        // difference: the plain FIR's dormant seam can carry authored bindings,
+        // so it validates all of them; a multiband's dormant tail is always
+        // zeroed, so it validates only its active bands.
+        if (Synth::is_fir_effect_type(effect.type)) {
             if (effect.fir_bands.band_count > Synth::max_fir_effect_bands) {
                 return false;
             }
             const uint32_t active_band_params =
-                effect.fir_bands.band_count <= 1 ? 0 : 1 + 4 * (effect.fir_bands.band_count - 1);
-            for (uint32_t band_param = 0; band_param < Synth::num_fir_effect_band_params; band_param++) {
+                Synth::fir_active_band_param_count(effect.type, effect.fir_bands.band_count);
+            const uint32_t validated_band_params =
+                Synth::fir_reference_band_param_count(effect.type, effect.fir_bands.band_count);
+            for (uint32_t band_param = 0; band_param < validated_band_params; band_param++) {
                 const Synth::EffectParamBinding& band_binding = effect.fir_bands.bands[band_param];
                 if (! validate_effect_param_binding(band_binding, num_lfos)) {
                     return false;
                 }
                 if (band_param < active_band_params && (band_binding.lfo_desc_id || band_binding.num_inputs)) {
-                    (*num_modulated)++;
-                }
-            }
-        }
-        else if (effect.type == Synth::EffectType::fir_multiband) {
-            if (effect.fir_bands.band_count > Synth::max_fir_effect_bands) {
-                return false;
-            }
-            // A zeroed count is the single-band marker the runtime reads as 1.
-            uint32_t band_count = effect.fir_bands.band_count;
-            if (band_count < 1) {
-                band_count = 1;
-            }
-            for (uint32_t band_param = 0; band_param < 4 * band_count; band_param++) {
-                const Synth::EffectParamBinding& band_binding = effect.fir_bands.bands[band_param];
-                if (! validate_effect_param_binding(band_binding, num_lfos)) {
-                    return false;
-                }
-                if (band_binding.lfo_desc_id || band_binding.num_inputs) {
                     (*num_modulated)++;
                 }
             }
@@ -723,14 +710,31 @@ void Synth::reclaim_unused_slots(Synth::InstrumentEditorBank* editor_bank, uint1
 
         for (uint32_t slot = 0; slot < binding.num_effects; slot++) {
 
-            const uint32_t num_params = get_effect_param_floats(binding.effects[slot].type);
+            const Synth::EffectSlotBinding& effect = binding.effects[slot];
+
+            const uint32_t num_params =
+                Synth::effect_reads_legacy_params(effect.type) ? get_effect_param_floats(effect.type) : 0;
 
             for (uint32_t param = 0; param < num_params; param++) {
 
-                const uint16_t lfo_id = binding.effects[slot].bindings[param].lfo_desc_id;
+                const uint16_t lfo_id = effect.bindings[param].lfo_desc_id;
 
                 if (lfo_id && lfo_id <= max_lfos)
                     keep_lfo[lfo_id - 1] = true;
+            }
+
+            // FIR band bindings root with the validated reference bound.
+            if (Synth::is_fir_effect_type(effect.type)) {
+                const uint32_t band_params =
+                    Synth::fir_reference_band_param_count(effect.type, effect.fir_bands.band_count);
+
+                for (uint32_t band_param = 0; band_param < band_params; band_param++) {
+
+                    const uint16_t lfo_id = effect.fir_bands.bands[band_param].lfo_desc_id;
+
+                    if (lfo_id && lfo_id <= max_lfos)
+                        keep_lfo[lfo_id - 1] = true;
+                }
             }
         }
     }
@@ -803,6 +807,18 @@ void Synth::reclaim_unused_slots(Synth::InstrumentEditorBank* editor_bank, uint1
 
                 if (p->lfo_desc_id)
                     p->lfo_desc_id = lfo_ids[p->lfo_desc_id - 1];
+            }
+
+            // Band-array bindings follow the same compaction; unkept (dormant
+            // or unused) references map to 0.
+            if (Synth::is_fir_effect_type(binding->effects[slot].type)) {
+                for (uint32_t band_param = 0; band_param < Synth::num_fir_effect_band_params; band_param++) {
+
+                    Synth::EffectParamBinding* const p = &binding->effects[slot].fir_bands.bands[band_param];
+
+                    if (p->lfo_desc_id && p->lfo_desc_id <= max_lfos)
+                        p->lfo_desc_id = lfo_ids[p->lfo_desc_id - 1];
+                }
             }
         }
     }

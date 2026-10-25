@@ -176,7 +176,8 @@ struct EffectParamBinding {
 // its center/spread pair.  Every band parameter reuses the effect modulation
 // machinery (LFO + channel MIDI, no envelopes).
 struct FirEffectBands {
-    uint8_t            band_count; // Active bands 1..max_fir_effect_bands; 0 = the legacy single band
+    uint8_t band_count; // Active bands 1..max_fir_effect_bands; 0 = the single band (the plain FIR's legacy marker,
+                        // the multiband's normal shape)
     EffectParamBinding bands[num_fir_effect_band_params];
 };
 

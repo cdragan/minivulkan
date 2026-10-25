@@ -443,6 +443,12 @@ constexpr uint32_t fx_param_src_dot(uint32_t param, uint32_t input)
 // legacy parameter rows ahead of the region (the byte-identical legacy
 // projection), while the multiband node starts its tree at Band 1 right
 // after the Enabled row and projects no legacy parameter rows.
+//
+// Narrowed invariant: the plain FIR's dormant seam helpers below use the
+// uniform 43-slot band blocks on both types, so the plain FIR's dormant
+// slot addresses intentionally differ from the pre-multiband baseline.
+// Byte-identity applies to the DSP output, the JSON codec and the visible
+// 33-slot projection, not to invisible dormant helper arithmetic.
 constexpr uint32_t fx_band_first_slot = fx_param_row(3);
 
 // First slot of the band region on `type`'s projected node.

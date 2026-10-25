@@ -262,6 +262,10 @@ uint32_t fir_effective_span(float slope_percent);
 // [1, Nyquist - 1].  Shared by the oscillator and the effect FIR staging.
 uint32_t cutoff_hz_to_int(float value);
 
+// The float form of the same range: positive values clamp to [1, max_cutoff_hz];
+// nonpositive values and NaN pass through (edge off).
+float clamp_cutoff_hz(float value);
+
 // What to do with the cached FIR coefficient param block this step.
 enum FirCoeffCacheAction {
     fir_coeff_skip,       // The previously dispatched coefficients still match: no dispatch.
