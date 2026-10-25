@@ -40,6 +40,8 @@ enum ModTarget : uint8_t {
     mod_fir_band3_spread,
     mod_fir_band3_gain,
     mod_fir_band3_slope,
+    mod_string_damping,
+    mod_string_release_damping,
     num_mod_targets
 };
 
@@ -128,6 +130,8 @@ struct Oscillator {
     FilterType    fir_type          = fir_off;
     uint8_t       fir_band_count    = 1;    // Bandpass bands 1..4; band 0 reuses mod_fir_spread/slope.
     TargetBinding targets[num_mod_targets]; // One binding per modulated quantity (volume/panning/etc.)
+    // String wave pick position 0..1 (0 = no comb).  A plain scalar, not a mod target.
+    float string_pick = 0.0f;
 };
 
 struct Instrument {

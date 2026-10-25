@@ -282,9 +282,14 @@ static bool validate_oscillator_body(const Synth::Oscillator& osc)
         return false;
     }
     for (uint32_t w = 0; w < 2; w++) {
-        if (static_cast<uint32_t>(osc.osc_type[w]) > static_cast<uint32_t>(Synth::WaveType::pad_wave)) {
+        if (static_cast<uint32_t>(osc.osc_type[w]) >
+            static_cast<uint32_t>(w == 0 ? Synth::WaveType::string_wave : Synth::WaveType::pad_wave)) {
             return false;
         }
+    }
+    // Pick position is a plain scalar in [0,1]; the comparison also refuses NaN.
+    if (! (osc.string_pick >= 0.0f && osc.string_pick <= 1.0f)) {
+        return false;
     }
     for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
         const Synth::TargetBinding& binding = osc.targets[target];

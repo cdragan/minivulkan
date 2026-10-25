@@ -295,8 +295,8 @@ constexpr size_t editor_resident_state_bytes =
     4 * Synth::instrument_graph_layout_capacity * sizeof(Synth::InstrumentGraphLayout) +
     4096; // remaining editor scalar flags, constants and alignment
 static_assert(editor_resident_state_bytes <=
-              128 * 1024 * 1024); // per-bank driver: the oscillator graph pre-provisions twenty-six
-                                  // 12-slot target blocks per node (max_node_slots 356), which
+              128 * 1024 * 1024); // per-bank driver: the oscillator graph pre-provisions twenty-eight
+                                  // 12-slot target blocks per node (max_node_slots 357), which
                                   // grows sizeof(Graph); the resident total stays below the
                                   // 128 MiB assert.  The per-zone source rows contribute 20 live
                                   // InstrumentEditorBank copies x max_channels x
@@ -589,7 +589,8 @@ static void osc_drop_menu_entry(void* user_data)
             continue;
         }
         for (uint32_t t = 0; t < Synth::num_mod_targets; ++t) {
-            if (Sculptor::osc_target_row_slot[t] != anchor.slot_idx) {
+            if (Sculptor::osc_target_row_slot[t] != anchor.slot_idx ||
+                ! Sculptor::osc_node_target_row_active(osc_graph.node(node), t)) {
                 continue;
             }
             ImGui::BeginDisabled(Sculptor::connection_into(osc_graph, node, Sculptor::osc_target_env_dot(t)) !=

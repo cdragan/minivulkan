@@ -1024,13 +1024,13 @@ static void canvas_menu_adds_node(void* user_data)
     static_cast<Graph*>(user_data)->create_node("canvas", vmath::vec2(0.0f, 0.0f));
 }
 
-// Connection capacity covers the editor's worst-case oscillator graph (1099
+// Connection capacity covers the editor's worst-case oscillator graph (1183
 // reachable edges at seven layers with per-target blocks, the bound pinned
 // by the sculptor_osc_graph.h static_assert); the pool must
 // hold every reachable state, not just the common one.
-static void test_connection_capacity_raised_to_1152()
+static void test_connection_capacity_reaches_max()
 {
-    TEST(max_connections == 1152);
+    TEST(max_connections == 1236);
 
     Graph& g = reset_unit_graph(0);
     g.clear();
@@ -1040,7 +1040,7 @@ static void test_connection_capacity_raised_to_1152()
     out_slot.kind = SlotKind::output;
     TEST(g.add_slot(source, out_slot) != Sculptor::pool_no_slot);
 
-    // 1152 single-connection inputs across sink nodes (the full per-node
+    // max_connections single-connection inputs across sink nodes (the full per-node
     // slot pool).
     Slot in_slot       = {};
     in_slot.kind       = SlotKind::input;
@@ -1052,12 +1052,12 @@ static void test_connection_capacity_raised_to_1152()
             TEST(g.add_slot(sinks[sink], in_slot) != Sculptor::pool_no_slot);
         }
     }
-    for (uint32_t i = 0; i < 1152; ++i) {
+    for (uint32_t i = 0; i < 1236; ++i) {
         const EndPoint out = { source, 0 };
         const EndPoint in  = { sinks[i / max_node_slots], i % max_node_slots };
         TEST(g.add_connection(out, in) != Sculptor::pool_no_slot);
     }
-    TEST(g.connection_count() == 1152);
+    TEST(g.connection_count() == 1236);
 }
 
 // Render harness shared by the renderer-side tests: one full window frame
@@ -2970,7 +2970,7 @@ int main()
     test_delete_node_frees_index_and_drops_connections();
     test_add_delete_connection_basics();
     test_clear_resets_popup_and_error();
-    test_connection_capacity_raised_to_1152();
+    test_connection_capacity_reaches_max();
     test_slot_color_callback_api();
     test_eventless_slot_value_write();
     test_eventless_slot_input_write();

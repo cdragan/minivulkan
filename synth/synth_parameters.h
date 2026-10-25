@@ -33,7 +33,9 @@ enum class WaveType : uint8_t {
     // White noise
     noise_wave,
     // Pad, live additive harmonic sum with slow per-harmonic wander
-    pad_wave
+    pad_wave,
+    // String, plucked-string excitation ring (wave A only)
+    string_wave,
 };
 
 struct LFODescriptor {

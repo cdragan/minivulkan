@@ -305,8 +305,8 @@ namespace {
 // Shared enum spelling: one name per value, used by both encoder and decoder
 // ---------------------------------------------------------------------------
 
-constexpr uint32_t    num_waves             = 6;
-constexpr const char* wave_names[num_waves] = { "none", "sine", "sawtooth", "pulse", "noise", "pad" };
+constexpr uint32_t    num_waves             = 7;
+constexpr const char* wave_names[num_waves] = { "none", "sine", "sawtooth", "pulse", "noise", "pad", "string" };
 
 constexpr uint32_t    num_osc_modes                 = 4;
 constexpr const char* osc_mode_names[num_osc_modes] = { "blend", "fm", "sync", "ring_mod" };
@@ -330,15 +330,16 @@ constexpr uint32_t    num_param_kinds                   = 4;
 constexpr const char* param_kind_names[num_param_kinds] = { "external", "envelope", "lfo", "plain" };
 
 constexpr const char* mod_target_names[Synth::num_mod_targets] = {
-    "volume",           "pitch",           "panning",          "duty_a",           "duty_b",
-    "osc_mix",          "fm_index",        "fir_pitch_spread", "fm_ratio",         "pad_tone_a",
-    "pad_tone_b",       "fir_slope",       "fir_band0_offset", "fir_band0_gain",   "fir_band1_offset",
-    "fir_band1_spread", "fir_band1_gain",  "fir_band1_slope",  "fir_band2_offset", "fir_band2_spread",
-    "fir_band2_gain",   "fir_band2_slope", "fir_band3_offset", "fir_band3_spread", "fir_band3_gain",
-    "fir_band3_slope"
+    "volume",           "pitch",           "panning",          "duty_a",
+    "duty_b",           "osc_mix",         "fm_index",         "fir_pitch_spread",
+    "fm_ratio",         "pad_tone_a",      "pad_tone_b",       "fir_slope",
+    "fir_band0_offset", "fir_band0_gain",  "fir_band1_offset", "fir_band1_spread",
+    "fir_band1_gain",   "fir_band1_slope", "fir_band2_offset", "fir_band2_spread",
+    "fir_band2_gain",   "fir_band2_slope", "fir_band3_offset", "fir_band3_spread",
+    "fir_band3_gain",   "fir_band3_slope", "string_damping",   "string_release_damping"
 };
 
-static_assert(static_cast<uint32_t>(Synth::WaveType::pad_wave) == num_waves - 1);
+static_assert(static_cast<uint32_t>(Synth::WaveType::string_wave) == num_waves - 1);
 static_assert(static_cast<uint32_t>(Synth::ModSource::cc) == num_mod_sources - 1);
 static_assert(static_cast<uint32_t>(Synth::SourceOp::multiply) == num_source_ops - 1);
 static_assert(static_cast<uint32_t>(Synth::EffectType::fir) == Synth::num_effect_types - 2);
@@ -488,16 +489,6 @@ static bool routing_is_default(const Synth::TargetBinding& routing)
     return routing.base_value == 0.0f && routing.num_inputs == 0;
 }
 
-// The band family a target belongs to: the legacy spread/slope pair and the
-// band-0 offset/gain keys are band 0; the appended keys are bands 1..3.
-static uint32_t band_of_target(uint32_t t)
-{
-    if (t <= static_cast<uint32_t>(Synth::mod_fir_band0_gain)) {
-        return 0;
-    }
-    return 1u + (t - static_cast<uint32_t>(Synth::mod_fir_band1_offset)) / 4u;
-}
-
 static void enc_mod_input(Out& o, const Synth::ModInput& in)
 {
     o.ch('{');
@@ -553,6 +544,7 @@ static void enc_oscillator(Out& o, const Synth::Oscillator& osc)
     key_enum(o, "wave_b", wave_names, num_waves, static_cast<uint32_t>(osc.osc_type[1]));
     key_enum(o, "mode", osc_mode_names, num_osc_modes, osc.osc_mode);
     key_float_nonzero(o, "mod_ratio", osc.mod_ratio);
+    key_float_nonzero(o, "string_pick", osc.string_pick);
     key_float_nonzero(o, "octave_offset", static_cast<float>(osc.octave_offset));
 
     // The default slope omits the key, matching the nonzero-key omission
@@ -573,7 +565,8 @@ static void enc_oscillator(Out& o, const Synth::Oscillator& osc)
     o.ch('{');
     for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
         if (gen_is_default(osc.targets[t]) ||
-            band_of_target(t) >= (osc.fir_band_count < 1u ? 1u : osc.fir_band_count)) {
+            Sculptor::osc_target_band_index(t) >=
+                static_cast<int32_t>(osc.fir_band_count < 1u ? 1u : osc.fir_band_count)) {
             continue; // default generator, or a band beyond the active count
         }
         o.sep();
@@ -600,7 +593,8 @@ static void enc_oscillator(Out& o, const Synth::Oscillator& osc)
                                t == static_cast<uint32_t>(Synth::mod_fir_band1_gain) ||
                                t == static_cast<uint32_t>(Synth::mod_fir_band2_gain) ||
                                t == static_cast<uint32_t>(Synth::mod_fir_band3_gain);
-        if (band_of_target(t) >= (osc.fir_band_count < 1u ? 1u : osc.fir_band_count)) {
+        if (Sculptor::osc_target_band_index(t) >=
+            static_cast<int32_t>(osc.fir_band_count < 1u ? 1u : osc.fir_band_count)) {
             continue; // a band beyond the active count never leaks into the document
         }
         // A base-0 unwired gain in a multi-band bandpass layer encodes as
@@ -2135,7 +2129,9 @@ static void decode_routing(Walker&               w,
             // offset/spread/gain bases carry their osc_target_view bounds
             // (a zero gain base stays decodable as an inactive band); every
             // other target keeps the generic free-level parsing.
-            if (target == Synth::mod_fir_spread)
+            if (target == Synth::mod_string_damping || target == Synth::mod_string_release_damping)
+                want_bounded_real(w, val_idx, 0.0, 1.0, &routing.base_value);
+            else if (target == Synth::mod_fir_spread)
                 want_bounded_real(w,
                                   val_idx,
                                   0.0,
@@ -2270,12 +2266,16 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
         }
         else if (key_eq(w, key_idx, "wave_b")) {
             want_enum(w, val_idx, wave_names, num_waves, &value);
+            if (value > static_cast<uint32_t>(Synth::WaveType::pad_wave))
+                w.failed = true; // string is wave A only
             osc.osc_type[1] = static_cast<Synth::WaveType>(value);
         }
         else if (key_eq(w, key_idx, "mode")) {
             want_enum(w, val_idx, osc_mode_names, num_osc_modes, &value);
             osc.osc_mode = static_cast<Synth::OscMode>(value);
         }
+        else if (key_eq(w, key_idx, "string_pick"))
+            want_bounded_real(w, val_idx, 0.0, 1.0, &osc.string_pick);
         else if (key_eq(w, key_idx, "mod_ratio"))
             want_float(w, val_idx, &osc.mod_ratio);
         else if (key_eq(w, key_idx, "pitch_offset"))
@@ -3802,6 +3802,7 @@ static void canonicalize_editor_bank(Synth::InstrumentEditorBank* editor_bank)
         for (uint32_t l = 0; l < instr.layer_count; l++) {
             Synth::Oscillator& osc = instr.layers[l];
             osc.mod_ratio          = canonical_float(osc.mod_ratio);
+            osc.string_pick        = canonical_float(osc.string_pick);
             for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
                 Synth::TargetBinding& binding = osc.targets[t];
                 binding.lfo_depth             = canonical_float(binding.lfo_depth);
@@ -4337,6 +4338,7 @@ static void decode_layer_doc(Walker&                     w,
     uint32_t                mode                                = 0;
     float                   mod_ratio                           = 1.0f;
     bool                    fm_ratio_set                        = false;
+    float                   string_pick                         = 0.0f;
     bool                    doc_slope_routed                    = false;
     uint32_t                doc_band_count                      = 1;
     bool                    doc_touched[Synth::num_mod_targets] = {};
@@ -4349,8 +4351,13 @@ static void decode_layer_doc(Walker&                     w,
             want_enum(w, val_idx, wave_names, num_waves, &wave_a);
             wave_a_set = true;
         }
-        else if (key_eq(w, key_idx, "wave_b"))
+        else if (key_eq(w, key_idx, "wave_b")) {
             want_enum(w, val_idx, wave_names, num_waves, &wave_b);
+            if (wave_b > static_cast<uint32_t>(Synth::WaveType::pad_wave))
+                w.failed = true; // string is wave A only
+        }
+        else if (key_eq(w, key_idx, "string_pick"))
+            want_bounded_real(w, val_idx, 0.0, 1.0, &string_pick);
         else if (key_eq(w, key_idx, "mode"))
             want_enum(w, val_idx, osc_mode_names, num_osc_modes, &mode);
         else if (key_eq(w, key_idx, "mod_ratio"))
@@ -4451,6 +4458,7 @@ static void decode_layer_doc(Walker&                     w,
     osc.osc_type[1] = static_cast<Synth::WaveType>(wave_b);
     osc.osc_mode    = static_cast<Synth::OscMode>(mode);
     osc.mod_ratio   = mod_ratio;
+    osc.string_pick = string_pick;
     // Legacy documents state only the scalar ratio; when the document has
     // no fm_ratio block the target inherits it, clamped to the slider
     // range when nonzero (0 stays 0).
@@ -5136,6 +5144,7 @@ static uint32_t encode_instrument_json_for_domain(char*                         
         // Omitted ratios decode as one, including dormant blend ratios.
         o.key("mod_ratio");
         o.float_value(osc.mod_ratio);
+        key_float_nonzero(o, "string_pick", osc.string_pick);
         o.key("octave_offset");
         o.float_value(static_cast<float>(osc.octave_offset));
         // The FIR Slope target block shares the scalar's key, so the two never appear
@@ -5162,8 +5171,16 @@ static uint32_t encode_instrument_json_for_domain(char*                         
             const Synth::ModTarget        mod_target = static_cast<Synth::ModTarget>(target);
             const Sculptor::OscTargetView view       = Sculptor::osc_target_view(mod_target);
 
-            if (band_of_target(target) >= (osc.fir_band_count < 1u ? 1u : osc.fir_band_count)) {
+            if (Sculptor::osc_target_band_index(target) >=
+                static_cast<int32_t>(osc.fir_band_count < 1u ? 1u : osc.fir_band_count)) {
                 continue; // a band beyond the active count never leaks into the document
+            }
+
+            if ((mod_target == Synth::mod_string_damping || mod_target == Synth::mod_string_release_damping) &&
+
+                routing_is_default(osc.targets[target]) && gen_is_default(osc.targets[target])) {
+
+                continue; // an unused string target states nothing, so old documents re-encode unchanged
             }
 
             if (mod_target == Synth::mod_fir_slope && ! slope_routed) {

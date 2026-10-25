@@ -111,7 +111,7 @@ namespace {
 constexpr uint32_t max_portable_records =
     Synth::graph_canonical_node_count + 2u * Synth::max_layers * Synth::num_mod_targets;
 static_assert(max_portable_records == Synth::instrument_graph_layout_capacity);
-static_assert(max_portable_records == 373, "9 canonical + 182 envelopes + 182 LFOs");
+static_assert(max_portable_records == 401, "9 canonical + 196 envelopes + 196 LFOs");
 constexpr uint32_t clipboard_token_bound = 32768;
 constexpr uint32_t fake_region_base      = 8192;
 
@@ -167,38 +167,73 @@ constexpr uint32_t t7_rate_field      = 5;
 // The value row slot of each ModTarget on an oscillator node; its
 // 12-slot block starts directly after it.
 constexpr uint32_t t7_target_row_slots[Synth::num_mod_targets] = {
-    95,  // volume
-    121, // pitch
-    108, // pan
+    96,  // volume
+    122, // pitch
+    109, // pan
     2,   // duty a
-    29,  // duty b
-    56,  // waveform mix
-    69,  // fm depth
-    152, // fir pitch spread
-    82,  // fm ratio
+    30,  // duty b
+    57,  // waveform mix
+    70,  // fm depth
+    153, // fir pitch spread
+    83,  // fm ratio
     15,  // pad tone a
-    42,  // pad tone b
-    178, // fir slope
-    139, // fir band 0 offset
-    165, // fir band 0 gain
-    194, // fir band 1 offset
-    207, // fir band 1 spread
-    220, // fir band 1 gain
-    233, // fir band 1 slope
-    249, // fir band 2 offset
-    262, // fir band 2 spread
-    275, // fir band 2 gain
-    288, // fir band 2 slope
-    304, // fir band 3 offset
-    317, // fir band 3 spread
-    330, // fir band 3 gain
-    343, // fir band 3 slope
+    43,  // pad tone b
+    179, // fir slope
+    140, // fir band 0 offset
+    166, // fir band 0 gain
+    195, // fir band 1 offset
+    208, // fir band 1 spread
+    221, // fir band 1 gain
+    234, // fir band 1 slope
+    250, // fir band 2 offset
+    263, // fir band 2 spread
+    276, // fir band 2 gain
+    289, // fir band 2 slope
+    305, // fir band 3 offset
+    318, // fir band 3 spread
+    331, // fir band 3 gain
+    344, // fir band 3 slope
+    2,   // damping
+    15,  // release damping
 };
+
+// True when target t has a projected row on this layer: the duty a / pad tone a
+// rows carry Damping / Release damping under the string wave, so the other
+// of each pair has no row (its binding is stored but not projected).
+static bool t7_target_has_row(const Synth::Oscillator& osc, uint32_t t)
+{
+    const bool string_wave = osc.osc_type[0] == Synth::WaveType::string_wave;
+    const bool damping     = t == Synth::mod_string_damping || t == Synth::mod_string_release_damping;
+    const bool shared      = t == Synth::mod_duty0 || t == Synth::mod_pad_tilt0;
+    return string_wave ? ! shared : ! damping;
+}
+
 // Shared graph and mapping for the direct-row blocks; every block
 // re-projects, which rebuilds both from scratch.
 const std::unique_ptr<Sculptor::Graph> t7_graph_storage = std::make_unique<Sculptor::Graph>();
 Sculptor::Graph&                       t7_graph         = *t7_graph_storage;
 Sculptor::OscGraphMapping              t7_mapping;
+constexpr float                        string_fs        = 44100.0f;
+constexpr uint32_t                     string_ring_size = 2040;
+
+struct StringScalars {
+    float    c;
+    float    a;
+    float    g;
+    float    gr;
+    uint32_t n;
+    bool     silent;
+};
+
+struct StringMirror {
+    bool     tagged; // Models shader header words 5-6: set when the first in-range pass inits
+    uint32_t tag;
+    float    ring[string_ring_size];
+    uint32_t wr;
+    float    t1;
+    float    u1;
+    float    e;
+};
 } // namespace
 
 // Every output of one clipboard decode, so a rejected document can be shown to
@@ -277,7 +312,8 @@ static uint32_t find_osc_graph_connection(const Sculptor::Graph& graph, const Sc
 // the legacy spread/slope targets 7 and 11).
 static int32_t osc_target_band_of_target(const uint32_t target)
 {
-    if (target >= 14u) {
+    // Targets 26/27 are string rows, never bands.
+    if (target >= 14u && target <= 25u) {
         return static_cast<int32_t>((target - 14u) / 4u) + 1;
     }
     if (target == 7u || target == 11u || target == 12u || target == 13u) {
@@ -584,6 +620,8 @@ static void build_osc_graph_max_fixture(Synth::InstrumentBank* bank,
         osc.osc_type[1]        = static_cast<Synth::WaveType>(1 + ((layer + 2) % 4));
         osc.osc_mode           = static_cast<Synth::OscMode>(layer % 3);
         osc.mod_ratio          = 1.0f + 0.25f * static_cast<float>(layer);
+        // Layer 2 carries a nonzero pick so the Pick position row round-trips.
+        osc.string_pick = layer == 2 ? 0.25f : 0.0f;
         // Four bands: every band block projects and round-trips.
         osc.fir_band_count = 4;
         for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
@@ -644,6 +682,9 @@ static void build_osc_graph_max_fixture(Synth::InstrumentBank* bank,
             // formula would produce fractional bases, so those bindings stay
             // zeroed here (the scalar / row carries the value).
             continue;
+        }
+        if (t == Synth::mod_string_damping || t == Synth::mod_string_release_damping) {
+            continue; // projected only under the string wave, which this fixture never uses
         }
         routing.base_value = -1.0f + 0.25f * static_cast<float>(t);
         if (! osc_graph_target(static_cast<Synth::ModTarget>(t))) {
@@ -809,6 +850,7 @@ static void build_small_bank_fixture(Synth::InstrumentBank& bank)
     bank.channel_enabled[0]  = 1;
     bank.channel_enabled[1]  = 1;
 }
+
 static Synth::EffectSlotBinding* enabled_effect(Synth::InstrumentBank& bank,
                                                 uint32_t               channel,
                                                 uint32_t               slot,
@@ -1276,7 +1318,9 @@ static uint32_t build_clipboard_max_fixture(Synth::InstrumentBank*        bank,
                              : (target == Synth::mod_fir_band1_spread || target == Synth::mod_fir_band2_spread ||
                                 target == Synth::mod_fir_band3_spread)
                                  ? 4.0f + static_cast<float>((target - Synth::mod_fir_band1_spread) / 4)
-                                 : 2.0f + static_cast<float>(target); // band offsets stay within their -36..36 view
+                             : (target == Synth::mod_string_damping || target == Synth::mod_string_release_damping)
+                                 ? 0.5f
+                                 : 2.0f + static_cast<float>(target);
         routing.num_inputs = 2;
         routing.inputs[0].source = Synth::ModSource::velocity;
         routing.inputs[0].op     = Synth::SourceOp::add;
@@ -1495,11 +1539,9 @@ static void check_zone_paste_source_guard_self_tests()
     TEST(! zone_paste_body_has_failure_guard(inverted, inverted + strlen(inverted)));
 }
 
-// Loads a whole source file into a shared reusable buffer (the 256 KiB
-// bound), NUL-terminated. Returns nullptr when the load fails (TEST
-// already fired). The checks run sequentially, so the buffer never
-// serves two live reads at once. The storage stays resident between
-// calls: the returned pointer is valid until the next load.
+// Loads a whole source file (256 KiB bound) as a NUL-terminated strdup copy,
+// never freed (test-harness exemption from the no-heap rule).  Returns
+// nullptr when the load fails (TEST already fired).
 const std::unique_ptr<FixedArray<char, 256 * 1024>> source_file_storage =
     std::make_unique<FixedArray<char, 256 * 1024>>();
 
@@ -1518,7 +1560,7 @@ static const char* load_source_file(const char* path)
         return nullptr;
     }
     src[got] = 0;
-    return src;
+    return strdup(src);
 }
 
 // The balanced-brace body of the definition whose text starts at `decl`:
@@ -3224,10 +3266,10 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
     const Sculptor::Node& sum = graph.node(mapping.output_node);
     TEST(sum.position.x == 600 && sum.position.y == -450);
     TEST(sum.content_width_override == 360 && sum.content_height_override == 270);
-    const uint32_t          wave_b_slot   = 28; // waveform b, layout contract
-    const uint32_t          mode_slot     = 55; // mix mode, layout contract
+    const uint32_t          wave_b_slot   = 29; // waveform b, layout contract
+    const uint32_t          mode_slot     = 56; // mix mode, layout contract
     const uint32_t          fm_depth_slot = Sculptor::osc_target_row(Synth::mod_fm_index);
-    const uint32_t          fm_ratio_slot = 82; // fm ratio, layout contract
+    const uint32_t          fm_ratio_slot = 83; // fm ratio, layout contract
     Sculptor::PropertyValue wave          = {};
     wave.list_index                       = 0;
     graph.set_slot_value(mapping.osc_nodes[0], wave_b_slot, wave);
@@ -3250,16 +3292,17 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
         graph.set_slot_value(node_index, wave_b_slot, wave);
         // With waveform b off, exactly the duty b / mix mode / waveform mix /
         // fm depth / fm ratio rows plus both pad tone families and the spread
-        // family are gated, across all 162 slots.  Waveform a is saw in this
+        // family are gated, across all 136 slots.  Waveform a is saw in this
         // fixture, so the duty a family stays gated-off.
         const uint32_t wave_a_list  = graph.node(node_index).slots.entries[1].value.list_index;
         const bool     tone_a_gated = wave_a_list != static_cast<uint32_t>(Synth::WaveType::pad_wave) - 1;
         const uint32_t tone0        = Sculptor::osc_target_row(Synth::mod_pad_tilt0);
         const uint32_t tone1        = Sculptor::osc_target_row(Synth::mod_pad_tilt1);
-        for (uint32_t row = 0; row < Sculptor::osc_slot_count + 12 * Synth::num_mod_targets; ++row) {
+        for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
             const bool gated =
-                row == Sculptor::osc_target_row(Synth::mod_duty1) || row == mode_slot ||
-                row == Sculptor::osc_target_row(Synth::mod_osc_mix) || row == fm_depth_slot || row == fm_ratio_slot ||
+                row == Sculptor::osc_pick_slot || row == Sculptor::osc_target_row(Synth::mod_duty1) ||
+                row == mode_slot || row == Sculptor::osc_target_row(Synth::mod_osc_mix) || row == fm_depth_slot ||
+                row == fm_ratio_slot ||
                 (tone_a_gated && row >= tone0 && row <= tone0 + Sculptor::osc_target_block_stride) ||
                 (row >= tone1 && row <= tone1 + Sculptor::osc_target_block_stride) ||
                 (row >= Sculptor::osc_target_row(Synth::mod_fir_spread) &&
@@ -3280,8 +3323,9 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
         const uint32_t tone1      = Sculptor::osc_target_row(Synth::mod_pad_tilt1);
         const uint32_t mix_row    = Sculptor::osc_target_row(Synth::mod_osc_mix);
         const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
-        for (uint32_t row = 0; row < Sculptor::osc_slot_count + 12 * Synth::num_mod_targets; ++row) {
-            const bool gated = (row >= duty1_row && row <= duty1_row + Sculptor::osc_target_block_stride) ||
+        for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
+            const bool gated = row == Sculptor::osc_pick_slot ||
+                               (row >= duty1_row && row <= duty1_row + Sculptor::osc_target_block_stride) ||
                                (row >= tone0 && row <= tone0 + Sculptor::osc_target_block_stride) ||
                                (row >= tone1 && row <= tone1 + Sculptor::osc_target_block_stride) || row == mix_row ||
                                (row >= spread_row && row <= Sculptor::osc_target_row(Synth::mod_fir_slope) +
@@ -3299,8 +3343,9 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
     {
         const uint32_t tone_b_row = Sculptor::osc_target_row(Synth::mod_pad_tilt1);
         const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
-        for (uint32_t row = 0; row < Sculptor::osc_slot_count + 12 * Synth::num_mod_targets; ++row) {
-            const bool gated = (row >= tone_b_row && row <= tone_b_row + Sculptor::osc_target_block_stride) ||
+        for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
+            const bool gated = row == Sculptor::osc_pick_slot ||
+                               (row >= tone_b_row && row <= tone_b_row + Sculptor::osc_target_block_stride) ||
                                row == Sculptor::osc_target_row(Synth::mod_duty1) || row == mode_slot ||
                                row == Sculptor::osc_target_row(Synth::mod_osc_mix) || row == fm_depth_slot ||
                                row == fm_ratio_slot ||
@@ -3316,8 +3361,9 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
     graph.set_slot_value(node_index, wave_b_slot, wave);
     {
         const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
-        for (uint32_t row = 0; row < Sculptor::osc_slot_count + 12 * Synth::num_mod_targets; ++row) {
-            const bool gated = (row >= spread_row && row <= Sculptor::osc_target_row(Synth::mod_fir_slope) +
+        for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
+            const bool gated = row == Sculptor::osc_pick_slot ||
+                               (row >= spread_row && row <= Sculptor::osc_target_row(Synth::mod_fir_slope) +
                                                                 Sculptor::osc_target_block_stride) ||
                                row == Sculptor::osc_target_row(Synth::mod_osc_mix);
             TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), row) == gated);
@@ -3331,14 +3377,27 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
         const uint32_t tone0      = Sculptor::osc_target_row(Synth::mod_pad_tilt0);
         const uint32_t mix_row    = Sculptor::osc_target_row(Synth::mod_osc_mix);
         const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
-        for (uint32_t row = 0; row < Sculptor::osc_slot_count + 12 * Synth::num_mod_targets; ++row) {
-            const bool gated = (row >= duty0_row && row <= duty0_row + Sculptor::osc_target_block_stride) ||
+        for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
+            const bool gated = row == Sculptor::osc_pick_slot ||
+                               (row >= duty0_row && row <= duty0_row + Sculptor::osc_target_block_stride) ||
                                (row >= tone0 && row <= tone0 + Sculptor::osc_target_block_stride) || row == mix_row ||
                                (row >= spread_row && row <= Sculptor::osc_target_row(Synth::mod_fir_slope) +
                                                                 Sculptor::osc_target_block_stride);
             TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), row) == gated);
         }
     }
+    // String wave a (list entry 5) reuses the duty a / pad tone a rows as Damping / Release
+    // damping, so both families and the pick row stay live.
+    wave.list_index = 5;
+    graph.set_slot_value(node_index, 1, wave);
+    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index),
+                                                            Sculptor::osc_target_row(Synth::mod_duty0)));
+    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index),
+                                                            Sculptor::osc_target_row(Synth::mod_duty0) +
+                                                                Sculptor::osc_target_block_stride));
+    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index),
+                                                            Sculptor::osc_target_row(Synth::mod_pad_tilt0)));
+    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), Sculptor::osc_pick_slot));
     // Restore the contract state for the following widget tests.
     wave.list_index = 0;
     graph.set_slot_value(node_index, 1, wave);
@@ -3993,7 +4052,7 @@ static void check_zero_fm_clipboard_library_round_trips()
                     TEST(instr.layers[l].osc_mode == (active ? Synth::osc_mode_fm : Synth::osc_mode_blend));
                     const Sculptor::Node& node = graph.node(mapping.osc_nodes[l]);
                     TEST(node.slots.entries[Sculptor::osc_target_row(Synth::mod_fm_index)].value.real == depth);
-                    TEST(node.slots.entries[82].value.real == ratio); // fm ratio, layout contract
+                    TEST(node.slots.entries[83].value.real == ratio); // fm ratio, layout contract
                     TEST(fm_widget_enabled(graph, mapping.osc_nodes[l]) == (active != 0));
                 }
             }
@@ -4336,6 +4395,68 @@ static void check_decoded_fm_lfo_binding_survives_compile()
     TEST(compiled.lfo_desc_id == 1);
     TEST(compiled.lfo_op == Synth::SourceOp::add);
     TEST(compiled.lfo_depth == 0.5f);
+}
+
+// D11/TRAP: a string layer with a nonzero pick and non-default routing on
+// targets 26/27 at band count 1 round-trips encode -> decode -> project ->
+// compile, and the decoded compile equals the direct compile of the source.
+static void check_string_pick_trap_decode_compile()
+{
+    if (Synth::num_mod_targets < 28) {
+        return;
+    }
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank         = *bank_storage;
+    Synth::Instrument                                  instrument   = {};
+    build_binding_fixture(&bank, &instrument);
+    Synth::Oscillator& layer = instrument.layers[0];
+    layer.osc_type[0]        = Synth::WaveType::string_wave;
+    layer.fir_band_count     = 1;
+    layer.string_pick        = 0.25f;
+    for (uint32_t t = Synth::mod_string_damping; t <= Synth::mod_string_release_damping; ++t) {
+        layer.targets[t].base_value     = 0.5f;
+        layer.targets[t].envelope_depth = 1.0f; // the decoded default
+        layer.targets[t].lfo_desc_id    = 1;
+        layer.targets[t].lfo_op         = Synth::SourceOp::add;
+        layer.targets[t].lfo_depth      = 0.25f;
+    }
+    bank.bank.instruments.entries[0] = instrument;
+    TEST(Synth::validate_instrument_bank(&bank.bank));
+
+    // Direct compile of the source.
+    const std::unique_ptr<Sculptor::Graph> direct_graph   = std::make_unique<Sculptor::Graph>();
+    Sculptor::OscGraphMapping              direct_mapping = {};
+    TEST(Sculptor::project_editor_to_graph(bank, direct_graph.get(), &direct_mapping, 0, 0));
+    Synth::Instrument direct = {};
+    TEST(Sculptor::compile_graph_to_instrument(*direct_graph, direct_mapping, &direct));
+    TEST(direct.layers[0].string_pick == 0.25f);
+
+    // Encode, decode, then compile the decoded bank.
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&payload)[Synth::library_payload_max] = payload_storage->elements;
+    const uint32_t length                       = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
+    TEST(length > 0);
+    const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& decoded = *decoded_storage;
+    memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
+    TEST(Synth::decode_editor_bank_json(payload, length, &decoded));
+    const Synth::Oscillator& dec =
+        decoded.bank.instruments.entries[decoded.bank.channel_zones[0][0].instrument].layers[0];
+    TEST(dec.string_pick == 0.25f);
+    for (uint32_t t = Synth::mod_string_damping; t <= Synth::mod_string_release_damping; ++t) {
+        TEST(dec.targets[t].base_value == 0.5f);
+        TEST(dec.targets[t].lfo_desc_id == 1);
+        TEST(dec.targets[t].lfo_depth == 0.25f);
+    }
+    const std::unique_ptr<Sculptor::Graph> decoded_graph   = std::make_unique<Sculptor::Graph>();
+    Sculptor::OscGraphMapping              decoded_mapping = {};
+    TEST(Sculptor::project_editor_to_graph(decoded, decoded_graph.get(), &decoded_mapping, 0, 0));
+    Synth::Instrument recompiled = {};
+    TEST(Sculptor::compile_graph_to_instrument(*decoded_graph, decoded_mapping, &recompiled));
+    TEST(recompiled.layers[0].string_pick == 0.25f);
+    TEST(memcmp(&recompiled.layers[0], &direct.layers[0], sizeof(Synth::Oscillator)) == 0);
 }
 
 // C3/C4 rename fixtures commit through the event ring the way the editor
@@ -11765,13 +11886,13 @@ static void child_row_projection_regressions()
         for (uint32_t t = 3; t < Synth::num_mod_targets; ++t) {
             child_row_expected = child_row_expected || s == Sculptor::osc_target_row(t);
         }
-        // Pitch offset, octave offset, the band header rows, the band
+        // Pitch offset, octave offset, pick, the band header rows, the band
         // parameter rows and their blocks (everything in a band block but
         // the two click slots) and the fir slope row nest under their
         // parents.
         const bool band_header = s >= Sculptor::osc_band_first_slot &&
                                  (s - Sculptor::osc_band_first_slot) % Sculptor::osc_band_block_stride == 0u;
-        child_row_expected     = child_row_expected || band_header || s == 134 || s == 178 ||
+        child_row_expected     = child_row_expected || band_header || s == 28 || s == 135 || s == 179 ||
                                  (s >= Sculptor::osc_band_first_slot + 3u &&
                                   s < Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride);
         TEST(osc.slots.entries[s].child_row == child_row_expected);
@@ -12090,7 +12211,8 @@ static void osc_direct_modulator_regressions()
             TEST(osc.slots.num_allocated ==
                  Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride * instrument.layers[0].fir_band_count);
             for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
-                if (osc_target_band_of_target(t) >= static_cast<int32_t>(instrument.layers[0].fir_band_count)) {
+                if (osc_target_band_of_target(t) >= static_cast<int32_t>(instrument.layers[0].fir_band_count) ||
+                    ! t7_target_has_row(instrument.layers[0], t)) {
                     continue;
                 }
                 check_target_block_grammar(osc, t, instrument.layers[0].targets[t], instrument.layers[0].fir_type);
@@ -12099,10 +12221,10 @@ static void osc_direct_modulator_regressions()
             // the widened slot count.  Wave B starts off and the mode starts
             // on blend, so the duty b / mix mode / waveform mix / fm depth / fm
             // ratio rows plus both pad tone families are disabled and nothing else is.
-            const uint32_t wave_b_slot    = 28; // waveform b, layout contract
-            const uint32_t mode_slot      = 55; // mix mode, layout contract
+            const uint32_t wave_b_slot    = 29; // waveform b, layout contract
+            const uint32_t mode_slot      = 56; // mix mode, layout contract
             const uint32_t fm_depth_slot  = Sculptor::osc_target_row(Synth::mod_fm_index);
-            const uint32_t fm_ratio_slot  = 82; // fm ratio, layout contract
+            const uint32_t fm_ratio_slot  = 83; // fm ratio, layout contract
             const uint32_t gated_slots[4] = { Sculptor::osc_target_row(Synth::mod_duty1),
                                               mode_slot,
                                               fm_depth_slot,
@@ -13087,7 +13209,8 @@ static void osc_direct_modulator_regressions()
                  Sculptor::osc_band_first_slot +
                      Sculptor::osc_band_block_stride * instrument.layers[layer].fir_band_count);
             for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
-                if (osc_target_band_of_target(t) >= static_cast<int32_t>(instrument.layers[layer].fir_band_count)) {
+                if (osc_target_band_of_target(t) >= static_cast<int32_t>(instrument.layers[layer].fir_band_count) ||
+                    ! t7_target_has_row(instrument.layers[layer], t)) {
                     continue;
                 }
                 check_target_block_grammar(osc,
@@ -13953,7 +14076,7 @@ static void build_fir_slope_max_fixture(Synth::InstrumentBank* bank,
 }
 
 // The FIR Slope row is a connectable target row with a 12-slot
-// block appended at 150..161, no existing row shifts, the disabled
+// block at 206..217, no existing row shifts, the disabled
 // predicate covers the widened range exactly on filter-off layers, and the
 // maximum-population projection hits the exact node/instance/connection
 // budgets.
@@ -14022,45 +14145,45 @@ static void osc_fir_slope_projection_regressions()
     const uint32_t expected_slots =
         Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride * instrument.layers[0].fir_band_count;
     TEST(osc.slots.num_allocated == expected_slots);
-    TEST(expected_slots == 191);
+    TEST(expected_slots == 192);
 
-    // Slot 178 stays the FIR Slope row and becomes connectable.
-    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_slope] == 178);
-    TEST(Sculptor::osc_target_row(Synth::mod_fir_slope) == 178);
+    // Slot 179 is the connectable FIR Slope row.
+    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_slope] == 179);
+    TEST(Sculptor::osc_target_row(Synth::mod_fir_slope) == 179);
     {
-        const Sculptor::Slot& row = osc.slots.entries[178];
+        const Sculptor::Slot& row = osc.slots.entries[179];
         TEST(row.connectable);
         TEST(row.drop_menu);
         TEST(strncmp(row.name, "FIR Slope", sizeof(row.name)) == 0);
         TEST(row.property_type == Sculptor::PropertyType::integer);
     }
-    // The block follows the row: the env dot at 179 and the source dots at
-    // 185/188, all twelve slots allocated.
-    TEST(Sculptor::osc_target_env_dot(Synth::mod_fir_slope) == 179);
-    TEST(Sculptor::osc_target_src_dot(Synth::mod_fir_slope, 0) == 185);
-    TEST(Sculptor::osc_target_src_dot(Synth::mod_fir_slope, 1) == 188);
+    // The block follows the row: the env dot at 180 and the source dots at
+    // 186/189, all twelve slots allocated.
+    TEST(Sculptor::osc_target_env_dot(Synth::mod_fir_slope) == 180);
+    TEST(Sculptor::osc_target_src_dot(Synth::mod_fir_slope, 0) == 186);
+    TEST(Sculptor::osc_target_src_dot(Synth::mod_fir_slope, 1) == 189);
     {
-        const Sculptor::Slot& env_dot = osc.slots.entries[179];
+        const Sculptor::Slot& env_dot = osc.slots.entries[180];
         TEST(env_dot.kind == Sculptor::SlotKind::input);
         TEST(strncmp(env_dot.name, "Envelope", sizeof(env_dot.name)) == 0);
-        const Sculptor::Slot& src_a = osc.slots.entries[185];
+        const Sculptor::Slot& src_a = osc.slots.entries[186];
         TEST(src_a.kind == Sculptor::SlotKind::input);
         TEST(strncmp(src_a.name, "Source A Op", sizeof(src_a.name)) == 0);
-        const Sculptor::Slot& src_b = osc.slots.entries[188];
+        const Sculptor::Slot& src_b = osc.slots.entries[189];
         TEST(src_b.kind == Sculptor::SlotKind::input);
         TEST(strncmp(src_b.name, "Source B Op", sizeof(src_b.name)) == 0);
     }
     // No existing row shifted.
-    TEST(Sculptor::osc_target_row_slot[Synth::mod_volume] == 95);
-    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_spread] == 152);
+    TEST(Sculptor::osc_target_row_slot[Synth::mod_volume] == 96);
+    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_spread] == 153);
     // Literal budget pins: a future drift cannot pass silently.
-    TEST(Sculptor::max_nodes == 384);
-    TEST(Sculptor::max_node_slots == 356);
+    TEST(Sculptor::max_nodes == 402);
+    TEST(Sculptor::max_node_slots == 357);
 
     // Disabled state matches the filter-off predicate: the fir-off layer
-    // grays the whole 152..190 range; the band-pass layers keep every slot
+    // grays the whole 153..191 range; the band-pass layers keep every slot
     // of the range active.
-    for (uint32_t s = 152; s <= 190; s++) {
+    for (uint32_t s = 153; s <= 191; s++) {
         TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(mapping.osc_nodes[1]), s));
         TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, s));
         TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(mapping.osc_nodes[2]), s));
@@ -14069,9 +14192,9 @@ static void osc_fir_slope_projection_regressions()
     // Display: a routed base wins over the scalar; a wired base of zero
     // clamps to 1 at the display boundary (the integer percent domain); a
     // zeroed binding shows the scalar, even with the filter off.
-    TEST(osc.slots.entries[178].value.integer == 64);
-    TEST(graph.node(mapping.osc_nodes[2]).slots.entries[178].value.integer == 1);
-    TEST(graph.node(mapping.osc_nodes[1]).slots.entries[178].value.integer == 37);
+    TEST(osc.slots.entries[179].value.integer == 64);
+    TEST(graph.node(mapping.osc_nodes[2]).slots.entries[179].value.integer == 1);
+    TEST(graph.node(mapping.osc_nodes[1]).slots.entries[179].value.integer == 37);
 
     // An envelope wired into the slope block's env dot compiles onto the
     // slope binding; the wired row is the binding's base, so the routed
@@ -14112,9 +14235,9 @@ static void osc_fir_slope_projection_regressions()
                                 Synth::max_layers * Synth::num_mod_targets,
                                 4);
         TEST(max_mapping.detached_count == 2 * Synth::max_layers * Synth::num_mod_targets);
-        TEST(max_mapping.detached_count == 364);
+        TEST(max_mapping.detached_count == 392);
         TEST(max_mapping.detached_count <= Sculptor::max_osc_instances);
-        TEST(max_graph.connection_count() == 1099);
+        TEST(max_graph.connection_count() == 1127);
         TEST(max_graph.connection_count() <= Sculptor::max_connections);
     }
 }
@@ -14720,7 +14843,7 @@ static void check_osc_pitch_gating()
         TEST(find_graph_slot(graph, mapping.osc_nodes[0], "Pitch", &pitch_slot));
         TEST(find_graph_slot(graph, mapping.osc_nodes[0], "Octave Offset", &octave_slot));
         TEST(pitch_slot == Sculptor::osc_target_row(Synth::mod_pitch));
-        TEST(octave_slot == 134);
+        TEST(octave_slot == 135);
         const Sculptor::Slot& pitch_row = graph.node(mapping.osc_nodes[0]).slots.entries[pitch_slot];
         TEST(pitch_row.property_type == Sculptor::PropertyType::real);
         TEST(! pitch_row.real_bounded); // a bare input box, not a slider
@@ -14736,7 +14859,7 @@ static void check_osc_pitch_gating()
         const Sculptor::OscTargetView spread_view = Sculptor::osc_target_view(Synth::mod_fir_spread);
         TEST(spread_view.min_value == 0.0f && spread_view.max_value == 36.0f);
         TEST(spread_view.bank_scale == 1.0f && ! spread_view.logarithmic);
-        TEST(Sculptor::osc_target_row(Synth::mod_fir_spread) == 152);
+        TEST(Sculptor::osc_target_row(Synth::mod_fir_spread) == 153);
 
         // Round-trip: an octave edit applies through the value_changed path,
         // lands in the bank and reprojection shows it again.
@@ -14811,7 +14934,7 @@ static void check_osc_pitch_gating()
         graph.take_changes(discarded, Sculptor::max_pending_changes);
         uint32_t slope_slot = Sculptor::pool_no_slot;
         TEST(find_graph_slot(graph, mapping.osc_nodes[0], "FIR Slope", &slope_slot));
-        TEST(slope_slot == 178);
+        TEST(slope_slot == 179);
         const Sculptor::Slot& slope_row = graph.node(mapping.osc_nodes[0]).slots.entries[slope_slot];
         TEST(slope_row.property_type == Sculptor::PropertyType::integer);
         TEST(slope_row.int_bounded);
@@ -15987,7 +16110,7 @@ struct m2_has_band_seam<GraphT,
 
 constexpr bool m2_band_seam_present = m2_has_band_seam<Sculptor::Graph>::value;
 
-constexpr bool m2_band_rows_present = Synth::num_mod_targets == 26;
+constexpr bool m2_band_rows_present = Synth::num_mod_targets == 28;
 
 // The band parameter target indices: band 0 reuses the legacy spread (7) and
 // slope (11) targets; the 14 appended targets follow at 12..25 in the order
@@ -16284,8 +16407,8 @@ static const char* const band_header_names_m2[4] = { "Band 1", "Band 2", "Band 3
 // Low-pass keeps the cutoff and FIR Slope labels.
 static void m2_band_layout_regressions()
 {
-    TEST(Synth::num_mod_targets == 26);
-    TEST(Synth::instrument_graph_layout_capacity == 373);
+    TEST(Synth::num_mod_targets == 28);
+    TEST(Synth::instrument_graph_layout_capacity == 401);
     TEST(Synth::fir_coeff_entry_words == 18);
 
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
@@ -16301,10 +16424,10 @@ static void m2_band_layout_regressions()
         return;
     }
     const Sculptor::Node& osc = graph.node(mapping.osc_nodes[0]);
-    // One band block: 136 + 55 slots.
+    // One band block: 137 + 55 slots.
     TEST(osc.slots.num_allocated == Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride);
     TEST(find_nth_osc_slot(osc, "Band 1", 0) == Sculptor::osc_band_header_slot(0));
-    TEST(find_nth_osc_slot(osc, "Filter Type", 0) == 135);
+    TEST(find_nth_osc_slot(osc, "Filter Type", 0) == 136);
     const uint32_t        header_slot = Sculptor::osc_band_header_slot(0);
     const Sculptor::Slot& header      = osc.slots.entries[header_slot];
     TEST(strncmp(header.name, "Band 1", sizeof(header.name)) == 0);
@@ -16319,17 +16442,17 @@ static void m2_band_layout_regressions()
     TEST(! minus.child_row && minus.child_level == 0);
     TEST(! plus.child_row && plus.child_level == 0);
 
-    // Four bands: band 0's rows keep their slots (139/152/165/178) and
+    // Four bands: band 0's rows keep their slots (140/153/166/179) and
     // bands 1..3 shift by 3 slots per earlier band.
     static const struct {
         uint32_t    slot;
         const char* name;
         uint32_t    target;
     } band_rows[16] = {
-        { 139, "Offset", 12 }, { 152, "Spread", 7 },  { 165, "Gain", 13 }, { 178, "FIR Slope", 11 },
-        { 194, "Offset", 14 }, { 207, "Spread", 15 }, { 220, "Gain", 16 }, { 233, "FIR Slope", 17 },
-        { 249, "Offset", 18 }, { 262, "Spread", 19 }, { 275, "Gain", 20 }, { 288, "FIR Slope", 21 },
-        { 304, "Offset", 22 }, { 317, "Spread", 23 }, { 330, "Gain", 24 }, { 343, "FIR Slope", 25 },
+        { 140, "Offset", 12 }, { 153, "Spread", 7 },  { 166, "Gain", 13 }, { 179, "FIR Slope", 11 },
+        { 195, "Offset", 14 }, { 208, "Spread", 15 }, { 221, "Gain", 16 }, { 234, "FIR Slope", 17 },
+        { 250, "Offset", 18 }, { 263, "Spread", 19 }, { 276, "Gain", 20 }, { 289, "FIR Slope", 21 },
+        { 305, "Offset", 22 }, { 318, "Spread", 23 }, { 331, "Gain", 24 }, { 344, "FIR Slope", 25 },
     };
 
     bank.bank.instruments.entries[0].layers[0].fir_band_count = 4;
@@ -16358,8 +16481,8 @@ static void m2_band_layout_regressions()
         const Sculptor::Node& lowpass_osc = graph.node(mapping.osc_nodes[0]);
         const uint32_t        cutoff_slot = find_nth_osc_slot(lowpass_osc, "Cutoff (Hz)", 0);
         const uint32_t        slope_slot  = find_nth_osc_slot(lowpass_osc, "FIR Slope", 0);
-        TEST(cutoff_slot == 152);
-        TEST(slope_slot == 178);
+        TEST(cutoff_slot == 153);
+        TEST(slope_slot == 179);
         // The legacy single-edge rows keep the fix-6 legacy depths: the
         // Cutoff and FIR Slope rows stay one level under Filter Type.
         TEST(lowpass_osc.slots.entries[cutoff_slot].child_row &&
@@ -16440,8 +16563,8 @@ static void m2_band_visibility_regressions()
     const Sculptor::Node& osc         = graph.node(mapping.osc_nodes[0]);
     const uint32_t        header_slot = find_nth_osc_slot(osc, "Band 1", 0);
     const uint32_t        filter_slot = find_nth_osc_slot(osc, "Filter Type", 0);
-    TEST(header_slot == Sculptor::osc_band_header_slot(0) && filter_slot == 135);
-    if (header_slot != Sculptor::osc_band_header_slot(0) || filter_slot != 135) {
+    TEST(header_slot == Sculptor::osc_band_header_slot(0) && filter_slot == 136);
+    if (header_slot != Sculptor::osc_band_header_slot(0) || filter_slot != 162) {
         return;
     }
     m2_band_visibility_body<m2_band_seam_present>(graph, mapping.osc_nodes[0], filter_slot);
@@ -16471,8 +16594,8 @@ static void m2_band_source_gray_regressions()
     const uint32_t velocity_slot = mapping.input_source_slots[static_cast<uint32_t>(Synth::ModSource::velocity) - 1];
     TEST(find_osc_graph_connection(graph, { osc_node, dot }) != Sculptor::pool_no_slot);
     const uint32_t filter_slot = find_nth_osc_slot(graph.node(osc_node), "Filter Type", 0);
-    TEST(filter_slot == 135);
-    if (filter_slot != 135) {
+    TEST(filter_slot == 136);
+    if (filter_slot != 136) {
         return;
     }
     // Filter to off through the apply path, then rebuild from the model.
@@ -16503,10 +16626,11 @@ static void m2_band_source_gray_regressions()
         TEST(strstr(render_src, "source_dead ? colors_.property_connected_value : colors_.property_value") != nullptr);
     }
 }
+
 static void m2_band_add_remove_regressions()
 {
-    TEST(Synth::num_mod_targets == 26);
-    if (Synth::num_mod_targets != 26) {
+    TEST(Synth::num_mod_targets == 28);
+    if (Synth::num_mod_targets != 28) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
@@ -16656,8 +16780,8 @@ static void m2_band_add_remove_regressions()
 // vacated band 3 block stops projecting.
 static void m2_band_remove_first_regressions()
 {
-    TEST(Synth::num_mod_targets == 26);
-    if (Synth::num_mod_targets != 26) {
+    TEST(Synth::num_mod_targets == 28);
+    if (Synth::num_mod_targets != 28) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
@@ -16757,8 +16881,8 @@ static void m2_band_remove_first_regressions()
 // band is a fresh copy of the surviving band rather than the removed state.
 static void m2_band_donation_regressions()
 {
-    TEST(Synth::num_mod_targets == 26);
-    if (Synth::num_mod_targets != 26) {
+    TEST(Synth::num_mod_targets == 28);
+    if (Synth::num_mod_targets != 28) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
@@ -16827,8 +16951,8 @@ static void m2_band_donation_regressions()
 // re-projection); the count change survives.
 static void m2_band_batch_boundary_regressions()
 {
-    TEST(Synth::num_mod_targets == 26);
-    if (Synth::num_mod_targets != 26) {
+    TEST(Synth::num_mod_targets == 28);
+    if (Synth::num_mod_targets != 28) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
@@ -16894,8 +17018,8 @@ static void m2_band_batch_boundary_regressions()
 // band, all [+] at four, both editable in between.
 static void m2_band_button_gray_regressions()
 {
-    TEST(Synth::num_mod_targets == 26);
-    if (Synth::num_mod_targets != 26) {
+    TEST(Synth::num_mod_targets == 28);
+    if (Synth::num_mod_targets != 28) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
@@ -16944,8 +17068,8 @@ static void m2_band_button_gray_regressions()
 // carry base and wiring per band.
 static void m2_per_band_modulation_regressions()
 {
-    TEST(Synth::num_mod_targets == 26);
-    if (Synth::num_mod_targets != 26) {
+    TEST(Synth::num_mod_targets == 28);
+    if (Synth::num_mod_targets != 28) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
@@ -18131,7 +18255,7 @@ static void m2_runtime_source_pins_regressions()
     if (runtime) {
         TEST(strstr(runtime, "band_count;") != nullptr);
         TEST(strstr(runtime, "bands[4]") != nullptr);
-        TEST(strstr(runtime, "static_assert(num_osc_roles == 78)") != nullptr);
+        TEST(strstr(runtime, "static_assert(num_osc_roles == 84)") != nullptr);
         TEST(strstr(runtime, "{ mod_fir_band0_offset, osc_fir_band0_offset_dest }") != nullptr);
         TEST(strstr(runtime, "osc_fir_band3_slope_dest, osc_fir_band3_slope_env, osc_fir_band3_slope_lfo") != nullptr);
         TEST(strstr(runtime, "fir_band_count") != nullptr);
@@ -18444,8 +18568,8 @@ static void m2_document_json_regressions()
 // on top of existing bank content without disturbing it.
 static void m2_bank_json_round_trip_regressions()
 {
-    TEST(Synth::num_mod_targets == 26);
-    if (Synth::num_mod_targets != 26) {
+    TEST(Synth::num_mod_targets == 28);
+    if (Synth::num_mod_targets != 28) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
@@ -18555,8 +18679,8 @@ static void m2_bank_json_round_trip_regressions()
 // splits carry the per-band generator bindings to the cloned zone.
 static void m2_library_zone_regressions()
 {
-    TEST(Synth::num_mod_targets == 26);
-    if (Synth::num_mod_targets != 26) {
+    TEST(Synth::num_mod_targets == 28);
+    if (Synth::num_mod_targets != 28) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
@@ -18868,8 +18992,8 @@ static void m2_fix2_wave_regressions()
                 return Sculptor::osc_node_slot_hidden(graph, osc_node, slot);
             };
             // Bandpass: band 1's whole block shows, header and buttons included.
-            TEST(! hidden(136) && ! hidden(137) && ! hidden(138));
-            TEST(! hidden(139) && ! hidden(152) && ! hidden(165) && ! hidden(178));
+            TEST(! hidden(137) && ! hidden(138) && ! hidden(139));
+            TEST(! hidden(140) && ! hidden(153) && ! hidden(166) && ! hidden(179));
             // The single-edge filter types keep the legacy cutoff and FIR
             // Slope rows visible while the band UI hides wholesale.
             for (uint32_t type = 0; type < Synth::num_filter_types; type++) {
@@ -18879,8 +19003,8 @@ static void m2_fix2_wave_regressions()
                 Sculptor::PropertyValue select_type = {};
                 select_type.list_index              = static_cast<uint8_t>(type);
                 graph.set_slot_value(osc_node, filter_slot, select_type);
-                TEST(! hidden(152) && ! hidden(178));
-                TEST(hidden(136) && hidden(137) && hidden(138) && hidden(139) && hidden(165));
+                TEST(! hidden(153) && ! hidden(179));
+                TEST(hidden(137) && hidden(138) && hidden(139) && hidden(140) && hidden(166));
             }
         }
     }
@@ -19205,7 +19329,8 @@ static void check_fir_spread_helpers()
                         "\"fir_slope\", \"fir_band0_offset\", \"fir_band0_gain\", \"fir_band1_offset\", "
                         "\"fir_band1_spread\", \"fir_band1_gain\", \"fir_band1_slope\", \"fir_band2_offset\", "
                         "\"fir_band2_spread\", \"fir_band2_gain\", \"fir_band2_slope\", \"fir_band3_offset\", "
-                        "\"fir_band3_spread\", \"fir_band3_gain\", \"fir_band3_slope\"]") != nullptr);
+                        "\"fir_band3_spread\", \"fir_band3_gain\", \"fir_band3_slope\", \"string_damping\", "
+                        "\"string_release_damping\"]") != nullptr);
             TEST(strstr(schema_src, "lowpass_cutoff") == nullptr);
             TEST(strstr(schema_src, "highpass_cutoff") == nullptr);
             // Both generator-layout target enums admit the appended slope
@@ -20463,8 +20588,8 @@ static void osc_slot_disable_stamped_rules_regressions()
     const uint32_t tone1       = Sculptor::osc_target_row(Synth::mod_pad_tilt1);
     const uint32_t volume      = Sculptor::osc_target_row(Synth::mod_volume);
     const uint32_t wave_a_slot = 1;  // waveform a, layout contract
-    const uint32_t wave_b_slot = 28; // waveform b, layout contract
-    const uint32_t mode_slot   = 55; // mix mode, layout contract
+    const uint32_t wave_b_slot = 29; // waveform b, layout contract
+    const uint32_t mode_slot   = 56; // mix mode, layout contract
 
     Sculptor::PropertyValue wave = {};
     // Sine wave a (list 0; the wave a list starts at sine), waveform b
@@ -20937,6 +21062,1384 @@ static void distortion_m1_regressions()
     check_effect_missing_params_compat();
 }
 
+// String wave (plucked string, wave type 6): codec, validator, gating and
+// source-pin contracts.  Wave A only; wave B refuses it like any unknown name.
+static bool string_clip_decode(const char* doc, ClipboardDecode* out)
+{
+    fill_clipboard_sentinels(out);
+    return decode_clipboard(out, doc, max_portable_records);
+}
+
+static void check_string_wave_json_codec()
+{
+    const std::unique_ptr<ClipboardDecode> storage  = std::make_unique<ClipboardDecode>();
+    ClipboardDecode&                       decoded  = *storage;
+    static const char* const               modes[4] = { "blend", "fm", "sync", "ring_mod" };
+    char                                   doc[512];
+
+    // Wave A string in all four modes: strict document and lenient bank.
+    for (uint32_t m = 0; m < 4; ++m) {
+        snprintf(doc,
+                 sizeof(doc),
+                 "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\",\"wave_b\":\"sine\","
+                 "\"mode\":\"%s\"}]}",
+                 modes[m]);
+        TEST(string_clip_decode(doc, &decoded));
+        TEST(decoded.instr.layers[0].osc_type[0] == Synth::WaveType::string_wave);
+        TEST(static_cast<uint32_t>(decoded.instr.layers[0].osc_mode) == m);
+
+        snprintf(doc,
+                 sizeof(doc),
+                 "{\"instrument_editor_bank\":{\"instruments\":[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\","
+                 "\"wave_b\":\"sine\",\"mode\":\"%s\",\"routing\":{}}]}],"
+                 "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}",
+                 modes[m]);
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        memset(static_cast<void*>(bank_storage.get()), 0, sizeof(*bank_storage));
+        TEST(Synth::decode_editor_bank_json(doc, static_cast<uint32_t>(strlen(doc)), bank_storage.get()));
+        TEST(bank_storage->bank.instruments.entries[0].layers[0].osc_type[0] == Synth::WaveType::string_wave);
+    }
+
+    // Wave B string is refused by the strict decoder and the lenient bank.
+    {
+        static const char b_doc[] =
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"wave_b\":\"string\"}]}";
+        TEST(! string_clip_decode(b_doc, &decoded));
+        static const char b_bank[] =
+            "{\"instrument_editor_bank\":{\"instruments\":[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\","
+            "\"wave_b\":\"string\",\"routing\":{}}]}],"
+            "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}";
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        memset(static_cast<void*>(bank_storage.get()), 0, sizeof(*bank_storage));
+        TEST(! Synth::decode_editor_bank_json(b_bank, static_cast<uint32_t>(strlen(b_bank)), bank_storage.get()));
+    }
+
+    // Wherever pad is accepted string is too (wave A), and wherever pad is
+    // refused (LFO waves) string is refused as well.
+    {
+        static const char lfo_doc[] = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
+                                      "\"volume\":{\"lfo\":{\"wave\":\"string\",\"frequency_hz\":4}}}]}";
+        TEST(! string_clip_decode(lfo_doc, &decoded));
+        static const char lfo_bank[] =
+            "{\"instrument_editor_bank\":{\"lfos\":[{\"wave\":\"string\",\"period_ms\":100}]}}";
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        memset(static_cast<void*>(bank_storage.get()), 0, sizeof(*bank_storage));
+        TEST(! Synth::decode_editor_bank_json(lfo_bank, static_cast<uint32_t>(strlen(lfo_bank)), bank_storage.get()));
+    }
+
+    // Legacy pad documents still decode, with no string keys re-encoded.
+    {
+        static const char pad_doc[] =
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"pad\",\"duty_a\":{\"base\":0.5}}]}";
+        TEST(string_clip_decode(pad_doc, &decoded));
+        TEST(decoded.instr.layers[0].osc_type[0] == static_cast<Synth::WaveType>(5));
+    }
+
+    // Encode round trip of wave A string; unused string keys are omitted.
+    {
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
+        Synth::Instrument instr           = {};
+        instr.layer_count                 = 1;
+        instr.layers[0].osc_type[0]       = Synth::WaveType::string_wave;
+        instr.layers[0].fir_slope_percent = 100;
+        const uint32_t slot               = bank.bank.instruments.allocate();
+        TEST(slot != pool_no_slot);
+        bank.bank.instruments.entries[slot] = instr;
+        const std::unique_ptr<FixedArray<char, clipboard_capacity>> text_storage =
+            std::make_unique<FixedArray<char, clipboard_capacity>>();
+        char (&text)[clipboard_capacity] = text_storage->elements;
+        const uint32_t length            = Synth::encode_instrument_json(text, sizeof(text), &instr, &bank.bank);
+        TEST(length > 0);
+        if (length > 0) {
+            TEST(strstr(text, "\"wave_a\":\"string\"") != nullptr);
+            TEST(strstr(text, "string_pick") == nullptr);
+            TEST(strstr(text, "string_damping") == nullptr);
+            TEST(strstr(text, "string_release_damping") == nullptr);
+            TEST(string_clip_decode(text, &decoded));
+            TEST(decoded.instr.layers[0].osc_type[0] == Synth::WaveType::string_wave);
+        }
+    }
+}
+
+// Builds the smallest valid bank (one instrument, one envelope, one LFO, one
+// zone) with `wave_a` / `wave_b` on layer 0.
+static void string_make_bank(Synth::InstrumentBank& bank, Synth::WaveType wave_a, Synth::WaveType wave_b)
+{
+    memset(static_cast<void*>(&bank), 0, sizeof(bank));
+    const uint32_t env                                = bank.envelopes.allocate();
+    bank.envelopes.entries[env].num_points            = 2;
+    bank.envelopes.entries[env].points[1].position    = 100;
+    const uint32_t lfo                                = bank.lfos.allocate();
+    bank.lfos.entries[lfo].wave                       = Synth::WaveType::sine_wave;
+    bank.lfos.entries[lfo].period_ms                  = 50;
+    const uint32_t     instr                          = bank.instruments.allocate();
+    Synth::Oscillator& layer                          = bank.instruments.entries[instr].layers[0];
+    bank.instruments.entries[instr].layer_count       = 1;
+    layer.fir_slope_percent                           = 100;
+    layer.osc_type[0]                                 = wave_a;
+    layer.osc_type[1]                                 = wave_b;
+    layer.targets[Synth::mod_volume].envelope_desc_id = static_cast<uint16_t>(env + 1);
+    layer.targets[Synth::mod_pitch].lfo_desc_id       = static_cast<uint16_t>(lfo + 1);
+    bank.channel_zones[0][0]                          = { 1, static_cast<uint8_t>(instr) };
+    bank.channel_enabled[0]                           = 1;
+}
+
+// Validator: wave A string (6) accepted, wave A 7 refused, wave B string refused.
+static void check_string_wave_validator()
+{
+    const std::unique_ptr<Synth::InstrumentBank> storage = std::make_unique<Synth::InstrumentBank>();
+    Synth::InstrumentBank&                       bank    = *storage;
+
+    string_make_bank(bank, Synth::WaveType::string_wave, Synth::WaveType::no_wave);
+    TEST(Synth::validate_instrument_bank(&bank));
+    string_make_bank(bank, Synth::WaveType::string_wave, Synth::WaveType::sine_wave);
+    TEST(Synth::validate_instrument_bank(&bank));
+    string_make_bank(bank, static_cast<Synth::WaveType>(7), Synth::WaveType::no_wave);
+    TEST(! Synth::validate_instrument_bank(&bank));
+    string_make_bank(bank, Synth::WaveType::sine_wave, Synth::WaveType::string_wave);
+    TEST(! Synth::validate_instrument_bank(&bank));
+    // Pick position must lie in [0,1]; the bound edges are accepted.
+    static const float pick_ok[] = { 0.0f, 0.5f, 1.0f };
+    for (const float pick : pick_ok) {
+        string_make_bank(bank, Synth::WaveType::string_wave, Synth::WaveType::no_wave);
+        bank.instruments.entries[0].layers[0].string_pick = pick;
+        TEST(Synth::validate_instrument_bank(&bank));
+    }
+    static const float pick_bad[] = { -0.1f, 1.1f, NAN };
+    for (const float pick : pick_bad) {
+        string_make_bank(bank, Synth::WaveType::string_wave, Synth::WaveType::no_wave);
+        bank.instruments.entries[0].layers[0].string_pick = pick;
+        TEST(! Synth::validate_instrument_bank(&bank));
+    }
+}
+
+// Pick position, damping and release damping JSON bounds and defaults.  Pick is
+// a layer scalar in [0,1]; damping and release damping are 0..1 targets.
+static void check_string_param_json_bounds()
+{
+    const std::unique_ptr<ClipboardDecode> storage = std::make_unique<ClipboardDecode>();
+    ClipboardDecode&                       decoded = *storage;
+    char                                   doc[256];
+
+    static const char* const accepted[] = { "0", "0.5", "1" };
+    for (const char* value : accepted) {
+        snprintf(doc,
+                 sizeof(doc),
+                 "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\",\"string_pick\":%s}]}",
+                 value);
+        TEST(string_clip_decode(doc, &decoded));
+    }
+    // The 0.5 control decodes, so the refusals below come from the bound.
+    static const char* const refused[] = { "-0.1", "1.1", "NaN" };
+    for (const char* value : refused) {
+        snprintf(doc,
+                 sizeof(doc),
+                 "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\",\"string_pick\":%s}]}",
+                 value);
+        TEST(! string_clip_decode(doc, &decoded));
+    }
+
+    // Damping and release damping targets: bases decode in range, refuse out of range.
+    static const char* const target_keys[2] = { "string_damping", "string_release_damping" };
+    for (uint32_t t = 0; t < 2; ++t) {
+        snprintf(doc,
+                 sizeof(doc),
+                 "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\",\"%s\":{\"base\":0.25}}]}",
+                 target_keys[t]);
+        TEST(string_clip_decode(doc, &decoded));
+        if (Synth::num_mod_targets > 26 + t) {
+            const Synth::TargetBinding* const bindings = decoded.instr.layers[0].targets;
+            TEST(bindings[26 + t].base_value == 0.25f);
+        }
+        snprintf(doc,
+                 sizeof(doc),
+                 "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\",\"%s\":{\"base\":1.5}}]}",
+                 target_keys[t]);
+        TEST(! string_clip_decode(doc, &decoded));
+    }
+
+    // Absent keys default to zero: a pad/string layer with no string keys
+    // decodes with zeroed pick, damping and release damping bindings.
+    {
+        static const char absent_doc[] = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\"}]}";
+        TEST(string_clip_decode(absent_doc, &decoded));
+        if (Synth::num_mod_targets > 27) {
+            const Synth::TargetBinding* const bindings = decoded.instr.layers[0].targets;
+            TEST(bindings[26].base_value == 0.0f && bindings[26].num_inputs == 0);
+            TEST(bindings[27].base_value == 0.0f && bindings[27].num_inputs == 0);
+        }
+        TEST(Synth::num_mod_targets == 28);
+    }
+}
+
+// Gating: string A (list index 5) grays no mode row and enables the pick row
+// and the duty a / pad tone a rows (relabelled Damping / Release damping);
+// every other wave A grays the pick row; the B list offers no string.
+static void check_string_wave_gating()
+{
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank         = *bank_storage;
+    Synth::Instrument                                  instrument   = {};
+    build_binding_fixture(&bank, &instrument);
+    const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph         = *graph_storage;
+    Sculptor::OscGraphMapping              mapping       = {};
+    TEST(Sculptor::project_instrument_to_graph(instrument, bank.bank, &graph, &mapping));
+    const uint32_t node_index = mapping.osc_nodes[0];
+    TEST(node_index != Sculptor::pool_no_slot);
+    if (node_index == Sculptor::pool_no_slot) {
+        return;
+    }
+
+    // Lists: A ends with string, B does not offer it.
+    {
+        const Sculptor::Node& node = graph.node(node_index);
+        TEST(node.slots.entries[1].num_list_options == 6);
+        TEST(strcmp(node.slots.entries[1].list_options[5], "string") == 0);
+        TEST(node.slots.entries[29].num_list_options == 6);
+        for (uint32_t i = 0; i < node.slots.entries[29].num_list_options; ++i) {
+            TEST(strcmp(node.slots.entries[29].list_options[i], "string") != 0);
+        }
+    }
+
+    constexpr uint32_t wave_a_slot = 1;
+    constexpr uint32_t wave_b_slot = 29;
+    constexpr uint32_t mode_slot   = 56;
+    constexpr uint32_t pick_slot   = 28;
+
+    Sculptor::PropertyValue value = {};
+    value.list_index              = 1; // wave B sine so the mode rows are live
+    graph.set_slot_value(node_index, wave_b_slot, value);
+    value.list_index = 1; // fm mode
+    graph.set_slot_value(node_index, mode_slot, value);
+
+    bool           mode_rows_saw[5] = {};
+    const uint32_t mode_rows[5]     = { mode_slot, 70, 83, 57, 30 };
+    value.list_index                = 1; // sawtooth: reference for the mode rows
+    graph.set_slot_value(node_index, wave_a_slot, value);
+    for (uint32_t r = 0; r < 5; ++r) {
+        mode_rows_saw[r] = Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), mode_rows[r]);
+    }
+
+    for (uint32_t list = 0; list < 6; ++list) {
+        value.list_index = static_cast<uint8_t>(list);
+        graph.set_slot_value(node_index, wave_a_slot, value);
+        const bool is_string = list == 5;
+        TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), pick_slot) == ! is_string);
+        // Rows 2..14 (Duty A, Damping under string) are gated for sine and noise;
+        // rows 15..27 (Pad Tone A, Release damping under string) for all but
+        // pad and string.
+        for (uint32_t row = 2; row <= 27; ++row) {
+            const bool gated = row <= 14 ? (list == 0 || list == 3) : (list != 4 && list != 5);
+            TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), row) == gated);
+        }
+        if (is_string) {
+            // String A grays no mode row: the mode rows follow the saw reference.
+            for (uint32_t r = 0; r < 5; ++r) {
+                TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), mode_rows[r]) ==
+                     mode_rows_saw[r]);
+            }
+        }
+    }
+}
+
+// Row reuse: under the string wave the Duty A / Pad Tone A rows (2 and 15) are
+// relabelled Damping / Release Damping, carry targets 26 / 27, and round-trip
+// through compile; other waves keep Duty A / Pad Tone A and drop the string
+// bindings from the graph.
+static void check_string_row_reuse()
+{
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank         = *bank_storage;
+    Synth::Instrument                                  instrument   = {};
+    build_binding_fixture(&bank, &instrument);
+    const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph         = *graph_storage;
+    Sculptor::OscGraphMapping              mapping       = {};
+
+    instrument.layers[0].osc_type[0]                                           = Synth::WaveType::string_wave;
+    instrument.layers[0].targets[Synth::mod_string_damping].base_value         = 0.3f;
+    instrument.layers[0].targets[Synth::mod_string_release_damping].base_value = 0.6f;
+    TEST(Sculptor::project_instrument_to_graph(instrument, bank.bank, &graph, &mapping));
+    const Sculptor::Node& node = graph.node(mapping.osc_nodes[0]);
+    TEST(node.slots.num_allocated ==
+         Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride * instrument.layers[0].fir_band_count);
+    TEST(strcmp(node.slots.entries[2].name, "Damping") == 0 && approx(node.slots.entries[2].value.real, 0.3f, 1.0e-6f));
+    TEST(strcmp(node.slots.entries[15].name, "Release Damping") == 0 &&
+         approx(node.slots.entries[15].value.real, 0.6f, 1.0e-6f));
+    Synth::Instrument compiled = {};
+    TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+    TEST(approx(compiled.layers[0].targets[Synth::mod_string_damping].base_value, 0.3f, 1.0e-6f));
+    TEST(approx(compiled.layers[0].targets[Synth::mod_string_release_damping].base_value, 0.6f, 1.0e-6f));
+    TEST(compiled.layers[0].targets[Synth::mod_duty0].base_value == 0.0f);
+
+    instrument.layers[0].osc_type[0]                          = Synth::WaveType::sawtooth_wave;
+    instrument.layers[0].targets[Synth::mod_duty0].base_value = 0.7f;
+    TEST(Sculptor::project_instrument_to_graph(instrument, bank.bank, &graph, &mapping));
+    const Sculptor::Node& saw_node = graph.node(mapping.osc_nodes[0]);
+    TEST(strcmp(saw_node.slots.entries[2].name, "Duty A") == 0 &&
+         approx(saw_node.slots.entries[2].value.real, 0.7f, 1.0e-6f));
+    TEST(strcmp(saw_node.slots.entries[15].name, "Pad Tone A") == 0);
+    TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+    TEST(approx(compiled.layers[0].targets[Synth::mod_duty0].base_value, 0.7f, 1.0e-6f));
+    TEST(compiled.layers[0].targets[Synth::mod_string_damping].base_value == 0.0f);
+
+    Sculptor::GraphChange change = {};
+    change.kind                  = Sculptor::ChangeKind::value_changed;
+    change.node_idx              = mapping.osc_nodes[0];
+    change.slot_idx              = 1;
+    TEST(Sculptor::osc_change_restructures(mapping, change));
+}
+
+// Source pins for the three runtime wiring seams (realtime_synth.cpp is not
+// linked into this unit): pick note-on copy, damping and release damping
+// destination reads, and the host specialization of rt_step_samples.
+static void check_string_runtime_source_pins()
+{
+    const char* const runtime = load_source_file("synth/realtime_synth.cpp");
+    TEST(runtime != nullptr);
+    if (! runtime) {
+        return;
+    }
+    const char* const end = runtime + strlen(runtime);
+    TEST(find_in_range(runtime, end, "osc.string_pick = layer.string_pick;") != nullptr);
+    TEST(find_in_range(
+             runtime,
+             end,
+             "osc.string_damping = unit_range_clamp(parameters[osc_param(osc_idx, osc_string_damping_dest)].value);") !=
+         nullptr);
+    TEST(
+        find_in_range(
+            runtime,
+            end,
+            "osc.string_release_damping = unit_range_clamp(parameters[osc_param(osc_idx, osc_string_release_damping_dest)].value);") !=
+        nullptr);
+    TEST(find_in_range(runtime, end, "param.string_pick = oscillator.string_pick;") != nullptr);
+    TEST(find_in_range(runtime, end, "param.string_damping = oscillator.string_damping;") != nullptr);
+    TEST(find_in_range(runtime, end, "param.string_release_damping = oscillator.string_release_damping;") != nullptr);
+    TEST(find_in_range(runtime, end, "static_assert(num_osc_roles == 84)") != nullptr);
+    TEST(find_in_range(runtime, end, "{ 0, 0, 4 }, { 1, 4, 4 }") != nullptr);
+    TEST(find_in_range(runtime, end, "Synth::rt_step_samples, 0, num_fir_taps") != nullptr);
+    const char* const config = load_source_file("synth/synth_config.h");
+    TEST(config != nullptr && strstr(config, "rt_step_samples = 256") != nullptr);
+}
+
+// D10: source pins on the string math in synth_oscillator.comp.glsl (not
+// executable here).  Each token fails if the shader's string path changes.
+static void check_string_shader_source_pins()
+{
+    const char* const shader = load_source_file("synth/synth_oscillator.comp.glsl");
+    TEST(shader != nullptr);
+    if (! shader) {
+        return;
+    }
+    const char* const end = shader + strlen(shader);
+    TEST(find_in_range(shader, end, "if (is_string && !(type2 != no_wave && osc_mode == osc_mode_hard_sync)) {") !=
+         nullptr);
+    TEST(find_in_range(shader,
+                       end,
+                       "(1.0 - string_damping_coeff) * pass_input + string_damping_coeff * string_prev_lowpass;") !=
+         nullptr);
+    TEST(
+        find_in_range(
+            shader,
+            end,
+            "string_allpass_coeff * lowpass_out + string_prev_lowpass - string_allpass_coeff * string_prev_allpass;") !=
+        nullptr);
+    TEST(find_in_range(shader, end, "float loop_output = allpass_out * (string_loop_gain * string_release_gain);") !=
+         nullptr);
+    TEST(find_in_range(shader, end, "= abs(loop_output) < 8.0 ? loop_output : 0.0;") != nullptr);
+    TEST(find_in_range(shader,
+                       end,
+                       "string_release_gain += release_smooth_coeff * (release_target - string_release_gain);") !=
+         nullptr);
+    TEST(find_in_range(shader, end, "string_block_out[i] = pass_input;") != nullptr);
+    TEST(find_in_range(shader, end, "value = is_string ? string_block_out[lane]") != nullptr);
+    TEST(find_in_range(
+             shader,
+             end,
+             "string_ring_read(param.string_state_offs + string_header_words, phase + param.fm_index * modulator)") !=
+         nullptr);
+    // OscillatorParams field order: the string fields follow pad_tilt.
+    const char* const tilt = find_in_range(shader, end, "float pad_tilt[2];");
+    const char* const offs = tilt ? find_in_range(tilt, end, "uint string_state_offs;") : nullptr;
+    const char* const pick = offs ? find_in_range(offs, end, "float string_pick;") : nullptr;
+    const char* const damp = pick ? find_in_range(pick, end, "float string_damping;") : nullptr;
+    const char* const rel  = damp ? find_in_range(damp, end, "float string_release_damping;") : nullptr;
+    TEST(rel != nullptr);
+}
+
+// TRAP 1/2: targets 26/27 must not map to band 4+ in the shared helper
+// osc_target_band_index (graph compile and encode).  The source pin checks the
+// 14..25 bound; the band-count-1 behavior check below confirms that the encoder
+// keeps non-default string routing and generators.
+static void check_string_trap_regressions()
+{
+    const char* const header_src = load_source_file("sculptor/sculptor_osc_graph.h");
+    TEST(header_src != nullptr);
+    if (header_src) {
+        const char* const decl  = strstr(header_src, "inline int32_t osc_target_band_index(");
+        const char*       open  = nullptr;
+        const char*       close = nullptr;
+        TEST(decl != nullptr);
+        if (decl && source_body_range(decl, &open, &close)) {
+            TEST(find_in_range(open, close, "target >= 14u && target <= 25u") != nullptr);
+        }
+    }
+
+    // Behavior at band count 1: non-default routing and generators on both
+    // new targets survive the bank encode (the keys are emitted).
+    if (Synth::num_mod_targets > 27) {
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
+        build_binding_fixture(&bank, &instrument);
+        Synth::Oscillator& layer = bank.bank.instruments.entries[0].layers[0];
+        layer.osc_type[0]        = Synth::WaveType::string_wave;
+        layer.fir_band_count     = 1;
+        for (uint32_t t = 26; t < 28; ++t) {
+            Synth::TargetBinding* const binding = &layer.targets[0] + t;
+            binding->base_value                 = 0.5f;
+            binding->lfo_desc_id                = 1;
+            binding->lfo_op                     = Synth::SourceOp::add;
+            binding->lfo_depth                  = 0.25f;
+        }
+        const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+            std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+        char (&payload)[Synth::library_payload_max] = payload_storage->elements;
+        const uint32_t length                       = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
+        TEST(length > 0);
+        TEST(strstr(payload, "\"string_damping\"") != nullptr);
+        TEST(strstr(payload, "\"string_release_damping\"") != nullptr);
+    }
+}
+
+static void string_wave_m2_regressions()
+{
+    check_string_wave_json_codec();
+    check_string_wave_validator();
+    check_string_param_json_bounds();
+    check_string_wave_gating();
+    check_string_row_reuse();
+    check_string_runtime_source_pins();
+    check_string_shader_source_pins();
+    check_string_trap_regressions();
+}
+
+// ---- String DSP: float32 CPU mirror of the lane-0 serial loop (executable spec).
+// Evidence ceiling: pins the arithmetic and design logic, not GPU equivalence.
+static uint32_t string_pcg_hash(uint32_t state)
+{
+    state               = state * 747796405u + 2891336453u;
+    const uint32_t word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+// Host-side clamp of the resolved damping destinations (realtime_synth.cpp unit_range_clamp).
+static float string_unit_clamp(float value)
+{
+    return value >= 0.0f ? (value <= 1.0f ? value : 1.0f) : 0.0f;
+}
+
+// Per-step scalar block, evaluated once per dispatch in float32.
+static StringScalars string_mirror_scalars(float f0, float damping, float release_damping)
+{
+    StringScalars s = {};
+    s.silent        = ! (f0 >= 22.0f);
+    if (s.silent) {
+        return s;
+    }
+    damping           = string_unit_clamp(damping);
+    release_damping   = string_unit_clamp(release_damping);
+    float len         = string_fs / f0;
+    len               = len < 3.0f ? 3.0f : len;
+    s.c               = 0.10f + 0.30f * damping;
+    const float tau   = s.c / (1.0f - s.c);
+    const float t60   = 20.0f * powf(0.25f / 20.0f, damping);
+    const float omega = 6.2831853f * f0 / string_fs;
+    const float mag   = (1.0f - s.c) / sqrtf(1.0f - 2.0f * s.c * cosf(omega) + s.c * s.c);
+    const float g     = powf(10.0f, -3.0f * len / (string_fs * t60)) / mag;
+    s.g               = g < 0.9999f ? g : 0.9999f;
+    const float delay = len - tau;
+    s.n               = static_cast<uint32_t>(floorf(delay - 1.0f));
+    const float d     = delay - static_cast<float>(s.n);
+    s.a               = (1.0f - d) / (1.0f + d);
+    s.gr              = powf(10.0f, -release_damping * 3.0f * len / (string_fs * 0.05f));
+    return s;
+}
+
+// Note-on init: noise, optional backward pick comb, then the mean pass.
+static void string_mirror_init(StringMirror* m, float f0, float damping, float pick, uint32_t seed)
+{
+    const StringScalars s = string_mirror_scalars(f0, damping, 0.0f);
+    if (s.silent) {
+        return;
+    }
+    const uint32_t n = s.n;
+    for (uint32_t i = 0; i < n; ++i) {
+        m->ring[i] = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
+    }
+    uint32_t off = static_cast<uint32_t>(floorf(pick * static_cast<float>(n) + 0.5f));
+    off          = (pick > 0.0f && off < 1) ? 1 : off;
+    off          = off < n - 1 ? off : n - 1;
+    uint32_t i   = n;
+    while (i > off && off > 0) {
+        --i;
+        m->ring[i] -= m->ring[i - off];
+    }
+    float sum = 0.0f;
+    for (uint32_t k = 0; k < n; ++k) {
+        sum += m->ring[k];
+    }
+    const float mean = sum / static_cast<float>(n);
+    for (uint32_t k = 0; k < n; ++k) {
+        m->ring[k] -= mean;
+    }
+    m->wr     = n;
+    m->t1     = 0.0f;
+    m->u1     = 0.0f;
+    m->e      = 1.0f;
+    m->tagged = true;
+    m->tag    = seed;
+}
+
+// One dispatch of `count` samples (the shader uses 256).
+static void string_mirror_step(StringMirror* m,
+                               float         f0,
+                               float         damping,
+                               float         release_damping,
+                               bool          release,
+                               float*        out,
+                               uint32_t      count)
+{
+    const StringScalars s = string_mirror_scalars(f0, damping, release_damping);
+    if (s.silent) {
+        for (uint32_t i = 0; i < count; ++i) {
+            out[i] = 0.0f;
+        }
+        return;
+    }
+    const float kr     = 1.0f - expf(-1.0f / (string_fs * 0.003f));
+    const float target = release ? s.gr : 1.0f;
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t rd = m->wr >= s.n ? m->wr - s.n : m->wr + string_ring_size - s.n;
+        const float    x  = m->ring[rd];
+        out[i]            = x;
+        m->e += kr * (target - m->e);
+        const float t  = (1.0f - s.c) * x + s.c * m->t1;
+        const float u  = s.a * t + m->t1 - s.a * m->u1;
+        float       v  = u * (s.g * m->e);
+        v              = fabsf(v) < 8.0f ? v : 0.0f;
+        m->ring[m->wr] = v;
+        m->t1          = t;
+        m->u1          = u;
+        m->wr          = m->wr + 1 == string_ring_size ? 0 : m->wr + 1;
+    }
+}
+
+// Shader-equivalent pass: silent skips everything, the first in-range pass of a seed inits.
+static void string_mirror_play(StringMirror* m,
+                               float         f0,
+                               float         damping,
+                               float         release_damping,
+                               float         pick,
+                               bool          release,
+                               uint32_t      seed,
+                               float*        out,
+                               uint32_t      count)
+{
+    if (! string_mirror_scalars(f0, damping, release_damping).silent && ! (m->tagged && m->tag == seed)) {
+        string_mirror_init(m, f0, damping, pick, seed);
+    }
+    string_mirror_step(m, f0, damping, release_damping, release, out, count);
+}
+
+// Whole 256-sample dispatches; count is a multiple of 256.
+static void string_mirror_run(StringMirror* m, float f0, float damping, uint32_t count, float* out)
+{
+    for (uint32_t i = 0; i < count; i += 256) {
+        string_mirror_step(m, f0, damping, 0.0f, false, out + i, 256);
+    }
+}
+
+// Hann-windowed DFT magnitude of x[start, start+len) at freq (Hz).
+static double string_amp_at(const float* x, uint32_t start, uint32_t len, double freq)
+{
+    constexpr double two_pi = 6.283185307179586;
+    double           re     = 0.0;
+    double           im     = 0.0;
+    for (uint32_t i = 0; i < len; ++i) {
+        const double w  = 0.5 - 0.5 * cos(two_pi * i / len);
+        const double ph = two_pi * freq * (start + i) / 44100.0;
+        re += w * static_cast<double>(x[start + i]) * cos(ph);
+        im += w * static_cast<double>(x[start + i]) * sin(ph);
+    }
+    return sqrt(re * re + im * im);
+}
+
+// Fundamental frequency (Hz): golden-section peak of the windowed DFT near f0.
+// A decaying line keeps a symmetric peak under a symmetric window, so no bias.
+static double string_peak_freq(const float* x, uint32_t start, uint32_t len, double f0, double half_width = 0.4)
+{
+    double           lo    = f0 - half_width;
+    double           hi    = f0 + half_width;
+    constexpr double ratio = 0.6180339887498949;
+    double           a     = hi - ratio * (hi - lo);
+    double           b     = lo + ratio * (hi - lo);
+    double           fa    = string_amp_at(x, start, len, a);
+    double           fb    = string_amp_at(x, start, len, b);
+    for (int it = 0; it < 28; ++it) {
+        if (fa < fb) {
+            lo = a;
+            a  = b;
+            fa = fb;
+            b  = lo + ratio * (hi - lo);
+            fb = string_amp_at(x, start, len, b);
+        }
+        else {
+            hi = b;
+            b  = a;
+            fb = fa;
+            a  = hi - ratio * (hi - lo);
+            fa = string_amp_at(x, start, len, a);
+        }
+    }
+    return 0.5 * (lo + hi);
+}
+
+// Time to -60 dB (s) from the line amplitude in two equal windows `gap` samples apart.
+static double string_measured_t60(const float* x, uint32_t start, uint32_t len, uint32_t gap, double f0)
+{
+    const double a1 = string_amp_at(x, start, len, f0);
+    const double a2 = string_amp_at(x, start + gap, len, f0);
+    return 60.0 * (gap / 44100.0) / (20.0 * log10(a1 / a2));
+}
+
+// DSP mirror core: these tests exercise only the mirror above, which is the
+// executable spec the shader must match (evidence ceiling: CPU float32 logic,
+// not GPU equivalence).
+static constexpr uint32_t string_test_samples = 4 * 44100 / 256 * 256;
+static float              string_test_out[string_test_samples];
+static StringMirror       string_test_mirror;
+
+static void string_test_render(float f0, float damping, uint32_t seed)
+{
+    memset(&string_test_mirror, 0, sizeof(string_test_mirror));
+    string_mirror_init(&string_test_mirror, f0, damping, 0.0f, seed);
+    string_mirror_run(&string_test_mirror, f0, damping, string_test_samples, string_test_out);
+}
+
+// Hand-checkable case: f0 = 4410 Hz gives L = 10, p = 0 gives c = 0.1, so
+// tau = 1/9, D = 9.8889, N = 8, d = 1.8889, a = -0.30769 and g is capped at
+// 0.9999. Ring 0.5, -0.25, 0.75, -1, 0.25, -0.5, 1, -0.75:
+//   i = 0: x = 0.5, t = 0.45, u = a*0.45 = -0.13846154, v = u*0.9999 = -0.13844769
+//   i = 1: x = -0.25, t = -0.18, u = a*(-0.18) + 0.45 - a*(-0.13846154) = 0.46278107,
+//          v = 0.46273479
+// With release (q = 1): Gr = 10^(-30/2205) = 0.96915794, kr = 0.0075300848, so
+// e = 0.99976776 then 0.99953726, v = -0.13841554 and 0.46252066.
+static void check_string_mirror_recurrence()
+{
+    const float         ring0[8] = { 0.5f, -0.25f, 0.75f, -1.0f, 0.25f, -0.5f, 1.0f, -0.75f };
+    const StringScalars scalars  = string_mirror_scalars(4410.0f, 0.0f, 1.0f);
+    TEST(! scalars.silent);
+    TEST(scalars.n == 8);
+    TEST(approx(scalars.c, 0.1f, 1e-7f));
+    TEST(approx(scalars.a, -0.30769231f, 1e-6f));
+    TEST(scalars.g == 0.9999f);
+    TEST(approx(scalars.gr, 0.96915794f, 1e-6f));
+
+    for (uint32_t release = 0; release < 2; ++release) {
+        StringMirror m = {};
+        for (uint32_t i = 0; i < 8; ++i) {
+            m.ring[i] = ring0[i];
+        }
+        m.wr = 8;
+        m.e  = 1.0f;
+        float out[2];
+        string_mirror_step(&m, 4410.0f, 0.0f, 1.0f, release != 0, out, 2);
+        TEST(out[0] == 0.5f);
+        TEST(out[1] == -0.25f);
+        TEST(m.wr == 10);
+        TEST(approx(m.t1, -0.18f, 1e-6f));
+        TEST(approx(m.u1, 0.46278107f, 1e-6f));
+        TEST(approx(m.ring[8], release ? -0.13841554f : -0.13844769f, 1e-6f));
+        TEST(approx(m.ring[9], release ? 0.46252066f : 0.46273479f, 1e-6f));
+        TEST(approx(m.e, release ? 0.99953726f : 1.0f, 1e-6f));
+        TEST(m.ring[0] == ring0[0]); // untouched slots keep their value
+    }
+
+    // Init: ring slots 0..N-1 sum to ~0, state is reset, p = 0 skips the comb.
+    memset(&string_test_mirror, 0, sizeof(string_test_mirror));
+    string_mirror_init(&string_test_mirror, 220.0f, 0.5f, 0.0f, 99);
+    const uint32_t n   = string_mirror_scalars(220.0f, 0.5f, 0.0f).n;
+    double         sum = 0.0;
+    for (uint32_t i = 0; i < n; ++i) {
+        sum += static_cast<double>(string_test_mirror.ring[i]);
+    }
+    TEST(fabs(sum / n) < 1e-6);
+    TEST(string_test_mirror.wr == n && string_test_mirror.e == 1.0f);
+}
+
+// C1: the dominant spectral line sits within one bin of the fundamental.
+// 16384-sample Hann window from 1.0 s at p = 0.5 (t60 2.2 s): the damped
+// upper harmonics have decayed by then.
+static void check_string_mirror_spectral_peak()
+{
+    constexpr uint32_t len      = 16384;
+    constexpr double   bin      = 44100.0 / len;
+    const float        freqs[2] = { 82.41f, 329.63f };
+    for (uint32_t i = 0; i < 2; ++i) {
+        string_test_render(freqs[i], 0.5f, 1234);
+        uint32_t best     = 0;
+        double   best_amp = 0.0;
+        for (uint32_t k = 1; k * bin < 5.0 * static_cast<double>(freqs[i]); ++k) {
+            const double amp = string_amp_at(string_test_out, 44100, len, k * bin);
+            if (amp > best_amp) {
+                best_amp = amp;
+                best     = k;
+            }
+        }
+        const double expected = static_cast<double>(freqs[i]) / bin;
+        TEST(fabs(best - expected) <= 1.0);
+        // C1: refine around the coarse bin (golden section) and hold 10 cents,
+        // for the low E as well as the high note.
+        const double refined = string_peak_freq(string_test_out, 44100, len, best * bin, bin);
+        TEST(fabs(1200.0 * log2(refined / static_cast<double>(freqs[i]))) < 10.0);
+    }
+}
+
+// C2: the fundamental t60 matches 20 * (0.25/20)^p. Tolerance 2%: the design
+// makes the fundamental exact (g divides by |H(f0)|), so the error is only the
+// Hann-window amplitude estimate on a decaying line (measured < 0.1%) plus
+// float32 rounding. Broadband RMS is not used: harmonics decay faster.
+static void check_string_mirror_t60()
+{
+    const float damping[3] = { 0.25f, 0.5f, 0.75f };
+    double      previous   = 1e9;
+    for (uint32_t i = 0; i < 3; ++i) {
+        string_test_render(110.0f, damping[i], 77);
+        const double designed = 20.0 * pow(0.25 / 20.0, damping[i]);
+        const double measured = string_measured_t60(string_test_out, 1024, 8192, 11025, 110.0);
+        TEST(fabs(measured / designed - 1.0) < 0.02);
+        TEST(measured < previous);
+        previous = measured;
+    }
+}
+
+// Allpass fractional tuning: fs/f0 is non-integer for every entry. The golden
+// section peak of a 2 s window (symmetric, so decay adds no bias) must be
+// within 0.1 cent. Measured worst case is about 0.014 cent (880 Hz).
+static void check_string_mirror_tuning()
+{
+    const float freqs[5] = { 123.47f, 261.63f, 329.63f, 440.0f, 880.0f };
+    for (uint32_t i = 0; i < 5; ++i) {
+        string_test_render(freqs[i], 0.0f, 4321);
+        const double peak = string_peak_freq(string_test_out, 11025, 88200, static_cast<double>(freqs[i]));
+        TEST(fabs(1200.0 * log2(peak / static_cast<double>(freqs[i]))) < 0.1);
+    }
+}
+
+// Loop-gain cap. The cap engages when 10^(-3L/(fs*t60))/|H| exceeds 0.9999,
+// which needs a short loop (high note) with a long t60, or a lowpass-heavy
+// loop. It never engages on low notes: 82.41 Hz at p = 0 and p = 1 stays
+// below it. Where it engages the fundamental decays FASTER than the designed
+// t60 (the gain cannot reach the target), at L/fs * 3 / -log10(g*|H|).
+static void check_string_mirror_gain_cap()
+{
+    TEST(string_mirror_scalars(82.41f, 0.0f, 0.0f).g < 0.9999f);
+    TEST(string_mirror_scalars(82.41f, 1.0f, 0.0f).g < 0.9999f);
+
+    const float damping[2] = { 0.0f, 1.0f };
+    for (uint32_t i = 0; i < 2; ++i) {
+        const float f0 = 2000.0f;
+        TEST(string_mirror_scalars(f0, damping[i], 0.0f).g == 0.9999f);
+        string_test_render(f0, damping[i], 5);
+        const double c        = 0.10 + 0.30 * static_cast<double>(damping[i]);
+        const double omega    = 6.283185307179586 * static_cast<double>(f0) / 44100.0;
+        const double mag      = (1.0 - c) / sqrt(1.0 - 2.0 * c * cos(omega) + c * c);
+        const double expected = (44100.0 / static_cast<double>(f0)) / 44100.0 * 3.0 / -log10(0.9999 * mag);
+        const double designed = 20.0 * pow(0.25 / 20.0, damping[i]);
+        const double measured = string_measured_t60(string_test_out, 0, 2048, 4410, static_cast<double>(f0));
+        TEST(fabs(measured / expected - 1.0) < 0.02);
+        TEST(measured < designed);
+    }
+}
+
+// 22 Hz floor. The design maps f0 < 22 (and NaN) to silence, not a clamp (a
+// clamp would sound a wrong pitch): output is 0 and the state is untouched.
+// 22 Hz is the longest loop (N = 2002 at p = 1) and must stay finite and in bounds.
+static void check_string_mirror_floor()
+{
+    const float silent_freqs[3] = { 21.9f, 0.0f, NAN };
+    for (uint32_t i = 0; i < 3; ++i) {
+        TEST(string_mirror_scalars(silent_freqs[i], 0.5f, 0.0f).silent);
+        StringMirror m = {};
+        m.ring[0]      = 1.0f;
+        m.wr           = 5;
+        float out[256];
+        for (uint32_t k = 0; k < 256; ++k) {
+            out[k] = 1.0f;
+        }
+        string_mirror_init(&m, silent_freqs[i], 0.5f, 0.0f, 3);
+        string_mirror_step(&m, silent_freqs[i], 0.5f, 0.0f, false, out, 256);
+        TEST(m.wr == 5 && m.ring[0] == 1.0f);
+        for (uint32_t k = 0; k < 256; ++k) {
+            TEST(out[k] == 0.0f);
+        }
+    }
+
+    const float live_freqs[3] = { 22.0f, 440.0f, 10000.0f };
+    for (uint32_t i = 0; i < 3; ++i) {
+        const StringScalars s = string_mirror_scalars(live_freqs[i], 1.0f, 0.0f);
+        TEST(! s.silent && s.n >= 1 && s.n < string_ring_size - 1);
+        string_test_render(live_freqs[i], 1.0f, 8);
+        double peak = 0.0;
+        for (uint32_t k = 0; k < string_test_samples; ++k) {
+            TEST(fabsf(string_test_out[k]) < 8.0f);
+            peak = fmax(peak, fabs(string_test_out[k]));
+        }
+        TEST(peak > 0.0);
+    }
+    TEST(string_mirror_scalars(22.0f, 1.0f, 0.0f).n == 2002);
+}
+
+static void string_mirror_m2_regressions_a()
+{
+    check_string_mirror_recurrence();
+    check_string_mirror_spectral_peak();
+    check_string_mirror_t60();
+    check_string_mirror_tuning();
+    check_string_mirror_gain_cap();
+    check_string_mirror_floor();
+}
+
+// ---- Release lifetime, pick comb, FM ring read, edge bounds.
+// Mirror-level evidence only (CPU float32 logic, not GPU equivalence).
+
+// Render `total_blocks` dispatches into string_test_out.  The note is released
+// (e smoother target = Gr) from block `release_block` on.
+static void string_release_render(float    f0,
+                                  float    damping,
+                                  float    release_damping,
+                                  uint32_t seed,
+                                  uint32_t release_block,
+                                  uint32_t total_blocks)
+{
+    memset(&string_test_mirror, 0, sizeof(string_test_mirror));
+    string_mirror_init(&string_test_mirror, f0, damping, 0.0f, seed);
+    for (uint32_t b = 0; b < total_blocks; ++b) {
+        string_mirror_step(&string_test_mirror,
+                           f0,
+                           damping,
+                           release_damping,
+                           b >= release_block,
+                           string_test_out + b * 256,
+                           256);
+    }
+}
+
+static float string_max_step(const float* x, uint32_t from, uint32_t to)
+{
+    float worst = 0.0f;
+    for (uint32_t i = from + 1; i < to; ++i) {
+        worst = fmaxf(worst, fabsf(x[i] - x[i - 1]));
+    }
+    return worst;
+}
+
+// C3a: with q > 0 the release is click-free.  The e smoother (3 ms) moves the
+// loop gain continuously, so the largest sample-to-sample step in the 2048
+// samples after the release boundary stays within 1% of the largest step in
+// the 2048 samples before it (a gain jump would exceed the signal's own
+// steps).  Also: q = 1 gives -60 dB per 50 ms once e has converged.
+static void check_string_mirror_release_click_free()
+{
+    constexpr uint32_t release_block = 32;
+    string_release_render(110.0f, 0.5f, 1.0f, 99, release_block, 80);
+    const uint32_t boundary = release_block * 256;
+    const float    before   = string_max_step(string_test_out, boundary - 2048, boundary);
+    const float    across   = string_max_step(string_test_out, boundary - 2048, boundary + 2048);
+    TEST(before > 0.0f);
+    TEST(across <= before * 1.01f);
+    // Fundamental level 25 ms after the release and 50 ms later: -60 dB +- 3.
+    const uint32_t start   = boundary + 1100;
+    const double   a1      = string_amp_at(string_test_out, start, 1024, 110.0);
+    const double   a2      = string_amp_at(string_test_out, start + 2205, 1024, 110.0);
+    const double   drop_db = 20.0 * log10(a1 / a2);
+    TEST(fabs(drop_db - 60.0) < 3.0);
+}
+
+// C3b: release damping 0 keeps Gr = 1 (e stays 1), so the note rings to the
+// natural t60 of the damping row.
+static void check_string_mirror_release_zero_rings()
+{
+    string_release_render(110.0f, 0.5f, 0.0f, 99, 8, 400);
+    const double designed = 20.0 * pow(0.25 / 20.0, 0.5);
+    const double measured = string_measured_t60(string_test_out, 4096, 8192, 11025, 110.0);
+    TEST(fabs(measured / designed - 1.0) < 0.02);
+}
+
+// C3 production lifetime: the volume envelope owns the voice.  In
+// volume_termination_due a voice with no volume envelope frees on its first
+// released block, so no release damping is ever heard.  With a long volume
+// release (2 s linear here) the voice stays alive through the release, and
+// the string's own damping (palm mute) is the only thing that shortens the
+// note.  Output = string * volume envelope, as the combine stage does.
+static double string_lifetime_rms(float release_damping, uint32_t window_from, uint32_t window_len, double* env_at_end)
+{
+    constexpr uint32_t off_block           = 32;
+    constexpr uint32_t boundary            = off_block * 256;
+    constexpr double   vol_release_samples = 88200.0;
+    string_release_render(110.0f, 0.5f, release_damping, 99, off_block, 128);
+    double sum = 0.0;
+    for (uint32_t k = window_from; k < window_from + window_len; ++k) {
+        const double vol = 1.0 - static_cast<double>(k - boundary) / vol_release_samples;
+        const double v   = static_cast<double>(string_test_out[k]) * vol;
+        sum += v * v;
+    }
+    *env_at_end = 1.0 - static_cast<double>(window_from + window_len - boundary) / vol_release_samples;
+    return sqrt(sum / window_len);
+}
+
+static void check_string_mirror_release_lifetime()
+{
+    constexpr uint32_t from    = 32 * 256 + 4410;
+    double             env_on  = 0.0;
+    double             env_off = 0.0;
+    const double       rms_on  = string_lifetime_rms(1.0f, from, 4410, &env_on);
+    const double       rms_off = string_lifetime_rms(0.0f, from, 4410, &env_off);
+    // The voice is still alive (volume release unfinished) in both runs.
+    TEST(env_on > 0.8 && env_off > 0.8);
+    // Release damping on vs off: the damped string is >40 dB quieter 100 ms in.
+    TEST(rms_off > 0.01);
+    TEST(rms_on < 0.01 * rms_off);
+
+    // Pedal-up: a held pedal keeps release false; the first block after it
+    // flips engages the damping at once (e is pulled toward gr within 6 ms).
+    memset(&string_test_mirror, 0, sizeof(string_test_mirror));
+    string_mirror_init(&string_test_mirror, 110.0f, 0.5f, 0.0f, 99);
+    for (uint32_t b = 0; b < 32; ++b) {
+        string_mirror_step(&string_test_mirror, 110.0f, 0.5f, 1.0f, false, string_test_out + b * 256, 256);
+    }
+    TEST(string_test_mirror.e == 1.0f);
+    string_mirror_step(&string_test_mirror, 110.0f, 0.5f, 1.0f, true, string_test_out, 256);
+    TEST(string_test_mirror.e < 0.5f);
+}
+
+// C3c: damping 0 (t60 = 20 s) holds amplitude for seconds: 3 s apart the
+// fundamental decays by the designed 10^(-3 * 3 / 20) = 0.355 (5% tolerance
+// on the measured t60).
+static void check_string_mirror_sustain_holds()
+{
+    string_test_render(110.0f, 0.0f, 31);
+    const double t60 = string_measured_t60(string_test_out, 1024, 8192, 132300, 110.0);
+    TEST(fabs(t60 / 20.0 - 1.0) < 0.05);
+    const double a1 = string_amp_at(string_test_out, 1024, 8192, 110.0);
+    const double a2 = string_amp_at(string_test_out, 1024 + 132300, 8192, 110.0);
+    TEST(a2 > 0.3 * a1);
+}
+
+// Pick comb.  Reference excitation: the same noise as string_mirror_init,
+// out-of-place comb ref[i] = x[i] - x[i - off] (i >= off), then the mean pass.
+// Note: a real retrigger receives a NEW seed (realtime_synth.cpp note-on), so
+// every comparison below seeds the mirror explicitly.
+static void string_pick_reference(float* ref, uint32_t n, uint32_t seed, uint32_t off, bool comb)
+{
+    float x[string_ring_size];
+    for (uint32_t i = 0; i < n; ++i) {
+        x[i] = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
+    }
+    for (uint32_t i = 0; i < n; ++i) {
+        ref[i] = comb && off > 0 && i >= off ? x[i] - x[i - off] : x[i];
+    }
+    float sum = 0.0f;
+    for (uint32_t k = 0; k < n; ++k) {
+        sum += ref[k];
+    }
+    const float mean = sum / static_cast<float>(n);
+    for (uint32_t k = 0; k < n; ++k) {
+        ref[k] -= mean;
+    }
+}
+
+static bool string_rings_equal(const float* a, const float* b, uint32_t n)
+{
+    return memcmp(a, b, n * sizeof(float)) == 0;
+}
+
+static void check_string_mirror_pick_comb()
+{
+    static StringMirror m;
+    static StringMirror other;
+    static float        ref[string_ring_size];
+    // f0 = 441 Hz: L = 100, even N.  f0 = 400 Hz: L = 110.25, odd N.
+    const float freqs[2] = { 441.0f, 400.0f };
+    for (uint32_t fi = 0; fi < 2; ++fi) {
+        const float    f0 = freqs[fi];
+        const uint32_t n  = string_mirror_scalars(f0, 0.5f, 0.0f).n;
+        TEST(n >= 3);
+        // p = 0: bit-identical to a no-comb run.
+        memset(&m, 0, sizeof(m));
+        string_mirror_init(&m, f0, 0.5f, 0.0f, 55);
+        string_pick_reference(ref, n, 55, 0, false);
+        TEST(string_rings_equal(m.ring, ref, n));
+        // p = 0.5: bit-identical to the out-of-place reference.  Odd N rounds
+        // half up: off = floor(0.5 * N + 0.5).
+        uint32_t off = static_cast<uint32_t>(floorf(0.5f * static_cast<float>(n) + 0.5f));
+        off          = off < n - 1 ? off : n - 1;
+        TEST(off == (n + 1) / 2);
+        memset(&m, 0, sizeof(m));
+        string_mirror_init(&m, f0, 0.5f, 0.5f, 55);
+        string_pick_reference(ref, n, 55, off, true);
+        TEST(string_rings_equal(m.ring, ref, n));
+        // Ordering: mean pass after the comb leaves zero mean (before-comb
+        // order would not, since the comb removes the head from the tail).
+        double sum = 0.0;
+        for (uint32_t k = 0; k < n; ++k) {
+            sum += static_cast<double>(m.ring[k]);
+        }
+        TEST(fabs(sum / n) < 1e-6);
+        // Comb differs from the no-comb ring.
+        string_pick_reference(ref, n, 55, 0, false);
+        TEST(! string_rings_equal(m.ring, ref, n));
+        // Same seed deterministic, different seed differs.
+        memset(&other, 0, sizeof(other));
+        string_mirror_init(&other, f0, 0.5f, 0.5f, 55);
+        TEST(string_rings_equal(m.ring, other.ring, n));
+        string_mirror_init(&other, f0, 0.5f, 0.5f, 56);
+        TEST(! string_rings_equal(m.ring, other.ring, n));
+    }
+    // D11: zero mean at p = 0.3.  Not bit-exact: the float32 mean subtraction
+    // leaves rounding residue (about N * 6e-8 in the sum), so the double-summed
+    // mean must be within 1e-6, the same bound as the p = 0.5 and p = 1 checks.
+    {
+        const uint32_t n30 = string_mirror_scalars(441.0f, 0.5f, 0.0f).n;
+        memset(&m, 0, sizeof(m));
+        string_mirror_init(&m, 441.0f, 0.5f, 0.3f, 17);
+        double sum30 = 0.0;
+        for (uint32_t k = 0; k < n30; ++k) {
+            sum30 += static_cast<double>(m.ring[k]);
+        }
+        TEST(fabs(sum30 / n30) < 1e-6);
+    }
+    // p = 1 clamps off to N - 1: finite and zero mean.
+    const uint32_t n = string_mirror_scalars(441.0f, 0.5f, 0.0f).n;
+    memset(&m, 0, sizeof(m));
+    string_mirror_init(&m, 441.0f, 0.5f, 1.0f, 9);
+    double sum = 0.0;
+    for (uint32_t k = 0; k < n; ++k) {
+        TEST(std::isfinite(m.ring[k]));
+        sum += static_cast<double>(m.ring[k]);
+    }
+    TEST(fabs(sum / n) < 1e-6);
+}
+
+// FM carrier ring read: slot position
+// q = wr_end - 1 - L + fract(warped_phase) * L, linear interpolation, wrapped
+// into [0, 2040).  The FM carrier string timbre intentionally differs from the
+// natural-phase string sound (fixed post-pass window, interpolated), so these
+// tests pin the mapping, not equality with the pass output.
+static float string_ring_read(const float* ring, uint32_t wr, float len, float phase, int32_t* index0, int32_t* index1)
+{
+    const float f  = (phase - floorf(phase)) * len;
+    const float q  = static_cast<float>(wr) - 1.0f - len + f;
+    int32_t     i0 = static_cast<int32_t>(floorf(q));
+    const float a  = q - static_cast<float>(i0);
+    i0 += i0 < 0 ? static_cast<int32_t>(string_ring_size) : 0;
+    int32_t i1 = i0 + 1;
+    i1 -= i1 >= static_cast<int32_t>(string_ring_size) ? static_cast<int32_t>(string_ring_size) : 0;
+    *index0 = i0;
+    *index1 = i1;
+    return ring[i0] + a * (ring[i1] - ring[i0]);
+}
+
+static void check_string_mirror_fm_ring_read()
+{
+    static float ramp[string_ring_size];
+    for (uint32_t i = 0; i < string_ring_size; ++i) {
+        ramp[i] = static_cast<float>(i) * static_cast<float>(i);
+    }
+    int32_t i0 = 0;
+    int32_t i1 = 0;
+    // Hand case, integral L = 10, wr = 20: phase 0 -> slot 9; phase 0.25 ->
+    // q = 11.5 -> 121 + 0.5 * (144 - 121) = 132.5.
+    TEST(string_ring_read(ramp, 20, 10.0f, 0.0f, &i0, &i1) == 81.0f);
+    TEST(string_ring_read(ramp, 20, 10.0f, 0.25f, &i0, &i1) == 132.5f);
+    TEST(i0 == 11 && i1 == 12);
+    // Non-integral L = 4.5, phase 0.5: f = 2.25, q = 16.75 -> 256 + 0.75 * 33.
+    TEST(string_ring_read(ramp, 20, 4.5f, 0.5f, &i0, &i1) == 280.75f);
+    // Warped phase 1.25 and -0.75 both map to fract = 0.25.
+    TEST(string_ring_read(ramp, 20, 10.0f, 1.25f, &i0, &i1) == 132.5f);
+    TEST(string_ring_read(ramp, 20, 10.0f, -0.75f, &i0, &i1) == 132.5f);
+    // Constant ring returns the constant at any phase.
+    static float flat[string_ring_size];
+    for (uint32_t i = 0; i < string_ring_size; ++i) {
+        flat[i] = 0.375f;
+    }
+    TEST(string_ring_read(flat, 700, 133.8f, 0.61f, &i0, &i1) == 0.375f);
+
+    // Two consecutive dispatches with a non-integral L (f0 = 329.63, L = 133.8):
+    // the window end advances by exactly 256 and every phase position moves
+    // with it, so q2 = q1 + 256 for a fixed warped phase.
+    static StringMirror m;
+    memset(&m, 0, sizeof(m));
+    string_mirror_init(&m, 329.63f, 0.5f, 0.0f, 21);
+    float out[256];
+    string_mirror_step(&m, 329.63f, 0.5f, 0.0f, false, out, 256);
+    const uint32_t wr1 = m.wr;
+    const float    len = string_fs / 329.63f;
+    TEST(len != floorf(len));
+    const float phases[3] = { 0.0f, 0.37f, 0.9f };
+    float       read1[3];
+    for (uint32_t k = 0; k < 3; ++k) {
+        read1[k] = string_ring_read(m.ring, wr1, len, phases[k], &i0, &i1);
+    }
+    string_mirror_step(&m, 329.63f, 0.5f, 0.0f, false, out, 256);
+    const uint32_t wr2 = m.wr;
+    TEST(wr2 == (wr1 + 256) % string_ring_size);
+    for (uint32_t k = 0; k < 3; ++k) {
+        const double q =
+            static_cast<double>(wr2) - 1.0 - static_cast<double>(len) + static_cast<double>(phases[k] * len);
+        const int32_t base = static_cast<int32_t>(floor(q));
+        const double  a    = q - base;
+        const double  expected =
+            static_cast<double>(m.ring[base]) + a * static_cast<double>(m.ring[base + 1] - m.ring[base]);
+        const float read2 = string_ring_read(m.ring, wr2, len, phases[k], &i0, &i1);
+        TEST(i0 == base);
+        TEST(fabs(static_cast<double>(read2) - expected) < 1e-5);
+        TEST(std::isfinite(read1[k]) && std::isfinite(read2));
+    }
+}
+
+// Edge bounds: indices stay in [0, 2040) and output is finite for wr = 0 and
+// 2039, a loop as long as the 22 Hz floor, and the awkward warped phases.
+static void check_string_mirror_ring_read_edges()
+{
+    static float ring[string_ring_size];
+    for (uint32_t i = 0; i < string_ring_size; ++i) {
+        ring[i] = static_cast<float>(string_pcg_hash(i) & 0xFFFFu) / 32767.5f - 1.0f;
+    }
+    const uint32_t writes[4] = { 0, 1, 2038, 2039 };
+    const float    lens[2]   = { 2004.545f, 3.0f };
+    const float    phases[9] = { 0.0f, 0.5f, 0.999f, nextafterf(1.0f, 0.0f), -0.3f, -1e-9f, -2.75f, 5.5f, 1.0f };
+    for (uint32_t w = 0; w < 4; ++w) {
+        for (uint32_t l = 0; l < 2; ++l) {
+            for (uint32_t p = 0; p < 9; ++p) {
+                int32_t     i0 = -1;
+                int32_t     i1 = -1;
+                const float v  = string_ring_read(ring, writes[w], lens[l], phases[p], &i0, &i1);
+                TEST(i0 >= 0 && i0 < static_cast<int32_t>(string_ring_size));
+                TEST(i1 >= 0 && i1 < static_cast<int32_t>(string_ring_size));
+                TEST(std::isfinite(v) && fabsf(v) <= 1.0f);
+            }
+        }
+    }
+    // Largest float below 1.0: fract * L may round to L, so q is the endpoint
+    // wr - 1 or one slot below; both indices are in bounds (checked above).
+    int32_t i0 = 0;
+    int32_t i1 = 0;
+    string_ring_read(ring, 0, 2004.545f, nextafterf(1.0f, 0.0f), &i0, &i1);
+    TEST(i0 == 2038 || i0 == 2039);
+    string_ring_read(ring, 2039, 2004.545f, nextafterf(1.0f, 0.0f), &i0, &i1);
+    TEST(i0 == 2037 || i0 == 2038);
+    // Negative phase that rounds fract to exactly 1.0: closed endpoint wr - 1.
+    string_ring_read(ring, 0, 2004.545f, -1e-9f, &i0, &i1);
+    TEST(i0 == 2039 && i1 == 0);
+}
+
+// NaN/inf/huge guard: a poisoned ring slot or filter state never leaves the
+// loop.  Only the poisoned sample itself is read raw; everything written is
+// flushed by the |v| < 8 rule, so later outputs stay finite and bounded.
+static void check_string_mirror_nan_guard()
+{
+    static StringMirror m;
+    const float         poison[3] = { 1e30f, INFINITY, NAN };
+    for (uint32_t i = 0; i < 3; ++i) {
+        memset(&m, 0, sizeof(m));
+        string_mirror_init(&m, 441.0f, 0.5f, 0.0f, 14);
+        const uint32_t n     = string_mirror_scalars(441.0f, 0.5f, 0.0f).n;
+        m.ring[m.wr - n + 5] = poison[i];
+        float out[512];
+        string_mirror_step(&m, 441.0f, 0.5f, 0.0f, false, out, 256);
+        string_mirror_step(&m, 441.0f, 0.5f, 0.0f, false, out + 256, 256);
+        for (uint32_t k = 0; k < 512; ++k) {
+            if (k != 5) {
+                TEST(std::isfinite(out[k]) && fabsf(out[k]) < 8.0f);
+            }
+        }
+    }
+    // Poisoned filter state is flushed the same way.
+    memset(&m, 0, sizeof(m));
+    string_mirror_init(&m, 441.0f, 0.5f, 0.0f, 14);
+    m.t1 = 1e30f;
+    m.u1 = NAN;
+    float out[256];
+    string_mirror_step(&m, 441.0f, 0.5f, 0.0f, false, out, 256);
+    for (uint32_t k = 0; k < 256; ++k) {
+        TEST(std::isfinite(out[k]) && fabsf(out[k]) < 8.0f);
+    }
+}
+
+// Slot-grammar literal pins for the string rows and the shifted band blocks.
+static void check_string_slot_grammar_pins()
+{
+    TEST(Sculptor::osc_band_first_slot == 137);
+    TEST(Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride == 192);
+    TEST(Sculptor::osc_band_header_slot(3) + Sculptor::osc_band_block_stride == 357);
+    TEST(Sculptor::max_node_slots == 357);
+    const char* const osc_h    = load_source_file("sculptor/sculptor_osc_graph.h");
+    const char* const osc_cpp  = load_source_file("sculptor/sculptor_osc_graph.cpp");
+    const char* const graph_h  = load_source_file("sculptor/sculptor_graph.h");
+    const char* const json_cpp = load_source_file("sculptor/sculptor_bank_json.cpp");
+    const char* const instr_h  = load_source_file("synth/synth_instrument.h");
+    const char* const runtime  = load_source_file("synth/realtime_synth.cpp");
+    TEST(osc_h && osc_cpp && graph_h && json_cpp && instr_h && runtime);
+    if (! (osc_h && osc_cpp && graph_h && json_cpp && instr_h && runtime)) {
+        return;
+    }
+    // Pick row 28; damping and release damping reuse the duty a / pad tone a
+    // rows (2 and 15); first band slot 137.
+    TEST(find_in_range(osc_h, osc_h + strlen(osc_h), "osc_pick_slot = 28") != nullptr);
+    TEST(find_in_range(osc_h, osc_h + strlen(osc_h), "osc_band_first_slot = 137") != nullptr);
+    TEST(Sculptor::osc_target_row_slot[Synth::mod_string_damping] == 2);
+    TEST(Sculptor::osc_target_row_slot[Synth::mod_string_release_damping] == 15);
+    TEST(find_in_range(graph_h, graph_h + strlen(graph_h), "max_node_slots = 357") != nullptr);
+    TEST(find_in_range(instr_h, instr_h + strlen(instr_h), "mod_string_damping") != nullptr);
+    TEST(find_in_range(instr_h, instr_h + strlen(instr_h), "mod_string_release_damping") != nullptr);
+    TEST(find_in_range(osc_cpp, osc_cpp + strlen(osc_cpp), "static_assert(Synth::num_mod_targets == 28)") != nullptr);
+    TEST(find_in_range(osc_cpp, osc_cpp + strlen(osc_cpp), "\"Release Damping\"") != nullptr);
+    TEST(find_in_range(json_cpp, json_cpp + strlen(json_cpp), "\"string_damping\"") != nullptr);
+    TEST(find_in_range(json_cpp, json_cpp + strlen(json_cpp), "\"string_release_damping\"") != nullptr);
+    TEST(find_in_range(json_cpp, json_cpp + strlen(json_cpp), "\"string_pick\"") != nullptr);
+    TEST(find_in_range(runtime, runtime + strlen(runtime), "static_assert(num_osc_roles == 84)") != nullptr);
+    TEST(find_in_range(runtime, runtime + strlen(runtime), "static_assert(sizeof(Oscillator) == 84)") != nullptr);
+}
+
+// Overdriven damping destinations clamp to [0, 1] at the host read, so the
+// scalar block never sees c >= 0.4 / negative release damping.  Finite bounded output
+// over several seconds for both overdriven polarities and NaN.
+static void check_string_mirror_damping_clamp()
+{
+    static StringMirror m;
+    const float         drive[4] = { 3.0f, -3.0f, 1e30f, NAN };
+    for (uint32_t di = 0; di < 4; ++di) {
+        const float         clamped = drive[di] > 0.5f ? 1.0f : 0.0f;
+        const float         expect  = drive[di] != drive[di] ? 0.0f : clamped;
+        const StringScalars over    = string_mirror_scalars(220.0f, drive[di], drive[di]);
+        const StringScalars ref     = string_mirror_scalars(220.0f, expect, expect);
+        TEST(over.n == ref.n && over.c == ref.c && over.g == ref.g && over.gr == ref.gr && over.a == ref.a);
+        TEST(over.gr > 0.0f && over.gr <= 1.0f);
+
+        memset(&m, 0, sizeof(m));
+        static float out[256];
+        for (uint32_t step = 0; step < 4 * 44100 / 256; ++step) {
+            const bool release = step > 2 * 44100 / 256;
+            string_mirror_play(&m, 220.0f, drive[di], drive[di], 0.0f, release, 31, out, 256);
+            for (uint32_t k = 0; k < 256; ++k) {
+                TEST(std::isfinite(out[k]) && fabsf(out[k]) < 8.0f);
+            }
+        }
+    }
+    // Negative release damping alone must not amplify: gr == 1 like release damping 0.
+    TEST(string_mirror_scalars(220.0f, 0.5f, -2.0f).gr == string_mirror_scalars(220.0f, 0.5f, 0.0f).gr);
+    TEST(string_mirror_scalars(220.0f, 0.5f, 0.0f).gr == 1.0f);
+}
+
+// A note that starts below the 22 Hz floor keeps its init pending until the
+// first in-range pass, so a later pitch step plays a fresh pluck and never stale ring data.
+static void check_string_mirror_silent_onset_init()
+{
+    static StringMirror m;
+    static StringMirror fresh;
+    static float        out[256];
+    static float        want[256];
+
+    // Fresh slot: poisoned (arbitrary) memory, silent onset, then pitch into range.
+    memset(&m, 0, sizeof(m));
+    for (uint32_t i = 0; i < string_ring_size; ++i) {
+        m.ring[i] = 0.75f;
+    }
+    m.wr = 123;
+    m.t1 = 1.0f;
+    for (uint32_t step = 0; step < 3; ++step) {
+        string_mirror_play(&m, 10.0f, 0.5f, 0.0f, 0.0f, false, 77, out, 256);
+        for (uint32_t k = 0; k < 256; ++k) {
+            TEST(out[k] == 0.0f);
+        }
+    }
+    TEST(! m.tagged);
+    string_mirror_play(&m, 441.0f, 0.5f, 0.0f, 0.0f, false, 77, out, 256);
+    memset(&fresh, 0, sizeof(fresh));
+    string_mirror_init(&fresh, 441.0f, 0.5f, 0.0f, 77);
+    string_mirror_step(&fresh, 441.0f, 0.5f, 0.0f, false, want, 256);
+    TEST(memcmp(out, want, sizeof(out)) == 0);
+    TEST(out[1] != 0.0f);
+
+    // Reused slot: note A plays and is released, then note B starts silent, then pitches in.
+    memset(&m, 0, sizeof(m));
+    for (uint32_t step = 0; step < 8; ++step) {
+        string_mirror_play(&m, 441.0f, 0.5f, 0.5f, 0.0f, step > 4, 5, out, 256);
+    }
+    TEST(m.tagged && m.tag == 5);
+    string_mirror_play(&m, 10.0f, 0.5f, 0.5f, 0.0f, false, 6, out, 256);
+    TEST(out[0] == 0.0f && out[255] == 0.0f);
+    string_mirror_play(&m, 330.0f, 0.5f, 0.0f, 0.0f, false, 6, out, 256);
+    memset(&fresh, 0, sizeof(fresh));
+    string_mirror_init(&fresh, 330.0f, 0.5f, 0.0f, 6);
+    string_mirror_step(&fresh, 330.0f, 0.5f, 0.0f, false, want, 256);
+    TEST(memcmp(out, want, sizeof(out)) == 0);
+    TEST(m.tagged && m.tag == 6);
+}
+
+// A tiny nonzero pick clamps to a 1-sample comb (never identity, never
+// silence); p = 0 stays the bit-identical no-comb ring.
+static void check_string_mirror_pick_tiny()
+{
+    static StringMirror m;
+    static float        ref[string_ring_size];
+    const uint32_t      n = string_mirror_scalars(441.0f, 0.5f, 0.0f).n;
+    TEST(n == 98);
+
+    memset(&m, 0, sizeof(m));
+    string_mirror_init(&m, 441.0f, 0.5f, 0.001f, 12);
+    string_pick_reference(ref, n, 12, 1, true);
+    TEST(string_rings_equal(m.ring, ref, n));
+    string_pick_reference(ref, n, 12, 0, false);
+    TEST(! string_rings_equal(m.ring, ref, n));
+    double energy = 0.0;
+    for (uint32_t k = 0; k < n; ++k) {
+        energy += static_cast<double>(m.ring[k]) * static_cast<double>(m.ring[k]);
+    }
+    TEST(energy > 1.0);
+
+    memset(&m, 0, sizeof(m));
+    string_mirror_init(&m, 441.0f, 0.5f, 0.0f, 12);
+    TEST(string_rings_equal(m.ring, ref, n));
+}
+
+static void string_mirror_m2_regressions_b()
+{
+    check_string_mirror_release_click_free();
+    check_string_mirror_release_zero_rings();
+    check_string_mirror_release_lifetime();
+    check_string_mirror_sustain_holds();
+    check_string_mirror_pick_comb();
+    check_string_mirror_fm_ring_read();
+    check_string_mirror_ring_read_edges();
+    check_string_mirror_nan_guard();
+    check_string_mirror_damping_clamp();
+    check_string_mirror_silent_onset_init();
+    check_string_mirror_pick_tiny();
+    check_string_slot_grammar_pins();
+}
+
 int main()
 {
     external_held_notes_regressions();
@@ -20973,6 +22476,9 @@ int main()
     osc_slot_disable_stamped_rules_regressions();
     osc_stamp_pool_clear_regressions();
     distortion_m1_regressions();
+    string_wave_m2_regressions();
+    string_mirror_m2_regressions_a();
+    string_mirror_m2_regressions_b();
     child_row_projection_regressions();
     osc_layer_projection_regressions();
     osc_direct_modulator_regressions();
@@ -21371,7 +22877,7 @@ int main()
 
     m2_band_layout_regressions();
     m2_band_visibility_regressions();
- m2_band_source_gray_regressions();
+    m2_band_source_gray_regressions();
     m2_band_add_remove_regressions();
     m2_band_remove_first_regressions();
     m2_band_donation_regressions();
@@ -26432,16 +27938,16 @@ int main()
         TEST(memcmp(&instrument, &compiled, sizeof(Synth::Instrument)) == 0);
         // Waveform A has no off option: the list starts at sine and compile
         // adds one back onto the wave type.
-        TEST(graph.node(mapping.osc_nodes[0]).slots.entries[1].num_list_options == 5);
+        TEST(graph.node(mapping.osc_nodes[0]).slots.entries[1].num_list_options == 6);
         TEST(graph.node(mapping.osc_nodes[0]).slots.entries[1].value.list_index == 0);
         // The dropdown spells the wave out; the bank JSON token (sculptor_bank_json's
         // own wave_names array, already "sawtooth") never shared this display string.
         TEST(strncmp(graph.node(mapping.osc_nodes[0]).slots.entries[1].list_options[1],
                      "sawtooth",
                      sizeof(graph.node(mapping.osc_nodes[0]).slots.entries[1].list_options[0])) == 0);
-        TEST(strncmp(graph.node(mapping.osc_nodes[0]).slots.entries[28].list_options[2],
+        TEST(strncmp(graph.node(mapping.osc_nodes[0]).slots.entries[29].list_options[2],
                      "sawtooth",
-                     sizeof(graph.node(mapping.osc_nodes[0]).slots.entries[28].list_options[0])) == 0);
+                     sizeof(graph.node(mapping.osc_nodes[0]).slots.entries[29].list_options[0])) == 0);
         Sculptor::PropertyValue saw;
         saw.list_index = 1;
         graph.set_slot_value(mapping.osc_nodes[0], 1, saw); // "sawtooth"
@@ -27149,8 +28655,8 @@ int main()
             }
         }
 
-        // Overfull implied node projection: the fully-wired fixture implies 276 nodes;
-        // 109 detached records push it past 384, 108 land exactly on 384.
+        // Overfull implied node projection: the fully-wired fixture implies 304 nodes;
+        // 99 detached records push it past 402, 98 land exactly on 402.
         const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
         Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
         const std::unique_ptr<Synth::InstrumentEditorBank> max_bank_storage =
@@ -27160,7 +28666,7 @@ int main()
         uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
         uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
-        // The raised max_nodes (178 -> 384) leaves the four-target fixture's 66
+        // The max_nodes pool (402) leaves the four-target fixture's 66
         // implied nodes too far below the pool for the 120-record detached cap to
         // reach the per-zone node-pool refusal, so this test alone wires fifteen
         // more targets (FM ratio and the fourteen band targets) with full
@@ -27172,7 +28678,8 @@ int main()
             osc.targets[Synth::mod_fir_slope].base_value = 50.0f;
             for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
                 const bool extra = target == Synth::mod_fm_ratio ||
-                                   (target >= Synth::mod_fir_band0_offset && target <= Synth::mod_fir_band3_slope);
+                                   (target >= Synth::mod_fir_band0_offset && target <= Synth::mod_fir_band3_slope) ||
+                                   target == Synth::mod_string_damping || target == Synth::mod_string_release_damping;
                 if (osc_graph_target(static_cast<Synth::ModTarget>(target)) || ! extra) {
                     continue;
                 }
@@ -27223,12 +28730,12 @@ int main()
         max_bank.bank.instruments.entries[0]         = instrument;
         max_bank.bank.channel_zones[0][0].start_note = 1;
         max_bank.bank.channel_zones[0][0].instrument = 0;
-        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 109, 2, 1, 0, 0);
+        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 99, 2, 1, 0, 0);
         TEST(! decode_bank_with_editor_section(max_bank, editor_json, &restored));
-        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 108, 2, 1, 0, 0);
+        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 98, 2, 1, 0, 0);
         TEST(decode_bank_with_editor_section(max_bank, editor_json, &restored));
         // The accepted boundary fills the node pool exactly: the projection
-        // still succeeds at 276 + 108 = 384 nodes.
+        // still succeeds at 304 + 98 = 402 nodes.
         const std::unique_ptr<Sculptor::Graph> boundary_graph_storage = std::make_unique<Sculptor::Graph>();
         Sculptor::Graph&                       boundary_graph         = *boundary_graph_storage;
         Sculptor::OscGraphMapping              boundary_mapping       = {};
@@ -33585,6 +35092,7 @@ int main()
             check_editor_round_trip_capacity_failures();
             check_unrepresented_layout_refusal();
             check_decoded_fm_lfo_binding_survives_compile();
+            check_string_pick_trap_decode_compile();
             check_renamed_oscillator_persists_through_save_load_and_reprojection();
             check_exactly_32_byte_oscillator_name_round_trips();
             check_empty_rename_is_a_no_op();

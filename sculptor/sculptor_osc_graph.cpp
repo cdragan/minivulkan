@@ -32,6 +32,7 @@ using Sculptor::Graph;
 using Sculptor::osc_band_block_stride;
 using Sculptor::osc_band_first_slot;
 using Sculptor::osc_band_header_slot;
+using Sculptor::osc_pick_slot;
 using Sculptor::osc_slot_count;
 using Sculptor::osc_target_block_base;
 using Sculptor::osc_target_block_field;
@@ -105,7 +106,7 @@ char                        clipboard_destination_name[Synth::max_name_len];
 static_assert(static_cast<uint32_t>(Synth::mod_panning) == 2);
 static_assert(static_cast<uint32_t>(Synth::mod_duty0) == 3);
 static_assert(static_cast<uint32_t>(Synth::mod_fm_index) == 6);
-static_assert(Synth::num_mod_targets == 26);
+static_assert(Synth::num_mod_targets == 28);
 static_assert(static_cast<uint32_t>(Synth::mod_fm_ratio) == 8);
 static_assert(static_cast<uint32_t>(Synth::mod_pad_tilt0) == 9);
 static_assert(Synth::max_mod_inputs == 2);
@@ -140,8 +141,10 @@ const LabelTooltip target_descs[Synth::num_mod_targets] = {
     { "Spread", "Band width around its center (in semitones)" },
     { "Gain", "Band's output amplitude" },
     { "FIR Slope", "Filter edge sharpness" },
+    { "Damping", "How fast the string vibration decays while the key is held" },
+    { "Release Damping", "Extra string damping applied while the key is released" },
 };
-const char* const wave_names[6]     = { "off", "sine", "sawtooth", "pulse", "noise", "pad" };
+const char* const wave_names[7]     = { "off", "sine", "sawtooth", "pulse", "noise", "pad", "string" };
 const char* const osc_mode_names[4] = { "blend", "frequency modulation", "hard sync", "ring modulation" };
 const char* const filter_type_names[Synth::num_filter_types] = { "off", "bandpass", "lowpass", "highpass" };
 
@@ -165,42 +168,45 @@ const LabelTooltip fir_spread_descs[Synth::num_filter_types] = { { "Filter Off",
 // 3..14 duty a's 12-slot modulation block
 // 15 pad tone a (per-layer value, [-1, +1])
 // 16..27 pad tone a's 12-slot modulation block
-// 28 waveform b (list)
-// 29 duty b (per-layer value, [0, 1])
-// 30..41 duty b's 12-slot modulation block
-// 42 pad tone b (per-layer value, [-1, +1])
-// 43..54 pad tone b's 12-slot modulation block
-// 55 mix mode (list)
-// 56 waveform mix (per-layer value, [0, 1])
-// 57..68 waveform mix's 12-slot modulation block
-// 69 fm depth (per-layer value)
-// 70..81 fm depth's 12-slot modulation block
-// 82 fm ratio (per-layer base value)
-// 83..94 fm ratio's 12-slot modulation block
-// 95 volume (per-layer base value)
-// 96..107 volume's 12-slot modulation block
-// 108 pan (per-layer base value)
-// 109..120 pan's 12-slot modulation block
-// 121 pitch (per-layer base value)
-// 122..133 pitch's 12-slot modulation block
-// 134 octave offset (per oscillator, [-12, +12] whole octaves)
-// 135 filter type (per oscillator, list)
-// 136.. one uniform block per existing band, starting at
-// osc_band_first_slot (136) with a 55-slot stride (osc_band_block_stride):
+// 28 pick position (per oscillator, plain scalar 0..1; nested under waveform a)
+// Damping and Release damping have no rows of their own: with waveform a ==
+// string, the duty a row (2) projects as Damping (target 26) and the pad tone
+// a row (15) as Release damping (target 27), each with its block.
+// 29 waveform b (list)
+// 30 duty b (per-layer value, [0, 1])
+// 31..42 duty b's 12-slot modulation block
+// 43 pad tone b (per-layer value, [-1, +1])
+// 44..55 pad tone b's 12-slot modulation block
+// 56 mix mode (list)
+// 57 waveform mix (per-layer value, [0, 1])
+// 58..69 waveform mix's 12-slot modulation block
+// 70 fm depth (per-layer value)
+// 71..82 fm depth's 12-slot modulation block
+// 83 fm ratio (per-layer base value)
+// 84..95 fm ratio's 12-slot modulation block
+// 96 volume (per-layer base value)
+// 97..108 volume's 12-slot modulation block
+// 109 pan (per-layer base value)
+// 110..121 pan's 12-slot modulation block
+// 122 pitch (per-layer base value)
+// 123..134 pitch's 12-slot modulation block
+// 135 octave offset (per oscillator, [-12, +12] whole octaves)
+// 136 filter type (per oscillator, list)
+// 137.. one uniform block per existing band, starting at
+// osc_band_first_slot (137) with a 55-slot stride (osc_band_block_stride):
 // the "Band N" header label, the band's [-] click slot, the band's [+]
 // click slot, then the band's four parameter rows, each followed by its
 // 12-slot modulation block (a 13-slot stride, in osc_target_row_slot
 // order). Only the stored band count's blocks are projected; band 0's
-// rows stay at the original slots (139/152/165/178) and bands 1..3 shift
-// by 3 slots per earlier band (194/207/220/233, 249/262/275/288,
-// 304/317/330/343).
+// rows sit at 140/153/166/179 and bands 1..3 shift by 3 slots per
+// earlier band (195/208/221/234, 250/263/276/289, 305/318/331/344).
 constexpr uint32_t osc_waveform_a_prop    = 1;
-constexpr uint32_t osc_waveform_b_prop    = 28;
-constexpr uint32_t osc_mode_prop          = 55;
-constexpr uint32_t osc_fm_ratio_prop      = 82;
-constexpr uint32_t osc_octave_offset_prop = 134;
-constexpr uint32_t osc_fir_slope_prop     = 178;
-constexpr uint32_t osc_fir_type_prop      = 135;
+constexpr uint32_t osc_waveform_b_prop    = 29;
+constexpr uint32_t osc_mode_prop          = 56;
+constexpr uint32_t osc_fm_ratio_prop      = 83;
+constexpr uint32_t osc_octave_offset_prop = 135;
+constexpr uint32_t osc_fir_slope_prop     = 179;
+constexpr uint32_t osc_fir_type_prop      = 136;
 // Header labels of the band blocks, indexed by band.
 const char* const band_header_names[Sculptor::osc_band_max_bands] = { "Band 1", "Band 2", "Band 3", "Band 4" };
 // Per-target presentation views: the single source of truth for value
@@ -234,6 +240,8 @@ constexpr Sculptor::OscTargetView osc_target_views[Synth::num_mod_targets] = {
     { 0.0f, 36.0f, 1.0f, false },                                        // band 3 spread (semitones)
     { 0.01f, 1.0f, 1.0f, false },                                        // band 3 gain
     { 1.0f, 100.0f, 1.0f, false },                                       // band 3 slope (percent)
+    { 0.0f, 1.0f, 1.0f, false },                                         // string damping
+    { 0.0f, 1.0f, 1.0f, false },                                         // string release damping
 };
 
 // Low-pass and high-pass cutoff slider.  The editor writes a zero cutoff (edge off)
@@ -273,6 +281,8 @@ constexpr uint8_t osc_band_block_level = 3;
 // a sawtooth, pulse or pad wave on their side; waveform b, mix mode and
 // fm ratio, plus the duty b, waveform mix and fm depth rows, need
 // waveform b; the pad tone rows and their blocks need the pad waveform;
+// the pick, damping and release damping rows and their blocks need the
+// string waveform (it grays no mode row);
 // the cutoff row, its block and the fir slope need a filter type other
 // than off).
 bool Sculptor::oscillator_slot_waveform_mode_disabled(const Sculptor::Node& node, uint32_t slot_idx)
@@ -293,14 +303,19 @@ bool Sculptor::oscillator_slot_waveform_mode_disabled(const Sculptor::Node& node
     const uint32_t tone1  = osc_target_row_slot[static_cast<uint32_t>(Synth::mod_pad_tilt1)];
     // Waveform a's list starts at sine, so pad sits one below the stored value.
     const uint32_t wave_a = node.slots.entries[osc_waveform_a_prop].value.list_index;
-    if (wave_a != static_cast<uint32_t>(Synth::WaveType::pad_wave) - 1u && slot_idx >= tone0 &&
+    if (wave_a != static_cast<uint32_t>(Synth::WaveType::string_wave) - 1u && slot_idx == osc_pick_slot) {
+        return true; // pick position only applies to the string waveform
+    }
+    if (wave_a != static_cast<uint32_t>(Synth::WaveType::pad_wave) - 1u &&
+        wave_a != static_cast<uint32_t>(Synth::WaveType::string_wave) - 1u && slot_idx >= tone0 &&
         slot_idx <= tone0 + osc_target_block_stride) {
-        return true; // pad tone a and its block only apply to the pad waveform
+        return true; // pad tone a and its block only apply to the pad waveform (release damping under string)
     }
     if (slot_idx >= duty0 && slot_idx <= duty0 + osc_target_block_stride &&
         (wave_a == static_cast<uint32_t>(Synth::WaveType::sine_wave) - 1u ||
          wave_a == static_cast<uint32_t>(Synth::WaveType::noise_wave) - 1u)) {
-        return true; // duty a shapes sawtooth and pulse and scales pad wander; sine and noise ignore it
+        return true; // duty a shapes sawtooth and pulse and scales pad wander (damping under string); sine and
+                     // noise ignore it
     }
     if (slot_idx >= duty1 && slot_idx <= duty1 + osc_target_block_stride &&
         (wave_b == static_cast<uint32_t>(Synth::WaveType::sine_wave) ||
@@ -465,24 +480,49 @@ static constexpr Synth::ModTarget band_target(const uint32_t band, const uint32_
     return band == 0 ? band0_targets[param] : static_cast<Synth::ModTarget>(14u + 4u * (band - 1u) + param);
 }
 
-// The band index (0..3) of a band-parameter target, or -1 when the target
-// is not a band parameter (the eleven non-band targets). Band 0 keeps the
-// legacy spread/slope targets, so its four parameters are 12, 7, 13, 11.
-static int32_t osc_target_band_index(const uint32_t target)
-{
-    if (target >= 14u) {
-        return static_cast<int32_t>((target - 14u) / 4u) + 1;
-    }
-    if (target == 7u || target == 11u || target == 12u || target == 13u) {
-        return 0;
-    }
-    return -1;
-}
-
 // The layer's band count, clamped into the 1..4 projection range.
 static uint32_t osc_band_model_count(const Synth::Oscillator& osc)
 {
     return osc.fir_band_count < 1 ? 1u : osc.fir_band_count > 4 ? 4u : static_cast<uint32_t>(osc.fir_band_count);
+}
+
+// The ModTarget the shared duty a / pad tone a row carries: under the
+// string wave the same slot and block hold Damping / Release damping.
+// Other targets pass through.
+static Synth::ModTarget osc_row_target_for_wave(bool string_wave, Synth::ModTarget target)
+{
+    if (string_wave && target == Synth::mod_duty0) {
+        return Synth::mod_string_damping;
+    }
+    if (string_wave && target == Synth::mod_pad_tilt0) {
+        return Synth::mod_string_release_damping;
+    }
+    return target;
+}
+
+// True when `target` owns a projected row under wave a: the shared rows
+// belong to duty / pad tone unless the wave is string, and the damping
+// targets exist only under string.  An unowned binding gets no row or wires
+// (like a band beyond the count) and keeps its stored value.
+static bool osc_target_owns_row(bool string_wave, uint32_t target)
+{
+    const bool damping = target == Synth::mod_string_damping || target == Synth::mod_string_release_damping;
+    const bool shared  = target == Synth::mod_duty0 || target == Synth::mod_pad_tilt0;
+    return string_wave ? ! shared : ! damping;
+}
+
+static bool osc_target_projected(const Synth::Oscillator& osc, uint32_t target)
+{
+    return osc_target_owns_row(osc.osc_type[0] == Synth::WaveType::string_wave, target);
+}
+
+// True when ModTarget `target` owns its row on `node` under the node's
+// current wave a (osc_target_projected, read from the projected slots).
+bool Sculptor::osc_node_target_row_active(const Sculptor::Node& node, uint32_t target)
+{
+    const bool string_wave = node.slots.entries[osc_waveform_a_prop].value.list_index ==
+                             static_cast<uint32_t>(Synth::WaveType::string_wave) - 1u;
+    return osc_target_owns_row(string_wave, target);
 }
 
 // True when the slot is one of the band header rows' [-]/[+] click slots
@@ -586,7 +626,7 @@ static void append_band_row(Graph* graph, uint32_t node, Synth::ModTarget target
     else {
         Sculptor::Slot slot =
             osc_view_connectable_slot(target_descs[t].name, osc.targets[target].base_value, target, true);
-        slot.child_level    = 2;
+        slot.child_level = 2;
         if (band0_inactive) {
             slot.tooltip = nullptr;
         }
@@ -879,25 +919,38 @@ static void project_osc_node(Sculptor::Graph*           graph,
         with_tooltip(
             list_slot("Waveform A",
                       wave_names + 1,
-                      5,
+                      6,
                       osc.osc_type[0] == Synth::WaveType::no_wave ? 0 : static_cast<uint32_t>(osc.osc_type[0]) - 1),
             "Primary oscillator wave shape"));
-    graph->add_slot(node,
-                    osc_view_connectable_slot(target_descs[3].name,
-                                              osc.targets[Synth::mod_duty0].base_value,
-                                              Synth::mod_duty0,
-                                              true));
+    // With the string wave the duty a row projects as Damping (target 26) and
+    // the pad tone a row as Release damping (target 27).
+    const bool             string_wave     = osc.osc_type[0] == Synth::WaveType::string_wave;
+    const Synth::ModTarget duty_row_target = osc_row_target_for_wave(string_wave, Synth::mod_duty0);
+    const Synth::ModTarget tone_row_target = osc_row_target_for_wave(string_wave, Synth::mod_pad_tilt0);
     // One 12-slot modulation block per ModTarget, directly after the
     // target's value row, seeded from the layer's own binding
     // (display-unit fields carry the raw values; only the base rows are
     // scaled).
-    append_target_block(graph, node, Synth::mod_duty0, osc.targets[Synth::mod_duty0], 2);
     graph->add_slot(node,
-                    osc_view_connectable_slot(target_descs[9].name,
-                                              osc.targets[Synth::mod_pad_tilt0].base_value,
-                                              Synth::mod_pad_tilt0,
+                    osc_view_connectable_slot(target_descs[duty_row_target].name,
+                                              osc.targets[duty_row_target].base_value,
+                                              duty_row_target,
                                               true));
-    append_target_block(graph, node, Synth::mod_pad_tilt0, osc.targets[Synth::mod_pad_tilt0], 2);
+    append_target_block(graph, node, duty_row_target, osc.targets[duty_row_target], 2);
+    graph->add_slot(node,
+                    osc_view_connectable_slot(target_descs[tone_row_target].name,
+                                              osc.targets[tone_row_target].base_value,
+                                              tone_row_target,
+                                              true));
+    append_target_block(graph, node, tone_row_target, osc.targets[tone_row_target], 2);
+    // Pick position (a plain layer scalar, not modulatable) nests under
+    // Waveform A after the pad tone row's block.
+    Sculptor::Slot pick_slot =
+        with_tooltip(bounded_real_slot("Pick position", osc.string_pick, 0.0f, 1.0f),
+                     "Position along the string where the pluck happens; shapes the note-onset timbre");
+    pick_slot.child_row = true;
+    graph->add_slot(node, pick_slot);
+
     graph->add_slot(node,
                     with_tooltip(list_slot("Waveform B", wave_names, 6, static_cast<uint32_t>(osc.osc_type[1])),
                                  "Secondary oscillator wave shape"));
@@ -1019,7 +1072,7 @@ static void project_osc_node(Sculptor::Graph*           graph,
                 // Band spread target: under lowpass and highpass the row
                 // shows the cutoff text, and under off it stays exempt.
                 spread_row.tooltip     = fir_spread_descs[osc.fir_type].tooltip;
-                spread_row.child_level    = band0_row_level;
+                spread_row.child_level = band0_row_level;
                 graph->add_slot(node, spread_row);
             }
             append_target_block(graph,
@@ -1507,8 +1560,8 @@ bool Sculptor::osc_change_restructures(const Sculptor::OscGraphMapping& mapping,
     if (change.kind != Sculptor::ChangeKind::value_changed || node_role(mapping, change.node_idx) != role_osc) {
         return false;
     }
-    if (change.slot_idx == osc_fir_type_prop) {
-        return true;
+    if (change.slot_idx == osc_fir_type_prop || change.slot_idx == osc_waveform_a_prop) {
+        return true; // wave a retargets the shared duty/pad tone rows to damping and back
     }
     // A band [-]/[+] click rewrites the stored bands (insert after band N
     // as a copy, or remove band N with later bands shifting up), so the
@@ -1739,7 +1792,7 @@ bool Sculptor::project_instrument_to_graph(const Synth::Instrument&     instrume
             // band beyond the count (hand-built state) gets no wire, so it
             // cannot land on a slot that does not exist.
             const int32_t band = osc_target_band_index(t);
-            if (band >= 0 && static_cast<uint32_t>(band) >= band_count) {
+            if ((band >= 0 && static_cast<uint32_t>(band) >= band_count) || ! osc_target_projected(*rows[row], t)) {
                 continue;
             }
             const Synth::TargetBinding& gen = rows[row]->targets[t];
@@ -1882,7 +1935,8 @@ static bool read_oscillator_layer(const Sculptor::Graph&           graph,
     if (! read_list_prop(slots[osc_fir_type_prop], &index)) {
         return false;
     }
-    osc.fir_type = static_cast<Synth::FilterType>(index);
+    osc.fir_type    = static_cast<Synth::FilterType>(index);
+    osc.string_pick = slots[osc_pick_slot].value.real;
 
     // The projected band blocks encode the count: one uniform block per
     // existing band after Filter Type.
@@ -1896,8 +1950,8 @@ static bool read_oscillator_layer(const Sculptor::Graph&           graph,
         const Synth::ModTarget target = static_cast<Synth::ModTarget>(t);
         // Only existing bands' rows are projected: a band beyond the count
         // contributes nothing, so its binding compiles as zeroed.
-        const int32_t band = osc_target_band_index(t);
-        if (band >= 0 && static_cast<uint32_t>(band) >= band_count) {
+        const int32_t band = Sculptor::osc_target_band_index(t);
+        if ((band >= 0 && static_cast<uint32_t>(band) >= band_count) || ! osc_target_projected(osc, t)) {
             continue;
         }
         // Each layer owns its cell: the base value comes from the layer's
@@ -2050,7 +2104,8 @@ bool Sculptor::compile_graph_to_instrument(const Graph&             graph,
             // removal), so a re-projection round trip is bit-identical.
             const uint32_t count = osc_band_model_count(out->layers[layer]);
             for (uint32_t t = 0; t < Synth::num_mod_targets; ++t) {
-                if (osc_target_band_index(t) >= static_cast<int32_t>(count)) {
+                if (osc_target_band_index(t) >= static_cast<int32_t>(count) ||
+                    ! osc_target_projected(out->layers[layer], t)) {
                     out->layers[layer].targets[t] = previous->layers[layer].targets[t];
                 }
             }

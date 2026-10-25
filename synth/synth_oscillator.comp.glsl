@@ -17,6 +17,7 @@ const uint sawtooth_wave = 2;
 const uint pulse_wave    = 3;
 const uint noise_wave    = 4;
 const uint pad_wave      = 5;
+const uint string_wave   = 6;
 const uint noise_salt    = 0x5bd1e995u; // Decorrelates the second oscillator's noise
 
 // Pad wave time base wraps every 2^20 samples; drift rates are quantized to
@@ -35,7 +36,7 @@ struct OscillatorParams {
     uint  out_sound_offs;   // Offset of output sound data
     float phase;            // Initial phase value at first sample to render, 1 is equivalent to wave length
     float phase_step;       // Phase step between samples, derived from oscillator's and sampling frequencies
-    uint  osc_pack;         // Bits 0-7: osc_type[0], 8-15: osc_type[1], 16-23: osc_mode, 24-31 spare (zero)
+    uint  osc_pack;         // Bits 0-7: osc_type[0], 8-15: osc_type[1], 16-23: osc_mode, 24: voice releasing (string), 25-31 spare (zero)
     float duty[2];          // Duty cycle for sawtooth and pulse oscillator [0..1]
     float osc_mix;          // Mixing between osc_type[0] and osc_type[1] [0..1]
     float mod_ratio;        // FM: modulator frequency / carrier frequency.  Hard sync: slave cycles per master cycle.  Ring mod: carrier cycles per master cycle
@@ -44,11 +45,15 @@ struct OscillatorParams {
     float mod_phase_step;   // Modulator's phase step between samples
 
     // Optional filter parameters
-    uint  fir_memory_offs;  // Offset of FIR filter's memory
-    uint  taps_offs;        // Offset of FIR filter's taps
-    uint  noise_counter;    // Sample index into the noise stream, independent of pitch
-    uint  note_seed;        // Per-note constant: the note-on noise counter, never advanced
-    float pad_tilt[2];      // Pad spectral tilt: harmonic exponent is 1 + clamp(tilt, -1, 1)
+    uint  fir_memory_offs;        // Offset of FIR filter's memory
+    uint  taps_offs;              // Offset of FIR filter's taps
+    uint  noise_counter;          // Sample index into the noise stream, independent of pitch
+    uint  note_seed;              // Per-note constant: the note-on noise counter, never advanced
+    float pad_tilt[2];            // Pad spectral tilt: harmonic exponent is 1 + clamp(tilt, -1, 1)
+    uint  string_state_offs;      // String state region in floats: header words 0..7, then the ring
+    float string_pick;            // String pick position [0..1], comb applied at note-on
+    float string_damping;         // String damping [0..1], higher = shorter decay
+    float string_release_damping; // String release damping [0..1]
 };
 
 layout(binding = 0) buffer data_buf { float data[]; };
@@ -204,6 +209,155 @@ float oscillator(uint osc_type, float phase, float duty, float tilt, uint noise_
     }
 }
 
+const uint   string_ring_size    = 2040;
+const uint   string_header_words = 8;
+const float  string_min_freq     = 22.0;
+shared float string_block_out[256];
+shared uint  string_write_pos;
+shared float string_loop_length;
+
+float string_ring_read(uint ring_offs, float loop_phase)
+{
+    if (string_loop_length == 0.0) {
+        return 0.0;
+    }
+
+    const float loop_offset = (loop_phase - floor(loop_phase)) * string_loop_length;
+    const float read_pos    = float(string_write_pos) - 1.0 - string_loop_length + loop_offset;
+    int         i0          = int(floor(read_pos));
+    const float read_frac   = read_pos - float(i0);
+
+    i0 += (i0 < 0) ? int(string_ring_size) : 0;
+
+    int i1 = i0 + 1;
+    i1 -= (i1 >= int(string_ring_size)) ? int(string_ring_size) : 0;
+
+    const float s0 = data[ring_offs + uint(i0)];
+    const float s1 = data[ring_offs + uint(i1)];
+    return s0 + read_frac * (s1 - s0);
+}
+
+// Karplus-Strong plucked string, run once per 256-sample block by lane 0.
+// The ring holds one loop of excitation: a noise burst, optionally combed by the pick position.
+// Each sample is read delay_whole samples behind the write point, then damped by a one-pole
+// lowpass (string_damping_coeff) and tuned to the fractional delay by an allpass
+// (string_allpass_coeff).  string_loop_gain sets the decay to the target T60.
+// string_release_gain glides toward release_gain_target on note release to shorten the tail.
+// Header layout: 0 write pos, 1 prev lowpass, 2 prev allpass, 3 release gain, 4 loop length,
+// 5-6 seed tag, 7 unused.
+void string_pass(uint base, float f0, float damping, float release_damping, float pick, bool release, uint note_seed)
+{
+    const uint  ring_offs   = base + string_header_words;
+    const float sample_rate = float(sampling_rate);
+
+    string_write_pos   = 0u;
+    string_loop_length = 0.0;
+    if (! (f0 >= string_min_freq)) {
+        // Too low to tune: silence, state untouched.
+        for (uint i = 0u; i < 256u; i++) {
+            string_block_out[i] = 0.0;
+        }
+        return;
+    }
+
+    float loop_length                = sample_rate / f0;
+    loop_length                      = loop_length < 3.0 ? 3.0 : loop_length;
+    const float string_damping_coeff = 0.10 + 0.30 * damping;
+    const float lowpass_delay        = string_damping_coeff / (1.0 - string_damping_coeff);
+    const float decay_t60            = 20.0 * pow(0.25 / 20.0, damping);
+    const float omega                = 6.2831853 * f0 / sample_rate;
+    const float lowpass_mag      = (1.0 - string_damping_coeff) / sqrt(1.0 - 2.0 * string_damping_coeff * cos(omega) +
+                                                                       string_damping_coeff * string_damping_coeff);
+    const float loop_gain_raw    = pow(10.0, -3.0 * loop_length / (sample_rate * decay_t60)) / lowpass_mag;
+    const float string_loop_gain = loop_gain_raw < 0.9999 ? loop_gain_raw : 0.9999;
+    const float delay            = loop_length - lowpass_delay;
+    const uint  delay_whole      = uint(floor(delay - 1.0));
+    const float delay_frac       = delay - float(delay_whole);
+    const float string_allpass_coeff = (1.0 - delay_frac) / (1.0 + delay_frac);
+
+    // Init runs on the first in-range pass of a note.  The seed tag (header words 5 and 6) records
+    // which note seed the ring was filled for, so a note that starts below the pitch floor still
+    // gets a fresh pluck on its first tunable pass.  The low half is stored +1 so zeroed memory
+    // never matches, and NaN compares false, so corrupt state re-initialises instead of replaying.
+    const float string_seed_tag_lo = float((note_seed & 0xFFFFu) + 1u);
+    const float string_seed_tag_hi = float(note_seed >> 16);
+    const bool  init               = ! (data[base + 5u] == string_seed_tag_lo && data[base + 6u] == string_seed_tag_hi);
+    uint        write_pos;
+    float       string_prev_lowpass;
+    float       string_prev_allpass;
+    float       string_release_gain;
+    if (init) {
+        // Note-on or retrigger: noise burst, optional pick comb, then zero mean.
+        for (uint i = 0u; i < delay_whole; i++) {
+            data[ring_offs + i] = float(pcg_hash(note_seed + i) & 0xFFFFu) / 32767.5 - 1.0;
+        }
+        uint pick_offset = uint(floor(pick * float(delay_whole) + 0.5));
+        // Clamp to at least 1 so a tiny nonzero pick still combs (1 sample); only pick = 0 skips the comb.
+        pick_offset = (pick > 0.0 && pick_offset < 1u) ? 1u : pick_offset;
+        pick_offset = pick_offset < delay_whole - 1u ? pick_offset : delay_whole - 1u;
+        // Truncated (non-circular) comb, backward so each source is read before it is overwritten.
+        uint i = delay_whole;
+        while (i > pick_offset && pick_offset > 0u) {
+            --i;
+            data[ring_offs + i] -= data[ring_offs + i - pick_offset];
+        }
+        float sum = 0.0;
+        for (uint k = 0u; k < delay_whole; k++) {
+            sum += data[ring_offs + k];
+        }
+        const float mean = sum / float(delay_whole);
+        for (uint k = 0u; k < delay_whole; k++) {
+            data[ring_offs + k] -= mean;
+        }
+        data[base + 5u]     = string_seed_tag_lo;
+        data[base + 6u]     = string_seed_tag_hi;
+        write_pos           = delay_whole;
+        string_prev_lowpass = 0.0;
+        string_prev_allpass = 0.0;
+        string_release_gain = 1.0;
+    }
+    else {
+        write_pos           = floatBitsToUint(data[base]);
+        string_prev_lowpass = data[base + 1u];
+        string_prev_allpass = data[base + 2u];
+        string_release_gain = data[base + 3u];
+    }
+
+    const float release_gain_target  = pow(10.0, -release_damping * 3.0 * loop_length / (sample_rate * 0.05));
+    const float release_smooth_coeff = 1.0 - exp(-1.0 / (sample_rate * 0.003));
+    const float release_target       = release ? release_gain_target : 1.0;
+
+    for (uint i = 0u; i < 256u; i++) {
+        const uint ring_read_pos =
+            write_pos >= delay_whole ? write_pos - delay_whole : write_pos + string_ring_size - delay_whole;
+        const float pass_input = data[ring_offs + ring_read_pos];
+
+        string_block_out[i] = pass_input;
+        string_release_gain += release_smooth_coeff * (release_target - string_release_gain);
+
+        const float lowpass_out =
+            (1.0 - string_damping_coeff) * pass_input + string_damping_coeff * string_prev_lowpass;
+        const float allpass_out =
+            string_allpass_coeff * lowpass_out + string_prev_lowpass - string_allpass_coeff * string_prev_allpass;
+        float loop_output = allpass_out * (string_loop_gain * string_release_gain);
+
+        // Flush runaway or non-finite values to silence so a blown-up loop cannot poison the ring.
+        loop_output                 = abs(loop_output) < 8.0 ? loop_output : 0.0;
+        data[ring_offs + write_pos] = loop_output;
+        string_prev_lowpass         = lowpass_out;
+        string_prev_allpass         = allpass_out;
+        write_pos                   = write_pos + 1u == string_ring_size ? 0u : write_pos + 1u;
+    }
+
+    data[base]         = uintBitsToFloat(write_pos);
+    data[base + 1u]    = string_prev_lowpass;
+    data[base + 2u]    = string_prev_allpass;
+    data[base + 3u]    = string_release_gain;
+    data[base + 4u]    = loop_length;
+    string_write_pos   = write_pos;
+    string_loop_length = loop_length;
+}
+
 void main()
 {
     const OscillatorParams param = params[gl_WorkGroupID.x];
@@ -222,18 +376,36 @@ void main()
     const uint note_seed = param.note_seed;
     const uint noise_key = pcg_hash(note_seed);
 
-    const uint type1 = param.osc_pack & 0xFFu;
-    const float duty1 = param.duty[0];
-    const uint  type2 = (param.osc_pack >> 8) & 0xFFu;
-    const float duty2 = param.duty[1];
-    const float tilt1 = param.pad_tilt[0];
-    const float tilt2 = param.pad_tilt[1];
+    const uint  type1    = param.osc_pack & 0xFFu;
+    const float duty1    = param.duty[0];
+    const uint  type2    = (param.osc_pack >> 8) & 0xFFu;
+    const float duty2    = param.duty[1];
+    const float tilt1    = param.pad_tilt[0];
+    const float tilt2    = param.pad_tilt[1];
     const uint  osc_mode = (param.osc_pack >> 16) & 0xFFu;
+    const uint  lane     = gl_LocalInvocationID.x;
+
+    const bool is_string = type1 == string_wave;
+    if (is_string && !(type2 != no_wave && osc_mode == osc_mode_hard_sync)) {
+        if (lane == 0u) {
+            string_pass(param.string_state_offs,
+                        param.phase_step * float(sampling_rate),
+                        param.string_damping,
+                        param.string_release_damping,
+                        param.string_pick,
+                        ((param.osc_pack >> 24) & 1u) != 0u,
+                        note_seed);
+        }
+        // barrier() alone does not publish the data[] ring writes.
+        memoryBarrierBuffer();
+        memoryBarrierShared();
+        barrier();
+    }
 
     float value;
 
     if (type2 == no_wave) {
-        value = oscillator(type1, phase, duty1, tilt1, noise_index ^ noise_key, note_seed, pad_time, param.phase_step);
+        value = is_string ? string_block_out[lane] : oscillator(type1, phase, duty1, tilt1, noise_index ^ noise_key, note_seed, pad_time, param.phase_step);
     }
     else if (osc_mode == osc_mode_fm) {
         // Frequency modulation: type1 is the carrier, type2 the modulator.
@@ -241,27 +413,26 @@ void main()
         const float mod_phase = param.mod_phase + param.mod_phase_step * gl_LocalInvocationID.x;
         const float modulator = oscillator(type2, mod_phase, duty2, tilt2, noise_index ^ noise_key ^ noise_salt, note_seed ^ noise_salt, pad_time, param.mod_phase_step);
 
-        value = oscillator(type1, phase + param.fm_index * modulator, duty1, tilt1, noise_index ^ noise_key, note_seed, pad_time, param.phase_step);
+        value = is_string ? string_ring_read(param.string_state_offs + string_header_words, phase + param.fm_index * modulator) : oscillator(type1, phase + param.fm_index * modulator, duty1, tilt1, noise_index ^ noise_key, note_seed, pad_time, param.phase_step);
     }
     else if (osc_mode == osc_mode_hard_sync) {
-        // Hard sync: type1 is the master providing the note frequency, type2 is
-        // the slave whose phase resets each time the master phase wraps.  The
-        // slave is stateless, derived from the master phase.  mod_ratio is
-        // reused here as the sync ratio (slave cycles per master cycle).
+        // first oscillator is the master providing the note frequency
+        // second oscillator is the slave whose phase resets each time the master phase wraps
+        // mod_ratio is used as the sync ratio (slave cycles per master cycle).
         value = oscillator(type2, fract(param.mod_ratio * fract(phase)), duty2, tilt2, noise_index ^ noise_key ^ noise_salt, note_seed ^ noise_salt, pad_time, param.mod_ratio * param.phase_step);
     }
     else if (osc_mode == osc_mode_ring_mod) {
-        // Ring mod: type1 is the note-tied master, type2 is the carrier evaluated
-        // at mod_ratio times the master phase.  Stateless, like hard sync.
+        // type1 is the note-tied master
+        // type2 is the carrier evaluated at mod_ratio times the master phase
         // osc_mix crossfades the dry master to the product.
         const float carrier = oscillator(type2, fract(param.mod_ratio * fract(phase)), duty2, tilt2, noise_index ^ noise_salt, note_seed ^ noise_salt, pad_time, param.mod_ratio * param.phase_step);
 
-        value = oscillator(type1, phase, duty1, tilt1, noise_index ^ noise_key, note_seed, pad_time, param.phase_step);
+        value = is_string ? string_block_out[lane] : oscillator(type1, phase, duty1, tilt1, noise_index ^ noise_key, note_seed, pad_time, param.phase_step);
         value = mix(value, value * carrier, param.osc_mix);
     }
     else {
         // Blend mode: mix the two oscillators by osc_mix.
-        value = oscillator(type1, phase, duty1, tilt1, noise_index ^ noise_key, note_seed, pad_time, param.phase_step);
+        value = is_string ? string_block_out[lane] : oscillator(type1, phase, duty1, tilt1, noise_index ^ noise_key, note_seed, pad_time, param.phase_step);
 
         if (type2 != no_wave) {
             value = mix(value, oscillator(type2, phase, duty2, tilt2, noise_index ^ noise_key ^ noise_salt, note_seed ^ noise_salt, pad_time, param.phase_step), param.osc_mix);
