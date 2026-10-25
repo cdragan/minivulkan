@@ -126,6 +126,12 @@ constexpr uint32_t osc_band_header_slot(uint32_t band)
 // click slots share one widget column (the renderer keys on this range).
 constexpr uint8_t osc_band_row_group = 105;
 
+// Band rows nest one level under the band header rows, which themselves
+// nest one level under the Filter Type row: header at 1, value rows at
+// 2, blocks at 3, rate/amount rows at 4.  The Multi-band FIR effect node
+// reuses the depths for its own band tree (header at 1 under Enabled).
+constexpr uint8_t osc_band_block_level = 3;
+
 // The value row of each ModTarget on an oscillator node.  The rows are
 // not contiguous: the duty rows interleave with the oscillator
 // properties, and the rows after an earlier target's block shift down

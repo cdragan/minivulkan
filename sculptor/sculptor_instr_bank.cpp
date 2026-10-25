@@ -245,7 +245,8 @@ static bool validate_effect_chain(const Synth::EffectChainBinding& chain,
         // the scalar params, so load-time and expansion-time acceptance stay
         // identical.  Dormant bands (beyond the count, or band 0's gain on the
         // legacy single-band form, whose staging ignores it) validate but count
-        // nothing.
+        // nothing.  A fir_multiband slot reads the band array uniformly, so every
+        // band of its clamped count is active.
         if (effect.type == Synth::EffectType::fir) {
             if (effect.fir_bands.band_count > Synth::max_fir_effect_bands) {
                 return false;
@@ -258,6 +259,25 @@ static bool validate_effect_chain(const Synth::EffectChainBinding& chain,
                     return false;
                 }
                 if (band_param < active_band_params && (band_binding.lfo_desc_id || band_binding.num_inputs)) {
+                    (*num_modulated)++;
+                }
+            }
+        }
+        else if (effect.type == Synth::EffectType::fir_multiband) {
+            if (effect.fir_bands.band_count > Synth::max_fir_effect_bands) {
+                return false;
+            }
+            // A zeroed count is the single-band marker the runtime reads as 1.
+            uint32_t band_count = effect.fir_bands.band_count;
+            if (band_count < 1) {
+                band_count = 1;
+            }
+            for (uint32_t band_param = 0; band_param < 4 * band_count; band_param++) {
+                const Synth::EffectParamBinding& band_binding = effect.fir_bands.bands[band_param];
+                if (! validate_effect_param_binding(band_binding, num_lfos)) {
+                    return false;
+                }
+                if (band_binding.lfo_desc_id || band_binding.num_inputs) {
                     (*num_modulated)++;
                 }
             }

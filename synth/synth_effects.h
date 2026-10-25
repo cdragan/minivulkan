@@ -18,6 +18,7 @@ enum class EffectType : uint8_t {
     compressor,
     fir,
     ring_mod,
+    fir_multiband,
     num_types
 };
 
@@ -27,10 +28,10 @@ constexpr uint32_t num_effect_types = static_cast<uint32_t>(EffectType::num_type
 // at freeverb_base_rate.  They are scaled to rt_sampling_rate with the same integer
 // division the reverb shader applies, so the reverb keeps its voicing at any rate and
 // the host state size matches the shader's rings exactly.
-constexpr uint32_t effect_reverb_comb_base[effect_reverb_num_combs] =
-    { 1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617 };
-constexpr uint32_t effect_reverb_allpass_base[effect_reverb_num_allpass] =
-    { 556, 441, 341, 225 };
+constexpr uint32_t effect_reverb_comb_base[effect_reverb_num_combs] = {
+    1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617
+};
+constexpr uint32_t effect_reverb_allpass_base[effect_reverb_num_allpass] = { 556, 441, 341, 225 };
 
 // Chain capacity, shared by the runtime EffectChain and the bank's EffectChainBinding.
 constexpr uint32_t max_chain_effects = 4;
@@ -42,12 +43,17 @@ constexpr uint32_t max_effect_param_floats = 5;
 // LFO leaf for each modulated effect param.
 constexpr uint32_t max_effect_mod_params = 32;
 
-// Multi-band FIR effect model: at most four bands per effect.  Band 0's
-// lowpass, highpass and slope stay in the slot's legacy scalar params; the
-// dedicated band bindings carry band 0's gain plus the full parameter set of
-// bands 1..3 (lowpass, highpass, gain, slope each).
+// Multi-band FIR effect model: at most four bands per effect.  The band
+// bindings' index meaning follows the slot's effect type.  The plain FIR
+// effect keeps its dormant legacy layout: index 0 is band 0's gain and bands
+// 1..3 carry lowpass, highpass, gain and slope each (1 + 4 * (band - 1) +
+// kind), with band 0's edges and slope in the slot's legacy scalar params.
+// EffectType::fir_multiband reads the same array uniformly: band b lives at
+// 4 * band + (0 = center, 1 = spread, 2 = gain, 3 = slope), all four bands
+// alike, and the coefficient staging derives each band's edges from its
+// center/spread pair.
 constexpr uint32_t max_fir_effect_bands       = 4;
-constexpr uint32_t num_fir_effect_band_params = 1 + (max_fir_effect_bands - 1) * 4;
+constexpr uint32_t num_fir_effect_band_params = max_fir_effect_bands * 4;
 
 // Storage-buffer offset alignment, pinned to the Vulkan spec minimum of
 // minStorageBufferOffsetAlignment; the runtime asserts the device honors it.
@@ -59,9 +65,9 @@ constexpr uint32_t effect_state_alignment = 256;
 // worst-case chain of 4 delay effects (static_assert in synth_effects.cpp).  The runtime
 // pins the exact carve accounting when it initializes the buffer.
 constexpr uint32_t effect_state_round = effect_state_alignment - 1;
-constexpr uint32_t effect_fir_reserve = (max_oscillators - 1)
-    * (((num_fir_taps * sizeof(float) + effect_state_round) & ~effect_state_round)
-       + (((num_fir_taps - 1) * sizeof(float) + effect_state_round) & ~effect_state_round));
+constexpr uint32_t effect_fir_reserve =
+    (max_oscillators - 1) * (((num_fir_taps * sizeof(float) + effect_state_round) & ~effect_state_round) +
+                             (((num_fir_taps - 1) * sizeof(float) + effect_state_round) & ~effect_state_round));
 constexpr uint32_t effect_output_reserve =
     (max_channels + 1) * ((rt_step_samples * 2 * sizeof(float) + effect_state_round) & ~effect_state_round)
     + max_oscillators * ((rt_step_samples * sizeof(float) + effect_state_round) & ~effect_state_round);
@@ -101,8 +107,8 @@ struct FirEffectCoeffEntry {
 // legacy 0) stages the legacy single-band form with the gain forced to 1.0, so legacy
 // banks keep their bit-exact staging.  band_count 2..4 stages every active band and
 // returns false when no band is active, so the caller drops the entry like the
-// oscillator staging does.  band_params holds the FirEffectBands-order live values
-// (index 0 = band 0's gain, then bands 1..3 lowpass, highpass, gain, slope).
+// oscillator staging does.  band_params holds the plain FIR's FirEffectBands-order live
+// values (index 0 = band 0's gain, then bands 1..3 lowpass, highpass, gain, slope).
 bool stage_fir_effect_coeff_entry(uint32_t             taps_offs,
                                   uint8_t              band_count,
                                   float                band0_lowpass_hz,
@@ -110,5 +116,20 @@ bool stage_fir_effect_coeff_entry(uint32_t             taps_offs,
                                   float                band0_slope_percent,
                                   const float*         band_params,
                                   FirEffectCoeffEntry* entry);
+
+// Stages one fir_multiband effect's coefficient entry from its live band values.
+// band_params holds the uniform FirEffectBands-order live values (band b at 4 * b +
+// 0/1/2/3 = center Hz, spread Hz, gain, slope percent); every band's edges derive from
+// its center/spread pair (highpass = center - spread/2, lowpass = center + spread/2)
+// and clamp to [0, Nyquist], so a band may be half-open: a highpass edge of 0 is a
+// pure low band, and a lowpass edge at or above Nyquist stages as a pure high band
+// (lowpass cutoff 0, no lowpass kernel).  A band whose spread is nonpositive or whose
+// center is nonpositive is inactive and contributes nothing.  band_count 0 reads as
+// the single-band marker.  Returns false when no band is active, so the caller drops
+// the entry like the oscillator staging does.
+bool stage_fir_multiband_coeff_entry(uint32_t             taps_offs,
+                                     uint8_t              band_count,
+                                     const float*         band_params,
+                                     FirEffectCoeffEntry* entry);
 
 } // namespace Synth

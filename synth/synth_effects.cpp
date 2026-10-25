@@ -78,6 +78,82 @@ bool Synth::stage_fir_effect_coeff_entry(const uint32_t       taps_offs,
     return true;
 }
 
+bool Synth::stage_fir_multiband_coeff_entry(const uint32_t       taps_offs,
+                                            const uint8_t        band_count,
+                                            const float*         band_params,
+                                            FirEffectCoeffEntry* entry)
+{
+    static_assert(sizeof(FirEffectCoeffEntry) == fir_coeff_entry_words * sizeof(uint32_t));
+
+    *entry           = FirEffectCoeffEntry();
+    entry->taps_offs = taps_offs;
+
+    // The count byte travels unvalidated between banks, so the clamp precedes
+    // every use; a zeroed count is the single-band marker the runtime reads as 1.
+    uint32_t active_count = band_count;
+    if (active_count < 1) {
+        active_count = 1;
+    }
+
+    uint32_t    num_bands  = 0;
+    const float nyquist_hz = static_cast<float>(Synth::rt_sampling_rate / 2);
+    for (uint32_t band = 0; band < max_fir_effect_bands && band < active_count; band++) {
+        const uint32_t band_base     = 4 * band;
+        const float    center_hz     = band_params[band_base + 0];
+        const float    spread_hz     = band_params[band_base + 1];
+        const float    slope_percent = band_params[band_base + 3];
+        float          gain          = band_params[band_base + 2];
+        // A band is active when its spread and its center are both positive;
+        // NaN fails the comparisons, so a NaN pair reads as absent.  The
+        // edges derive as center -+ spread/2 and clamp to [0, Nyquist], so a
+        // band may be half-open: a highpass edge of 0 is a pure low band,
+        // and a lowpass edge at or above Nyquist is a pure high band, staged
+        // with the lowpass cutoff 0 so no lowpass kernel runs (matching the
+        // plain FIR's edge-off semantics exactly).
+        if (! (spread_hz > 0.0f && center_hz > 0.0f)) {
+            continue;
+        }
+        float highpass_hz = center_hz - spread_hz * 0.5f;
+        float lowpass_hz  = center_hz + spread_hz * 0.5f;
+        if (! (highpass_hz > 0.0f)) {
+            highpass_hz = 0.0f;
+        }
+        if (lowpass_hz > nyquist_hz) {
+            lowpass_hz = nyquist_hz;
+        }
+        // The modulated gain clamps to [0, 1]; a gain <= 0 or NaN stages a zero-gain band,
+        // mirroring the oscillator's band loop.
+        if (gain > 1.0f) {
+            gain = 1.0f;
+        }
+        if (! (gain > 0.0f)) {
+            gain = 0.0f;
+        }
+        uint32_t highpass = cutoff_hz_to_int(highpass_hz);
+        uint32_t lowpass;
+        if (lowpass_hz >= nyquist_hz) {
+            lowpass = 0; // Pure high band: no lowpass kernel runs.
+        }
+        else {
+            lowpass = cutoff_hz_to_int(lowpass_hz);
+            // The guard widens a post-quantization zero-bandwidth or double-clamped
+            // pair the way the oscillator's band loop does.
+            oscillator_fir_band_guard(&lowpass, &highpass);
+        }
+        FirEffectCoeffBand* out = &entry->bands[num_bands];
+        num_bands++;
+        out->highpass_cutoff_freq = highpass;
+        out->lowpass_cutoff_freq  = lowpass;
+        out->window_span          = fir_effective_span(slope_percent);
+        out->gain                 = gain;
+    }
+    if (num_bands == 0) {
+        return false;
+    }
+    entry->band_count = num_bands;
+    return true;
+}
+
 static constexpr uint32_t get_freeverb_scaled_length(uint32_t base_length)
 {
     return base_length * Synth::rt_sampling_rate / Synth::freeverb_base_rate;
@@ -127,6 +203,7 @@ static constexpr uint32_t effect_state_floats(Synth::EffectType type)
             return 1;
 
         case Synth::EffectType::fir:
+        case Synth::EffectType::fir_multiband:
             // The coeff buffer (num_fir_taps), a stereo (x2) input-history ring of
             // num_fir_taps - 1 frames, and one write-position counter.
             return Synth::num_fir_taps + 2 * (Synth::num_fir_taps - 1) + 1;
@@ -166,6 +243,11 @@ uint32_t Synth::get_effect_param_floats(Synth::EffectType type)
             return 5;
         case Synth::EffectType::fir:
             return 3; // lowpass cutoff Hz, highpass cutoff Hz, FIR slope percent
+        case Synth::EffectType::fir_multiband:
+            // The legacy FIR scalars ride along unused (the uniform bands carry
+            // center/spread/gain/slope in FirEffectBands), so the slot and
+            // document shape match the plain FIR's exactly.
+            return 3;
         case Synth::EffectType::ring_mod:
             return 2; // carrier rate Hz, mix
         default:

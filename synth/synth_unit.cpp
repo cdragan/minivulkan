@@ -476,11 +476,10 @@ static bool osc_tooltip_exempt(uint32_t node_idx, const Sculptor::Slot& slot, vo
 }
 
 // Effect-pane exemptions: the In/Out dots of the effect nodes themselves;
-// the chain endpoint nodes dots stay required. The FIR effect node's
-// unlabeled band-header spacer slot (only projected once the
-// fx_band_region_projected gate opens for the Multi-band FIR effect)
-// stays exempt too: an empty name at fx_band_row_group_base row groups
-// exists only inside that region.
+// the chain endpoint nodes dots stay required. The FIR effect node's band
+// header label rows ("Band N", only projected once the
+// fx_band_region_projected gate opens for the Multi-band FIR effect) stay
+// exempt like the oscillator pane's.
 static bool fx_tooltip_exempt(uint32_t node_idx, const Sculptor::Slot& slot, void* user_data)
 {
     const Sculptor::EffectGraphMapping& mapping = *static_cast<const Sculptor::EffectGraphMapping*>(user_data);
@@ -491,7 +490,7 @@ static bool fx_tooltip_exempt(uint32_t node_idx, const Sculptor::Slot& slot, voi
         }
     }
 
-    if (slot.name[0] == '\0' && slot.row_group >= Sculptor::fx_band_row_group_base) {
+    if (strncmp(slot.name, "Band ", 5) == 0) {
         return true;
     }
 
@@ -17833,7 +17832,7 @@ static void fir_effect_band_editor_regressions()
         TEST(graph.node(node()).slots.num_allocated == Sculptor::fx_band_first_slot);
         Sculptor::PropertyValue press = {};
         press.toggle                  = true;
-        TEST(fx_edit(Sculptor::fx_band_header_slot(1) + 1, press));
+        TEST(fx_edit(Sculptor::fx_band_header_slot(Synth::EffectType::fir, 1) + 1, press));
         TEST(chain_effects().fir_bands.band_count == 3);
         for (uint32_t p = 0; p < 4; ++p) {
             TEST(bands[1 + p].base_value == old_band2[p].base_value);
@@ -17861,7 +17860,7 @@ static void fir_effect_band_editor_regressions()
     {
         Sculptor::PropertyValue press = {};
         press.toggle                  = true;
-        TEST(fx_edit(Sculptor::fx_band_header_slot(0) + 2, press));
+        TEST(fx_edit(Sculptor::fx_band_header_slot(Synth::EffectType::fir, 0) + 2, press));
         TEST(chain_effects().fir_bands.band_count == 4);
     }
 
@@ -17912,7 +17911,7 @@ static void fir_effect_band_editor_regressions()
         Sculptor::GraphChange click = {};
         click.kind                  = Sculptor::ChangeKind::value_changed;
         click.node_idx              = node();
-        click.slot_idx              = Sculptor::fx_band_header_slot(1) + 1;
+        click.slot_idx              = Sculptor::fx_band_header_slot(Synth::EffectType::fir, 1) + 1;
         bool band_click             = false;
         TEST(Sculptor::fx_band_click_boundary(&click, 1, mapping, source.bank, &band_click) == 1);
         TEST(band_click);
@@ -17928,7 +17927,7 @@ static void fir_effect_band_editor_regressions()
         chain.num_effects = 1;
         Sculptor::fx_init_slot(&chain, 0, Synth::EffectType::compressor);
         reproject();
-        TEST(Sculptor::is_fx_band_button_slot(Sculptor::fx_param_row(3) + 2));
+        TEST(Sculptor::is_fx_band_button_slot(Synth::EffectType::fir, Sculptor::fx_param_row(3) + 2));
         const uint32_t op_slot = Sculptor::fx_param_row(3) + 2;
         TEST(graph.node(node()).slots.num_allocated > op_slot);
         Sculptor::PropertyValue op = {};
@@ -18086,7 +18085,7 @@ static void m4_fix3_wave_regressions()
         wire.connection_output.node_idx = lfo_node;
         wire.connection_output.slot_idx = 0;
         wire.connection_input.node_idx  = node();
-        wire.connection_input.slot_idx  = Sculptor::fx_band_row_slot(1, 2) + 1;
+        wire.connection_input.slot_idx  = Sculptor::fx_band_row_slot(Synth::EffectType::fir, 1, 2) + 1;
         candidate                       = source;
         TEST(! Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, wire));
         TEST(candidate.bank.channel_chains[0].effects[0].fir_bands.bands[3].lfo_desc_id == 0);
@@ -18105,7 +18104,7 @@ static void m4_fix3_wave_regressions()
         wire.connection_output.node_idx = mapping.midi_node;
         wire.connection_output.slot_idx = mapping.midi_source_slots[0];
         wire.connection_input.node_idx  = node();
-        wire.connection_input.slot_idx  = Sculptor::fx_band_row_slot(1, 2);
+        wire.connection_input.slot_idx  = Sculptor::fx_band_row_slot(Synth::EffectType::fir, 1, 2);
         candidate                       = source;
         TEST(! Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, wire));
         const Synth::EffectParamBinding& gain1 = candidate.bank.channel_chains[0].effects[0].fir_bands.bands[3];
@@ -18239,6 +18238,750 @@ static void m4_fix3_wave_regressions()
         TEST(probe.canary == 0x5A5A5A5A5A5A5A5Aull);
         TEST(probe.chain.effects[0].fir_bands.bands[12].lfo_desc_id == 0);
     }
+}
+
+// Wave-1 Multi-band FIR regressions: the new effect type's identity (type
+// tables, count/state budgets), the uniform Center/Spread/Gain/Slope band
+// storage with staging-side edge derivation, the fx_band_region_projected
+// gate flip, the type-dropdown conversion porting both ways, and the bank
+// codec's fir_multiband round trip.  The plain FIR's behavior stays
+// byte-identical; fir_effect_bands_regressions and
+// fir_effect_band_editor_regressions keep pinning it.
+static void fir_multiband_wave1_regressions()
+{
+    // Identity: the enum trails ring_mod, the param/state budgets match the
+    // plain FIR's exactly (the multiband reuses the FIR's shader, state
+    // carve and three legacy scalar slots).
+    TEST(static_cast<uint32_t>(Synth::EffectType::fir_multiband) == Synth::num_effect_types - 1);
+    TEST(Synth::get_effect_param_floats(Synth::EffectType::fir_multiband) == 3);
+    TEST(Synth::get_effect_state_floats(Synth::EffectType::fir_multiband) ==
+         Synth::get_effect_state_floats(Synth::EffectType::fir));
+    TEST(Synth::get_effect_state_bytes(Synth::EffectType::fir_multiband) ==
+         Synth::get_effect_state_bytes(Synth::EffectType::fir));
+
+    // Menu display order: Multi-band FIR sits immediately after FIR in the
+    // effect-type menus; the enum order itself stays pinned by the JSON
+    // codec.
+    {
+        uint32_t fir_pos       = 0;
+        uint32_t multiband_pos = 0;
+        for (uint32_t entry = 0; entry < Synth::num_effect_types - 1; ++entry) {
+            if (Sculptor::fx_type_menu_order[entry] == Synth::EffectType::fir) {
+                fir_pos = entry;
+            }
+            if (Sculptor::fx_type_menu_order[entry] == Synth::EffectType::fir_multiband) {
+                multiband_pos = entry;
+            }
+        }
+        TEST(multiband_pos == fir_pos + 1);
+    }
+
+    // Coefficient staging derives every band's edges from its uniform
+    // center/spread pair: highpass = center - spread/2, lowpass = center +
+    // spread/2, clamped to [0, Nyquist] so a band may be half-open.  A band
+    // whose spread is nonpositive or whose center is nonpositive is inactive
+    // and compacts out; an all-inactive configuration drops the entry
+    // entirely.
+    {
+        Synth::FirEffectCoeffEntry entry                                          = {};
+        float                      band_params[Synth::num_fir_effect_band_params] = {};
+        // Band 0: center 4000 Hz, spread 3600 Hz -> 2200..5800 Hz, gain 0.7, slope 50.
+        band_params[0] = 4000.0f;
+        band_params[1] = 3600.0f;
+        band_params[2] = 0.7f;
+        band_params[3] = 50.0f;
+        // Band 1 stays zeroed: the degenerate spread contributes nothing.
+        // Band 2: center 1200 Hz, spread 800 Hz -> 800..1600 Hz, gain clamps down from 2.
+        band_params[8]  = 1200.0f;
+        band_params[9]  = 800.0f;
+        band_params[10] = 2.0f;
+        band_params[11] = 33.0f;
+        TEST(Synth::stage_fir_multiband_coeff_entry(77, 3, band_params, &entry));
+        TEST(entry.taps_offs == 77);
+        TEST(entry.band_count == 2); // the degenerate band compacts out
+        TEST(entry.bands[0].lowpass_cutoff_freq == Synth::cutoff_hz_to_int(5800.0f));
+        TEST(entry.bands[0].highpass_cutoff_freq == Synth::cutoff_hz_to_int(2200.0f));
+        TEST(entry.bands[0].gain == 0.7f);
+        TEST(entry.bands[0].window_span == Synth::fir_effective_span(50.0f));
+        TEST(entry.bands[1].lowpass_cutoff_freq == Synth::cutoff_hz_to_int(1600.0f));
+        TEST(entry.bands[1].highpass_cutoff_freq == Synth::cutoff_hz_to_int(800.0f));
+        TEST(entry.bands[1].gain == 1.0f); // the oversized gain clamps down
+        TEST(entry.bands[1].window_span == Synth::fir_effective_span(33.0f));
+        // The zeroed count reads as the single-band marker.
+        TEST(Synth::stage_fir_multiband_coeff_entry(9, 0, band_params, &entry));
+        TEST(entry.band_count == 1);
+        TEST(entry.bands[0].lowpass_cutoff_freq == Synth::cutoff_hz_to_int(5800.0f));
+        // Half-open bands are legal staging states: the edges clamp to
+        // [0, Nyquist].  A center at exactly spread/2 derives a highpass edge
+        // of exactly 0, the plain FIR's pure-low form.
+        float degenerate[Synth::num_fir_effect_band_params] = {};
+        degenerate[0]                                       = 2000.0f;
+        degenerate[1]                                       = 4000.0f; // highpass edge clamps to 0
+        TEST(Synth::stage_fir_multiband_coeff_entry(9, 1, degenerate, &entry));
+        TEST(entry.band_count == 1);
+        TEST(entry.bands[0].highpass_cutoff_freq == 0);
+        TEST(entry.bands[0].lowpass_cutoff_freq == Synth::cutoff_hz_to_int(4000.0f));
+        // A lowpass edge at or above Nyquist stages as a pure high band: the
+        // lowpass cutoff writes 0 so no lowpass kernel runs, matching the
+        // plain FIR's edge-off semantics exactly.
+        degenerate[0] = 11525.0f; // highpass 1000, lowpass edge at Nyquist
+        degenerate[1] = 21050.0f;
+        TEST(Synth::stage_fir_multiband_coeff_entry(9, 1, degenerate, &entry));
+        TEST(entry.band_count == 1);
+        TEST(entry.bands[0].highpass_cutoff_freq == Synth::cutoff_hz_to_int(1000.0f));
+        TEST(entry.bands[0].lowpass_cutoff_freq == 0);
+        // A negative highpass edge clamps to 0 instead of going inactive.
+        degenerate[0] = 500.0f; // highpass edge -100 clamps to 0, lowpass 1100
+        degenerate[1] = 1200.0f;
+        TEST(Synth::stage_fir_multiband_coeff_entry(9, 1, degenerate, &entry));
+        TEST(entry.bands[0].highpass_cutoff_freq == 0);
+        TEST(entry.bands[0].lowpass_cutoff_freq == Synth::cutoff_hz_to_int(1100.0f));
+        // A zero spread and a NaN pair still read as absent.
+        const float quiet_params[Synth::num_fir_effect_band_params] = {};
+        TEST(! Synth::stage_fir_multiband_coeff_entry(9, 1, quiet_params, &entry));
+        degenerate[0] = 2000.0f;
+        degenerate[1] = 0.0f;
+        TEST(! Synth::stage_fir_multiband_coeff_entry(9, 1, degenerate, &entry));
+        degenerate[1] = degenerate[1] / degenerate[1]; // NaN spread
+        TEST(! Synth::stage_fir_multiband_coeff_entry(9, 1, degenerate, &entry));
+        degenerate[1] = 4000.0f;
+        degenerate[0] = 0.0f;
+        degenerate[0] = degenerate[0] / degenerate[0]; // NaN center
+        TEST(! Synth::stage_fir_multiband_coeff_entry(9, 1, degenerate, &entry));
+    }
+
+    // Expansion: the uniform band values seed the instance's band array and
+    // commit one node per modulated band parameter, exactly like the plain
+    // FIR's band bindings.
+    {
+        Synth::InstrumentBank bank = {};
+        build_small_bank_fixture(bank);
+        Synth::EffectSlotBinding* const multiband = enabled_effect(bank, 0, 0, Synth::EffectType::fir_multiband);
+        multiband->bindings[0].base_value         = 8000.0f; // the legacy scalars ride along unused
+        multiband->bindings[2].base_value         = 100.0f;
+        multiband->fir_bands.band_count           = 2;
+        multiband->fir_bands.bands[0].base_value  = 4000.0f; // band 0 center
+        multiband->fir_bands.bands[1].base_value  = 3600.0f; // band 0 spread
+        multiband->fir_bands.bands[2].base_value  = 0.5f;    // band 0 gain
+        multiband->fir_bands.bands[2].lfo_desc_id = 1;
+        multiband->fir_bands.bands[2].lfo_depth   = 0.5f;
+        multiband->fir_bands.bands[3].base_value  = 50.0f;   // band 0 slope
+        multiband->fir_bands.bands[4].base_value  = 1200.0f; // band 1 center
+        multiband->fir_bands.bands[5].base_value  = 800.0f;  // band 1 spread
+        multiband->fir_bands.bands[6].base_value  = 1.0f;
+        multiband->fir_bands.bands[7].base_value  = 100.0f;
+        TEST(Synth::validate_instrument_bank(&bank));
+        Synth::init_effect_state_region(fake_region_base);
+        Synth::EffectExpansionPlan plan  = {};
+        const char*                error = nullptr;
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        // One modulated band binding: dest node + LFO leaf.
+        TEST(plan.num_nodes == 2);
+        Synth::EffectChain chains[Synth::max_channels] = {};
+        Synth::EffectChain master                      = {};
+        FakeWriter         writer                      = { 50, 0, 0, 0, 0 };
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+        const Synth::EffectInstance& instance = chains[0].effects[0];
+        TEST(instance.fir_bands.band_count == 2);
+        TEST(instance.fir_bands.params[0] == 4000.0f);
+        TEST(instance.fir_bands.params[1] == 3600.0f);
+        TEST(instance.fir_bands.params[2] == 0.5f);
+        TEST(instance.fir_bands.params[3] == 50.0f);
+        TEST(instance.fir_bands.params[4] == 1200.0f);
+        TEST(instance.fir_bands.params[5] == 800.0f);
+        TEST(instance.fir_bands.params[6] == 1.0f);
+        TEST(instance.fir_bands.params[7] == 100.0f);
+        TEST(instance.fir_bands.src_param_id[2] == 50); // the modulated band's dest node
+        TEST(writer.dest_count == 1 && writer.lfo_count == 1);
+        TEST(writer.last_dest_lfo_node == 51);
+        for (uint32_t band_param = 0; band_param < Synth::num_fir_effect_band_params; band_param++) {
+            if (band_param != 2) {
+                TEST(instance.fir_bands.src_param_id[band_param] == 0); // unwired bands resolve nothing
+            }
+        }
+        (void)Synth::take_effect_clear_ranges();
+    }
+    // Refusals: a count beyond the array bound rejects at validation, and the
+    // preflight refuses the oversized count.
+    {
+        Synth::InstrumentBank bank = {};
+        build_small_bank_fixture(bank);
+        Synth::EffectSlotBinding* const multiband = enabled_effect(bank, 0, 0, Synth::EffectType::fir_multiband);
+        multiband->fir_bands.band_count           = Synth::max_fir_effect_bands + 1;
+        TEST(! Synth::validate_instrument_bank(&bank));
+        Synth::init_effect_state_region(fake_region_base);
+        Synth::EffectExpansionPlan plan  = {};
+        const char*                error = nullptr;
+        TEST(! Synth::preflight_effect_expansion(bank, &plan, &error));
+        TEST(error && strstr(error, "too many bands") != nullptr);
+    }
+    // Cloning remaps the multiband's active band LFO references through the
+    // same lookup and zeroes the dormant tail.
+    {
+        Synth::EffectChainBinding src                 = {};
+        src.num_effects                               = 1;
+        src.effects[0].type                           = Synth::EffectType::fir_multiband;
+        src.effects[0].fir_bands.band_count           = 2;
+        src.effects[0].fir_bands.bands[2].lfo_desc_id = 1; // band 0's gain
+        src.effects[0].fir_bands.bands[5].lfo_desc_id = 2; // band 1's spread
+        src.effects[0].fir_bands.bands[9].lfo_desc_id = 3; // dormant band 2's center
+        const uint16_t            lfo_ids[]           = { 10, 11, 12 };
+        Synth::EffectChainBinding dst                 = {};
+        Synth::remap_effect_chain(src, lfo_ids, &dst);
+        TEST(dst.effects[0].fir_bands.bands[2].lfo_desc_id == 10);
+        TEST(dst.effects[0].fir_bands.bands[5].lfo_desc_id == 11);
+        TEST(dst.effects[0].fir_bands.bands[9].lfo_desc_id == 0);
+        TEST(dst.effects[0].fir_bands.bands[15].lfo_desc_id == 0);
+        TEST(dst.effects[0].fir_bands.band_count == 2);
+    }
+
+    // Bank JSON: the multiband slot round trips losslessly in both
+    // directions; the plain FIR's legacy band keys refuse on the new type
+    // and the new object keys refuse on the plain FIR.
+    {
+        const std::unique_ptr<FixedArray<char, 65536>> text_storage = std::make_unique<FixedArray<char, 65536>>();
+        char (&text)[65536]                                         = text_storage->elements;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&                       bank = *bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> loaded_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& loaded = *loaded_storage;
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
+        build_small_bank_fixture(bank.bank);
+        Synth::EffectSlotBinding* const multiband = enabled_effect(bank.bank, 0, 0, Synth::EffectType::fir_multiband);
+        multiband->fir_bands.band_count           = 3;
+        multiband->fir_bands.bands[0].base_value  = 4000.0f;
+        multiband->fir_bands.bands[1].base_value  = 3600.0f;
+        multiband->fir_bands.bands[2].base_value  = 0.5f;
+        multiband->fir_bands.bands[2].lfo_desc_id = 1;
+        multiband->fir_bands.bands[3].base_value  = 50.0f;
+        multiband->fir_bands.bands[6].base_value  = 0.25f;  // band 1's gain; its center/spread stay 0
+        multiband->fir_bands.bands[7].base_value  = 33.0f;  // band 1's slope
+        multiband->fir_bands.bands[8].base_value  = 250.0f; // band 2's center
+        multiband->fir_bands.bands[9].base_value  = 100.0f; // band 2's spread
+        multiband->fir_bands.bands[10].base_value = 0.9f;   // band 2's gain
+        multiband->fir_bands.bands[11].base_value = 66.0f;  // band 2's slope
+        const uint32_t length                     = Synth::encode_editor_bank_json(&bank, text, sizeof(text));
+        TEST(length > 0);
+        TEST(strstr(text, "\"type\":\"fir_multiband\"") != nullptr);
+        TEST(strstr(text, "\"fir_bands\":3") != nullptr);
+        TEST(strstr(text, "\"fir_band0\":{\"center\":{\"base_value\":4000}") != nullptr);
+        TEST(strstr(text, "\"fir_band1\":{\"gain\":{\"base_value\":0.25}") != nullptr);
+        TEST(strstr(text, "\"fir_band2\":{\"center\":{\"base_value\":250}") != nullptr);
+        TEST(strstr(text, "fir_band3") == nullptr); // the dormant band stays out
+        TEST(Synth::decode_editor_bank_json(text, length, &loaded));
+        const Synth::EffectSlotBinding& decoded = loaded.bank.channel_chains[0].effects[0];
+        TEST(decoded.fir_bands.band_count == 3);
+        TEST(decoded.fir_bands.bands[0].base_value == 4000.0f);
+        TEST(decoded.fir_bands.bands[1].base_value == 3600.0f);
+        TEST(decoded.fir_bands.bands[2].base_value == 0.5f);
+        TEST(decoded.fir_bands.bands[2].lfo_desc_id == 1);
+        TEST(decoded.fir_bands.bands[3].base_value == 50.0f);
+        TEST(decoded.fir_bands.bands[4].base_value == 0.0f);
+        TEST(decoded.fir_bands.bands[5].base_value == 0.0f);
+        TEST(decoded.fir_bands.bands[6].base_value == 0.25f);
+        TEST(decoded.fir_bands.bands[7].base_value == 33.0f);
+        TEST(decoded.fir_bands.bands[8].base_value == 250.0f);
+        TEST(decoded.fir_bands.bands[9].base_value == 100.0f);
+        TEST(decoded.fir_bands.bands[10].base_value == 0.9f);
+        TEST(decoded.fir_bands.bands[11].base_value == 66.0f);
+        TEST(decoded.fir_bands.bands[12].base_value == 0.0f); // band 3 stays dormant-zeroed
+        // The decoded bank re-encodes and re-decodes byte-identically: the
+        // round trip is idempotent, so no dead-value drift accumulates across
+        // save/load cycles.
+        const uint32_t reencoded_length = Synth::encode_editor_bank_json(&loaded, text, sizeof(text));
+        TEST(reencoded_length == length);
+        TEST(Synth::decode_editor_bank_json(text, reencoded_length, &loaded));
+        TEST(memcmp(static_cast<const void*>(&loaded.bank.channel_chains[0].effects[0]),
+                    static_cast<const void*>(&bank.bank.channel_chains[0].effects[0]),
+                    sizeof(Synth::EffectSlotBinding)) == 0);
+        // The single-band form (no count key) round trips band 0 alone.
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
+        build_small_bank_fixture(bank.bank);
+        Synth::EffectSlotBinding* const single = enabled_effect(bank.bank, 0, 0, Synth::EffectType::fir_multiband);
+        single->fir_bands.bands[0].base_value  = 2000.0f;
+        single->fir_bands.bands[1].base_value  = 600.0f;
+        single->fir_bands.bands[2].base_value  = 1.0f;   // the neutral gain omits its key
+        single->fir_bands.bands[3].base_value  = 100.0f; // the default slope omits its key
+        const uint32_t single_length           = Synth::encode_editor_bank_json(&bank, text, sizeof(text));
+        TEST(single_length > 0);
+        TEST(strstr(text, "\"fir_bands\"") == nullptr);
+        TEST(strstr(text, "\"fir_band0\":{\"center\":{\"base_value\":2000},\"spread\":{\"base_value\":600}}") !=
+             nullptr);
+        TEST(Synth::decode_editor_bank_json(text, single_length, &loaded));
+        TEST(loaded.bank.channel_chains[0].effects[0].fir_bands.bands[0].base_value == 2000.0f);
+        TEST(loaded.bank.channel_chains[0].effects[0].fir_bands.bands[1].base_value == 600.0f);
+        // Cross-type band keys are format errors in the strict effects
+        // document dialect (the editor bank loader tolerates unknown keys by
+        // design): the plain FIR's legacy keys refuse on a multiband slot,
+        // the multiband's object keys refuse on a plain FIR slot, and an
+        // out-of-range band count refuses outright.
+        const std::unique_ptr<Synth::EffectsDocument> doc_storage         = std::make_unique<Synth::EffectsDocument>();
+        Synth::EffectsDocument&                       doc                 = *doc_storage;
+        const std::unique_ptr<Synth::EffectsDocument> doc_decoded_storage = std::make_unique<Synth::EffectsDocument>();
+        Synth::EffectsDocument&                       doc_decoded         = *doc_decoded_storage;
+        const auto splice_and_refuse = [&](Synth::EffectType type, const char* injected_key) {
+            effects_clipboard_fixture(&doc, true);
+            doc.chain.effects[0].type = type;
+            if (type == Synth::EffectType::fir) {
+                doc.chain.effects[0].bindings[2].base_value = 100.0f; // the FIR slope needs an integer base
+            }
+            const uint32_t n = Synth::encode_effects_json(&doc, text, sizeof(text));
+            TEST(n > 0);
+            const char* type_key = strstr(text, "\"type\":\"");
+            TEST(type_key != nullptr);
+            const char* value_end = strchr(type_key + 8, '"');
+            TEST(value_end != nullptr);
+            if (! type_key || ! value_end) {
+                return;
+            }
+            char injection[64];
+            snprintf(injection, sizeof(injection), ",\"%s\":{}", injected_key);
+            const uint32_t injection_len = static_cast<uint32_t>(strlen(injection));
+            const uint32_t insert_at     = static_cast<uint32_t>(value_end - text) + 1;
+            TEST(insert_at + injection_len + (n - insert_at) + 1 <= sizeof(text));
+            memmove(text + insert_at + injection_len, text + insert_at, n - insert_at + 1);
+            memcpy(text + insert_at, injection, injection_len);
+            TEST(! Synth::decode_effects_json(text, n + injection_len, &doc_decoded));
+        };
+        splice_and_refuse(Synth::EffectType::fir_multiband, "fir_band0_gain");
+        splice_and_refuse(Synth::EffectType::fir, "fir_band0");
+        splice_and_refuse(Synth::EffectType::fir_multiband, "fir_band3");
+        // An out-of-range count refuses the editor bank dialect too: the
+        // bound lives in the value grammar, not the unknown-field policy.
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
+        build_small_bank_fixture(bank.bank);
+        (void)enabled_effect(bank.bank, 0, 0, Synth::EffectType::fir_multiband);
+        const uint32_t count_length = Synth::encode_editor_bank_json(&bank, text, sizeof(text));
+        TEST(count_length > 0);
+        const char* bands_key = strstr(text, "\"fir_bands\":");
+        TEST(bands_key == nullptr); // a fresh single-band slot omits the count key
+        TEST(strstr(text, "\"type\":\"fir_multiband\"") != nullptr);
+        if (strstr(text, "\"type\":\"fir_multiband\"")) {
+            const char*    multiband_type = strstr(text, "\"type\":\"fir_multiband\"");
+            const uint32_t insert_at      = static_cast<uint32_t>(multiband_type - text) + 22;
+            const char*    injection      = ",\"fir_bands\":5";
+            const uint32_t injection_len  = static_cast<uint32_t>(strlen(injection));
+            memmove(text + insert_at + injection_len, text + insert_at, count_length - insert_at + 1);
+            memcpy(text + insert_at, injection, injection_len);
+            TEST(! Synth::decode_editor_bank_json(text, count_length + injection_len, &loaded));
+        }
+    }
+
+    // The fx_band_region_projected gate opens for the multiband node only:
+    // the projected slot count encodes the uniform band region (33 legacy
+    // slots + one 43-slot block per band), while a plain FIR node keeps its
+    // byte-identical 33-slot legacy projection whatever its band state.
+    {
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&                       source = *source_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&           candidate     = *candidate_storage;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::EffectGraphMapping           mapping       = {};
+
+        // Builds the model side: one multiband FIR effect on channel 0 with
+        // the given band count and band 0's uniform bindings seeded.
+        const auto build = [&](Synth::EffectType type, const uint32_t band_count) {
+            memset(static_cast<void*>(&source), 0, sizeof(source));
+            Synth::init_default_bank(&source.bank);
+            Sculptor::set_identity_osc_sources(&source, 0, 0);
+            const uint32_t lfo = source.bank.lfos.allocate();
+            {
+                Synth::LFODescriptor& descriptor = source.bank.lfos.entries[lfo];
+                descriptor.wave                  = Synth::WaveType::sine_wave;
+                descriptor.period_ms             = 300;
+                descriptor.min_value             = -1.0f;
+                descriptor.min_max_delta         = 2.0f;
+            }
+            auto& chain       = Sculptor::fx_graph_chain(&source.bank, 0);
+            chain.num_effects = 1;
+            Sculptor::fx_init_slot(&chain, 0, type);
+            chain.effects[0].bindings[0].base_value = 8000.0f;
+            chain.effects[0].bindings[1].base_value = 200.0f;
+            chain.effects[0].bindings[2].base_value = 55.0f;
+            if (type == Synth::EffectType::fir_multiband) {
+                chain.effects[0].fir_bands.band_count          = static_cast<uint8_t>(band_count);
+                chain.effects[0].fir_bands.bands[0].base_value = 4000.0f;
+                chain.effects[0].fir_bands.bands[1].base_value = 3600.0f;
+                chain.effects[0].fir_bands.bands[2].base_value = 0.7f;
+                chain.effects[0].fir_bands.bands[3].base_value = 50.0f;
+            }
+        };
+        const auto reproject = [&]() {
+            TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+            Sculptor::GraphChange drained[Sculptor::max_pending_changes];
+            graph.take_changes(drained, Sculptor::max_pending_changes);
+        };
+        const auto node          = [&]() { return mapping.effect_nodes[0]; };
+        const auto chain_effects = [&]() -> Synth::EffectSlotBinding& {
+            return Sculptor::fx_graph_chain(&source.bank, 0).effects[0];
+        };
+        // The direct-change seam: stages (Graph::set_slot_value is
+        // deliberately eventless), then applies the matching value_changed
+        // event through the production apply function.
+        const auto fx_edit = [&](const uint32_t slot_idx, const Sculptor::PropertyValue value) {
+            graph.set_slot_value(node(), slot_idx, value);
+            Sculptor::GraphChange change = {};
+            change.kind                  = Sculptor::ChangeKind::value_changed;
+            change.node_idx              = node();
+            change.slot_idx              = slot_idx;
+            candidate                    = source;
+            const bool applied           = Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, change);
+            TEST(applied);
+            if (applied) {
+                source = candidate;
+            }
+            return applied;
+        };
+
+        // The gate stays shut for the plain FIR: exactly the 33 legacy slots
+        // under every stored band count.
+        build(Synth::EffectType::fir, 1);
+        reproject();
+        TEST(graph.node(node()).slots.num_allocated == Sculptor::fx_band_first_slot);
+        build(Synth::EffectType::fir, 4);
+        reproject();
+        TEST(graph.node(node()).slots.num_allocated == Sculptor::fx_band_first_slot);
+
+        // The gate opens for the multiband node: one uniform block per band.
+        build(Synth::EffectType::fir_multiband, 1);
+        reproject();
+        TEST(graph.node(node()).slots.num_allocated ==
+             Sculptor::fx_band_region_first_slot(Synth::EffectType::fir_multiband) + Sculptor::fx_band_block_stride);
+        build(Synth::EffectType::fir_multiband, 4);
+        reproject();
+        TEST(graph.node(node()).slots.num_allocated ==
+             Sculptor::fx_band_region_first_slot(Synth::EffectType::fir_multiband) +
+                 Synth::max_fir_effect_bands * Sculptor::fx_band_block_stride);
+        // The count byte travels unvalidated: a corrupt count clamps at the
+        // region constants like every band walker.
+        chain_effects().fir_bands.band_count = 250;
+        reproject();
+        TEST(graph.node(node()).slots.num_allocated ==
+             Sculptor::fx_band_region_first_slot(Synth::EffectType::fir_multiband) +
+                 Synth::max_fir_effect_bands * Sculptor::fx_band_block_stride);
+
+        // The band-region click edits work on the multiband node through the
+        // same [-]/[+] grammar the dormant machinery pinned for the plain
+        // FIR, addressing the uniform band bindings.
+        build(Synth::EffectType::fir_multiband, 1);
+        reproject();
+        Sculptor::PropertyValue press = {};
+        press.toggle                  = true;
+        TEST(fx_edit(Sculptor::fx_band_header_slot(Synth::EffectType::fir_multiband, 0) + 2, press)); // [+] on band 0
+        TEST(chain_effects().fir_bands.band_count == 2);
+        const Synth::EffectParamBinding* bands = chain_effects().fir_bands.bands;
+        TEST(bands[4].base_value == 4000.0f); // the copy carries band 0's uniform bindings
+        TEST(bands[5].base_value == 3600.0f);
+        TEST(bands[6].base_value == 0.7f);
+        TEST(bands[7].base_value == 50.0f);
+        reproject();
+        TEST(graph.node(node()).slots.num_allocated ==
+             Sculptor::fx_band_region_first_slot(Synth::EffectType::fir_multiband) +
+                 2 * Sculptor::fx_band_block_stride);
+        TEST(fx_edit(Sculptor::fx_band_header_slot(Synth::EffectType::fir_multiband, 1) + 1, press)); // [-] on band 1
+        TEST(chain_effects().fir_bands.band_count == 1);
+        TEST(chain_effects().fir_bands.bands[4].base_value == 0.0f); // the vacated block zeroes
+        // The count bounds gray the buttons: a press past 4 bands changes
+        // nothing.
+        chain_effects().fir_bands.band_count = Synth::max_fir_effect_bands;
+        TEST(fx_edit(Sculptor::fx_band_header_slot(Synth::EffectType::fir_multiband, Synth::max_fir_effect_bands - 1) +
+                         2,
+                     press));
+        TEST(chain_effects().fir_bands.band_count == Synth::max_fir_effect_bands);
+        // The multiband's band rows decode like the plain FIR's: a wire aimed
+        // at a band row's LFO dot binds the row's uniform binding.  The bank
+        // pre-references the LFO from band 0's slope so the LFO node
+        // projects; the wire then binds the Gain row's binding to it.
+        build(Synth::EffectType::fir_multiband, 1);
+        chain_effects().fir_bands.bands[3].lfo_desc_id = 1;
+        reproject();
+        const uint32_t lfo_node = mapping.lfo_nodes[0];
+        TEST(lfo_node != Sculptor::pool_no_slot);
+        Sculptor::GraphChange wire      = {};
+        wire.kind                       = Sculptor::ChangeKind::connection_added;
+        wire.connection_output.node_idx = lfo_node;
+        wire.connection_output.slot_idx = 0;
+        wire.connection_input.node_idx  = node();
+        wire.connection_input.slot_idx =
+            Sculptor::fx_band_row_slot(Synth::EffectType::fir_multiband, 0, 2) + 1; // band 0's Gain row LFO dot
+        candidate = source;
+        TEST(Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, wire));
+        TEST(candidate.bank.channel_chains[0].effects[0].fir_bands.bands[2].lfo_desc_id == 1);
+        source = candidate;
+
+        // Type-dropdown conversion, both ways, through the production
+        // candidate.
+        build(Synth::EffectType::fir, 1);
+        chain_effects().bindings[0].base_value = 8000.0f; // lowpass
+        chain_effects().bindings[1].base_value = 200.0f;  // highpass
+        chain_effects().bindings[2].base_value = 55.0f;   // slope
+        TEST(Sculptor::change_effect_type_candidate(&source, 0, 0, Synth::EffectType::fir_multiband, &candidate));
+        {
+            const Synth::EffectSlotBinding& converted = candidate.bank.channel_chains[0].effects[0];
+            TEST(converted.type == Synth::EffectType::fir_multiband);
+            TEST(converted.fir_bands.band_count == 1);
+            TEST(converted.fir_bands.bands[0].base_value == (8000.0f + 200.0f) * 0.5f); // center = midpoint
+            TEST(converted.fir_bands.bands[1].base_value == 8000.0f - 200.0f);          // spread = width
+            TEST(converted.fir_bands.bands[2].base_value == 1.0f);                      // the neutral gain
+            TEST(converted.fir_bands.bands[3].base_value == 55.0f);                     // the legacy slope
+        }
+        // The pure lowpass (the FIR default state) ports as the lowpass-only
+        // case: one active half-open band covering 0..lowpass.
+        build(Synth::EffectType::fir, 1);
+        chain_effects().bindings[0].base_value = 8000.0f; // lowpass
+        chain_effects().bindings[1].base_value = 0.0f;    // highpass off
+        chain_effects().bindings[2].base_value = 55.0f;   // slope
+        TEST(Sculptor::change_effect_type_candidate(&source, 0, 0, Synth::EffectType::fir_multiband, &candidate));
+        {
+            const Synth::EffectSlotBinding& converted = candidate.bank.channel_chains[0].effects[0];
+            TEST(converted.fir_bands.band_count == 1);
+            TEST(converted.fir_bands.bands[0].base_value == 4000.0f); // center = lowpass/2
+            TEST(converted.fir_bands.bands[1].base_value == 8000.0f); // spread = lowpass
+            TEST(converted.fir_bands.bands[3].base_value == 55.0f);   // the legacy slope
+        }
+        // Highpass only: one band covering highpass..Nyquist.
+        build(Synth::EffectType::fir, 1);
+        chain_effects().bindings[0].base_value = 0.0f;
+        chain_effects().bindings[1].base_value = 1000.0f;
+        TEST(Sculptor::change_effect_type_candidate(&source, 0, 0, Synth::EffectType::fir_multiband, &candidate));
+        {
+            const Synth::EffectSlotBinding& converted = candidate.bank.channel_chains[0].effects[0];
+            TEST(converted.fir_bands.band_count == 1);
+            TEST(converted.fir_bands.bands[0].base_value == (1000.0f + Synth::rt_sampling_rate / 2.0f) * 0.5f);
+            TEST(converted.fir_bands.bands[1].base_value == Synth::rt_sampling_rate / 2.0f - 1000.0f);
+        }
+        // Reject (highpass >= lowpass, both set): two half-open bands in
+        // ascending order, the low range 0..lowpass and the high range
+        // highpass..Nyquist.  The slope ports into every created band, wire
+        // included.
+        build(Synth::EffectType::fir, 1);
+        chain_effects().bindings[0].base_value  = 500.0f;  // lowpass
+        chain_effects().bindings[1].base_value  = 1000.0f; // highpass
+        chain_effects().bindings[2].base_value  = 33.0f;
+        chain_effects().bindings[2].lfo_desc_id = 1;
+        TEST(Sculptor::change_effect_type_candidate(&source, 0, 0, Synth::EffectType::fir_multiband, &candidate));
+        {
+            const Synth::EffectSlotBinding& converted = candidate.bank.channel_chains[0].effects[0];
+            TEST(converted.fir_bands.band_count == 2);
+            TEST(converted.fir_bands.bands[0].base_value == 250.0f); // low band center = lowpass/2
+            TEST(converted.fir_bands.bands[1].base_value == 500.0f); // low band spread = lowpass
+            TEST(converted.fir_bands.bands[2].base_value == 1.0f);   // the neutral gain
+            TEST(converted.fir_bands.bands[3].base_value == 33.0f);
+            TEST(converted.fir_bands.bands[3].lfo_desc_id == 1);
+            TEST(converted.fir_bands.bands[4].base_value == (1000.0f + Synth::rt_sampling_rate / 2.0f) * 0.5f);
+            TEST(converted.fir_bands.bands[5].base_value == Synth::rt_sampling_rate / 2.0f - 1000.0f);
+            TEST(converted.fir_bands.bands[6].base_value == 1.0f);
+            TEST(converted.fir_bands.bands[7].base_value == 33.0f);
+        }
+        // Passthrough (both edges off): one full-range band that filters
+        // nothing.
+        build(Synth::EffectType::fir, 1);
+        chain_effects().bindings[0].base_value = 0.0f;
+        chain_effects().bindings[1].base_value = 0.0f;
+        TEST(Sculptor::change_effect_type_candidate(&source, 0, 0, Synth::EffectType::fir_multiband, &candidate));
+        {
+            const Synth::EffectSlotBinding& converted = candidate.bank.channel_chains[0].effects[0];
+            TEST(converted.fir_bands.band_count == 1);
+            TEST(converted.fir_bands.bands[0].base_value == Synth::rt_sampling_rate / 4.0f);
+            TEST(converted.fir_bands.bands[1].base_value == Synth::rt_sampling_rate / 2.0f);
+        }
+        // Back conversion ports band 0 only, matching the staging's edge
+        // derivation: a full-range band reads as passthrough (both cutoffs 0),
+        // a pure low band keeps its lowpass edge with the highpass off, a pure
+        // high band keeps its highpass edge with the lowpass off, an ordinary
+        // band keeps both edges; bands 2..4 drop.
+        build(Synth::EffectType::fir_multiband, 3);
+        chain_effects().fir_bands.bands[0].base_value  = 4000.0f;
+        chain_effects().fir_bands.bands[1].base_value  = 3600.0f;
+        chain_effects().fir_bands.bands[2].base_value  = 0.7f;
+        chain_effects().fir_bands.bands[3].base_value  = 55.0f;
+        chain_effects().fir_bands.bands[3].lfo_desc_id = 1;
+        chain_effects().fir_bands.bands[4].base_value  = 1200.0f; // band 1's values drop
+        chain_effects().fir_bands.bands[5].base_value  = 800.0f;
+        TEST(Sculptor::change_effect_type_candidate(&source, 0, 0, Synth::EffectType::fir, &candidate));
+        {
+            const Synth::EffectSlotBinding& converted = candidate.bank.channel_chains[0].effects[0];
+            TEST(converted.type == Synth::EffectType::fir);
+            TEST(converted.bindings[0].base_value == 5800.0f); // lowpass = center + spread/2
+            TEST(converted.bindings[1].base_value == 2200.0f); // highpass = center - spread/2
+            TEST(converted.bindings[2].base_value == 55.0f);   // band 0's slope rides along
+            TEST(converted.bindings[2].lfo_desc_id == 1);      // the slope's wire survives
+        }
+        // The half-open band 0 forms back-convert to the plain FIR's edge-off
+        // conventions.
+        // Full-range band: both cutoffs 0 (passthrough).
+        build(Synth::EffectType::fir_multiband, 1);
+        chain_effects().fir_bands.bands[0].base_value = 11025.0f;
+        chain_effects().fir_bands.bands[1].base_value = 22050.0f;
+        chain_effects().fir_bands.bands[3].base_value = 55.0f;
+        TEST(Sculptor::change_effect_type_candidate(&source, 0, 0, Synth::EffectType::fir, &candidate));
+        {
+            const Synth::EffectSlotBinding& converted = candidate.bank.channel_chains[0].effects[0];
+            TEST(converted.bindings[0].base_value == 0.0f); // lowpass off
+            TEST(converted.bindings[1].base_value == 0.0f); // highpass off
+            TEST(converted.bindings[2].base_value == 55.0f);
+        }
+        // Pure low band: lowpass = edge, highpass = 0.
+        build(Synth::EffectType::fir_multiband, 1);
+        chain_effects().fir_bands.bands[0].base_value = 4000.0f;
+        chain_effects().fir_bands.bands[1].base_value = 8000.0f;
+        TEST(Sculptor::change_effect_type_candidate(&source, 0, 0, Synth::EffectType::fir, &candidate));
+        {
+            const Synth::EffectSlotBinding& converted = candidate.bank.channel_chains[0].effects[0];
+            TEST(converted.bindings[0].base_value == 8000.0f);
+            TEST(converted.bindings[1].base_value == 0.0f);
+        }
+        // Pure high band: highpass = edge, lowpass = 0.
+        build(Synth::EffectType::fir_multiband, 1);
+        chain_effects().fir_bands.bands[0].base_value = 11525.0f;
+        chain_effects().fir_bands.bands[1].base_value = 21050.0f;
+        TEST(Sculptor::change_effect_type_candidate(&source, 0, 0, Synth::EffectType::fir, &candidate));
+        {
+            const Synth::EffectSlotBinding& converted = candidate.bank.channel_chains[0].effects[0];
+            TEST(converted.bindings[0].base_value == 0.0f);
+            TEST(converted.bindings[1].base_value == 1000.0f);
+        }
+    }
+}
+
+// Wave-2 Multi-band FIR regressions: the Option A node projection. The
+// multiband node's tree starts at Band 1 right after the Enabled row (no
+// legacy parameter rows project; the region base is type-aware, slot 3),
+// one uniform "Band N" header per band at the oscillator band tree's
+// depths, its four rows labeled Center/Spread/Gain/FIR Slope with the
+// bindings' own values (no FIR edge-extreme display rule), and the count
+// bounds graying the [-]/[+] click slots.
+static void fir_multiband_wave2_projection()
+{
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&           candidate     = *candidate_storage;
+    const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph         = *graph_storage;
+    Sculptor::EffectGraphMapping           mapping       = {};
+
+    const Synth::EffectType multiband = Synth::EffectType::fir_multiband;
+
+    // Builds the model side: one multiband FIR effect on channel 0 with the
+    // given stored band count and band 0's uniform bindings seeded.
+    const auto build = [&](const uint32_t band_count) {
+        memset(static_cast<void*>(&source), 0, sizeof(source));
+        Synth::init_default_bank(&source.bank);
+        Sculptor::set_identity_osc_sources(&source, 0, 0);
+        auto& chain       = Sculptor::fx_graph_chain(&source.bank, 0);
+        chain.num_effects = 1;
+        Sculptor::fx_init_slot(&chain, 0, multiband);
+        chain.effects[0].fir_bands.band_count          = static_cast<uint8_t>(band_count);
+        chain.effects[0].fir_bands.bands[0].base_value = 4000.0f;
+        chain.effects[0].fir_bands.bands[1].base_value = 3600.0f;
+        chain.effects[0].fir_bands.bands[2].base_value = 0.7f;
+        chain.effects[0].fir_bands.bands[3].base_value = 50.0f;
+    };
+    const auto reproject = [&]() {
+        TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+        Sculptor::GraphChange drained[Sculptor::max_pending_changes];
+        graph.take_changes(drained, Sculptor::max_pending_changes);
+    };
+    const auto node          = [&]() { return mapping.effect_nodes[0]; };
+    const auto chain_effects = [&]() -> Synth::EffectSlotBinding& {
+        return Sculptor::fx_graph_chain(&source.bank, 0).effects[0];
+    };
+
+    // Projection slot sets for every stored count: the tree is the three
+    // root slots (In/Out/Enabled) plus one uniform 43-slot block per band;
+    // the extents pin the multiband region base (slot 3, right after the
+    // Enabled row), not the plain FIR's 33.
+    for (uint32_t count = 1; count <= Synth::max_fir_effect_bands; ++count) {
+        build(count);
+        reproject();
+        TEST(graph.node(node()).slots.num_allocated ==
+             Sculptor::fx_band_region_first_slot(multiband) + count * Sculptor::fx_band_block_stride);
+    }
+
+    // Band 1's block: the "Band 1" header line at the oscillator band
+    // tree's depths, its [-]/[+] click slots, and the four uniform rows
+    // carrying the bindings' own values. No legacy parameter rows project:
+    // slot 3 is the band header itself.
+    build(2);
+    chain_effects().fir_bands.bands[4].base_value = 1200.0f; // band 1's center
+    chain_effects().fir_bands.bands[5].base_value = 800.0f;  // band 1's spread
+    reproject();
+    {
+        const Sculptor::Node& effect_node = graph.node(node());
+        TEST(strcmp(effect_node.name, "Multi-band FIR") == 0);
+        TEST(Sculptor::fx_band_region_first_slot(multiband) == Sculptor::fx_param_row(0));
+        const uint32_t header = Sculptor::fx_band_header_slot(multiband, 0);
+        TEST(header == Sculptor::fx_param_row(0));
+        TEST(strcmp(effect_node.slots.entries[header].name, "Band 1") == 0);
+        TEST(effect_node.slots.entries[header].child_row);
+        TEST(effect_node.slots.entries[header].child_level == 1);
+        TEST(strcmp(effect_node.slots.entries[header + 1].name, "-") == 0);
+        TEST(strcmp(effect_node.slots.entries[header + 2].name, "+") == 0);
+        static const char* const row_names[4] = { "Center (Hz)", "Spread (Hz)", "Gain", "FIR Slope" };
+        for (uint32_t row = 0; row < 4; ++row) {
+            const uint32_t row_slot = Sculptor::fx_band_row_slot(multiband, 0, row);
+            TEST(strcmp(effect_node.slots.entries[row_slot].name, row_names[row]) == 0);
+            TEST(effect_node.slots.entries[row_slot].child_row);
+            TEST(effect_node.slots.entries[row_slot].child_level == 2);
+            // The row's modulation block sits one level deeper (the
+            // oscillator band blocks' depth).
+            TEST(effect_node.slots.entries[row_slot + 1].child_level == Sculptor::osc_band_block_level);
+        }
+        // The rows project the bindings' own values: no edge-extreme rule
+        // applies to Center/Spread (the FIR zero-cutoff display rule is
+        // legacy-only).
+        TEST(effect_node.slots.entries[Sculptor::fx_band_row_slot(multiband, 1, 0)].value.real == 1200.0f);
+        TEST(effect_node.slots.entries[Sculptor::fx_band_row_slot(multiband, 1, 1)].value.real == 800.0f);
+        TEST(strcmp(effect_node.slots.entries[Sculptor::fx_band_header_slot(multiband, 1)].name, "Band 2") == 0);
+    }
+
+    // The count bounds gray the click slots: at one band only [+] works, at
+    // the maximum only [-], and both stay live in between.
+    build(1);
+    reproject();
+    TEST(graph.slot_edit_disabled(node(), Sculptor::fx_band_header_slot(multiband, 0) + 1));
+    TEST(! graph.slot_edit_disabled(node(), Sculptor::fx_band_header_slot(multiband, 0) + 2));
+    build(Synth::max_fir_effect_bands);
+    reproject();
+    TEST(! graph.slot_edit_disabled(node(), Sculptor::fx_band_header_slot(multiband, 0) + 1));
+    TEST(graph.slot_edit_disabled(node(), Sculptor::fx_band_header_slot(multiband, 0) + 2));
+    TEST(! graph.slot_edit_disabled(node(), Sculptor::fx_band_header_slot(multiband, 1) + 1));
+    TEST(graph.slot_edit_disabled(node(), Sculptor::fx_band_header_slot(multiband, 1) + 2));
+    build(2);
+    reproject();
+    TEST(! graph.slot_edit_disabled(node(), Sculptor::fx_band_header_slot(multiband, 0) + 1));
+    TEST(! graph.slot_edit_disabled(node(), Sculptor::fx_band_header_slot(multiband, 0) + 2));
+
+    // A channel-MIDI wire lands on a band row's source dot and binds the
+    // row's uniform binding: band 0's Gain row (source A dot at +4) takes
+    // the mod wheel. The connection lands in the graph first (production
+    // connects through the graph), then the change rebuilds the packed
+    // input list from the wires.
+    build(1);
+    reproject();
+    const Sculptor::EndPoint midi_from = {
+        mapping.midi_node,
+        mapping.midi_source_slots[static_cast<uint32_t>(Synth::ModSource::mod_wheel) - 1]
+    };
+    const Sculptor::EndPoint midi_to = { node(), Sculptor::fx_band_row_slot(multiband, 0, 2) + 4u };
+    TEST(graph.add_connection(midi_from, midi_to) != Sculptor::pool_no_slot);
+    Sculptor::GraphChange midi_wire = {};
+    midi_wire.kind                  = Sculptor::ChangeKind::connection_added;
+    midi_wire.connection_output     = midi_from;
+    midi_wire.connection_input      = midi_to;
+    candidate                       = source;
+    TEST(Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, midi_wire));
+    TEST(candidate.bank.channel_chains[0].effects[0].fir_bands.bands[2].num_inputs == 1);
+    TEST(candidate.bank.channel_chains[0].effects[0].fir_bands.bands[2].inputs[0].source ==
+         Synth::ModSource::mod_wheel);
 }
 
 // C2.3 staging pins: the runtime's band staging, role wiring and clamp policy,
@@ -22888,6 +23631,8 @@ int main()
     fir_effect_bands_regressions();
     fir_effect_band_editor_regressions();
     m4_fix3_wave_regressions();
+    fir_multiband_wave1_regressions();
+    fir_multiband_wave2_projection();
     m2_runtime_source_pins_regressions();
     m2_document_json_regressions();
     m2_bank_json_round_trip_regressions();
@@ -35295,6 +36040,8 @@ int main()
         Sculptor::fx_init_slot(&master, 0, Synth::EffectType::compressor);
         Sculptor::fx_init_slot(&master, 1, Synth::EffectType::fir);
         Sculptor::fx_init_slot(&master, 2, Synth::EffectType::ring_mod);
+        Sculptor::fx_init_slot(&master, 3, Synth::EffectType::fir_multiband);
+        master.num_effects = 4;
 
         Sculptor::EffectGraphMapping fx_mapping = {};
         TEST(Sculptor::project_effect_chain_to_graph(bank, 0, &graph, &fx_mapping));

@@ -323,8 +323,9 @@ constexpr const char* mod_source_names[num_mod_sources] = {
     "none", "pitch_bend", "mod_wheel", "channel_pressure", "velocity", "aftertouch", "pressure_combine", "cc"
 };
 
-constexpr const char* effect_type_names[Synth::num_effect_types] = { "none",   "distortion", "delay", "chorus",
-                                                                     "reverb", "compressor", "fir",   "ring_mod" };
+constexpr const char* effect_type_names[Synth::num_effect_types] = { "none",   "distortion", "delay",
+                                                                     "chorus", "reverb",     "compressor",
+                                                                     "fir",    "ring_mod",   "fir_multiband" };
 
 constexpr uint32_t    num_param_kinds                   = 4;
 constexpr const char* param_kind_names[num_param_kinds] = { "external", "envelope", "lfo", "plain" };
@@ -342,8 +343,9 @@ constexpr const char* mod_target_names[Synth::num_mod_targets] = {
 static_assert(static_cast<uint32_t>(Synth::WaveType::string_wave) == num_waves - 1);
 static_assert(static_cast<uint32_t>(Synth::ModSource::cc) == num_mod_sources - 1);
 static_assert(static_cast<uint32_t>(Synth::SourceOp::multiply) == num_source_ops - 1);
-static_assert(static_cast<uint32_t>(Synth::EffectType::fir) == Synth::num_effect_types - 2);
-static_assert(static_cast<uint32_t>(Synth::EffectType::ring_mod) == Synth::num_effect_types - 1);
+static_assert(static_cast<uint32_t>(Synth::EffectType::fir) == Synth::num_effect_types - 3);
+static_assert(static_cast<uint32_t>(Synth::EffectType::ring_mod) == Synth::num_effect_types - 2);
+static_assert(static_cast<uint32_t>(Synth::EffectType::fir_multiband) == Synth::num_effect_types - 1);
 static_assert(static_cast<uint32_t>(Synth::ParamKind::plain) == num_param_kinds - 1);
 static_assert(Synth::osc_mode_ring_mod == num_osc_modes - 1);
 
@@ -782,17 +784,17 @@ static void enc_binding(Out& o, const Synth::EffectParamBinding& binding)
     o.ch('}');
 }
 
-// One FIR effect band's four bindings (lowpass, highpass, gain, slope).  Sub-keys the
+// One FIR effect band's four bindings (edges, gain, slope).  Sub-keys the
 // decoder reads as defaults stay omitted, so a fully default band encodes nothing and
 // decodes back unchanged.  An unwired zero gain encodes as the empty binding block: an
-// absent gain key would decode as the neutral 1.0 instead.
-static void enc_fir_effect_band(Out& o, const Synth::EffectParamBinding* band, uint32_t band_index)
+// absent gain key would decode as the neutral 1.0 instead.  edge_keys names the two
+// edge bindings (the plain FIR's lowpass/highpass pair or the multiband type's
+// center/spread pair).
+static void enc_fir_band_object(Out&                             o,
+                                const char*                      band_key,
+                                const Synth::EffectParamBinding* band,
+                                const char* const*               edge_keys)
 {
-    static const char* const band_keys[3] = { "fir_band1", "fir_band2", "fir_band3" };
-    if (band_index < 1 || band_index > 3) {
-        o.overflow = true;
-        return;
-    }
     const Synth::EffectParamBinding& lowpass  = band[0];
     const Synth::EffectParamBinding& highpass = band[1];
     const Synth::EffectParamBinding& gain     = band[2];
@@ -803,14 +805,14 @@ static void enc_fir_effect_band(Out& o, const Synth::EffectParamBinding* band, u
     const bool slope_default    = ! slope.lfo_desc_id && ! slope.num_inputs && slope.base_value == 100.0f;
     if (lowpass_default && highpass_default && gain_default && slope_default)
         return;
-    o.key(band_keys[band_index - 1]);
+    o.key(band_key);
     o.ch('{');
     if (! lowpass_default) {
-        o.key("lowpass");
+        o.key(edge_keys[0]);
         enc_binding(o, lowpass);
     }
     if (! highpass_default) {
-        o.key("highpass");
+        o.key(edge_keys[1]);
         enc_binding(o, highpass);
     }
     if (! gain_default) {
@@ -822,6 +824,19 @@ static void enc_fir_effect_band(Out& o, const Synth::EffectParamBinding* band, u
         enc_binding(o, slope);
     }
     o.ch('}');
+}
+
+// The plain FIR effect's dormant extra bands: keys fir_band1..3, lowpass/highpass
+// edge naming, bands 1..3 only.
+static void enc_fir_effect_band(Out& o, const Synth::EffectParamBinding* band, uint32_t band_index)
+{
+    static const char* const band_keys[3] = { "fir_band1", "fir_band2", "fir_band3" };
+    static const char* const edge_keys[2] = { "lowpass", "highpass" };
+    if (band_index < 1 || band_index > 3) {
+        o.overflow = true;
+        return;
+    }
+    enc_fir_band_object(o, band_keys[band_index - 1], band, edge_keys);
 }
 
 static void enc_effect(Out& o, const Synth::EffectSlotBinding& slot, bool strict = false)
@@ -883,6 +898,39 @@ static void enc_effect(Out& o, const Synth::EffectSlotBinding& slot, bool strict
         }
         for (uint32_t band = 1; band < band_count; band++)
             enc_fir_effect_band(o, slot.fir_bands.bands + 1 + 4 * (band - 1), band);
+    }
+    // The multiband type reads the band array uniformly (band b at 4 * b +
+    // center/spread/gain/slope), so every band of the clamped count encodes the
+    // same way; the count key appears only above the single band.
+    else if (slot.type == Synth::EffectType::fir_multiband) {
+        static const char* const band_keys[Synth::max_fir_effect_bands] = { "fir_band0",
+                                                                            "fir_band1",
+                                                                            "fir_band2",
+                                                                            "fir_band3" };
+        static const char* const edge_keys[2]                           = { "center", "spread" };
+        uint32_t                 band_count                             = slot.fir_bands.band_count;
+        if (band_count < 1)
+            band_count = 1;
+        if (band_count > Synth::max_fir_effect_bands)
+            band_count = Synth::max_fir_effect_bands;
+        if (band_count > 1)
+            key_uint(o, "fir_bands", band_count);
+        for (uint32_t band = 0; band < band_count; band++) {
+            const Synth::EffectParamBinding* band_bindings = slot.fir_bands.bands + 4 * band;
+            // A zeroed band is the fresh slot's inactive state; it encodes
+            // nothing and decodes the neutral defaults (the dead gain/slope
+            // zero bytes normalize to 1/100 on the round trip, and the band
+            // stays inactive either way because its center/spread read 0).
+            const bool zeroed = ! band_bindings[0].lfo_desc_id && ! band_bindings[0].num_inputs &&
+                                band_bindings[0].base_value == 0.0f && ! band_bindings[1].lfo_desc_id &&
+                                ! band_bindings[1].num_inputs && band_bindings[1].base_value == 0.0f &&
+                                ! band_bindings[2].lfo_desc_id && ! band_bindings[2].num_inputs &&
+                                band_bindings[2].base_value == 0.0f && ! band_bindings[3].lfo_desc_id &&
+                                ! band_bindings[3].num_inputs && band_bindings[3].base_value == 0.0f;
+            if (zeroed)
+                continue;
+            enc_fir_band_object(o, band_keys[band], band_bindings, edge_keys);
+        }
     }
     o.ch('}');
 }
@@ -2768,19 +2816,28 @@ static Synth::EffectType prescan_effect_type(Walker& w, uint32_t obj)
     return static_cast<Synth::EffectType>(type);
 }
 
-// One FIR effect band object: lowpass, highpass, gain and slope bindings.  The slope
+// One FIR effect band object: two edge bindings (lowpass/highpass on the plain FIR,
+// center/spread on the multiband type), gain and slope bindings.  The slope
 // base re-reads with the integer grammar like the legacy FIR Slope row (decode_fir_slope);
 // absent keys decode the neutral defaults, so an unconfigured band stays inactive (its
-// highpass edge reads 0) and its gain reads the neutral 1.0.
-static void decode_fir_effect_band(Walker& w, uint32_t obj, Synth::EffectParamBinding* band)
+// edges read 0) and its gain reads the neutral 1.0.
+// The plain FIR's dormant band objects name their edge bindings lowpass/highpass; the
+// multiband type's name the same positions center/spread.
+static const char* const legacy_fir_edge_keys[2]    = { "lowpass", "highpass" };
+static const char* const multiband_fir_edge_keys[2] = { "center", "spread" };
+
+static void decode_fir_effect_band(Walker&                    w,
+                                   uint32_t                   obj,
+                                   Synth::EffectParamBinding* band,
+                                   const char* const*         edge_keys)
 {
     uint32_t slope_token     = 0;
     bool     have_gain       = false;
     bool     have_slope_base = false;
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
-        if (key_eq(w, key_idx, "lowpass"))
+        if (key_eq(w, key_idx, edge_keys[0]))
             decode_binding(w, val_idx, band[0]);
-        else if (key_eq(w, key_idx, "highpass"))
+        else if (key_eq(w, key_idx, edge_keys[1]))
             decode_binding(w, val_idx, band[1]);
         else if (key_eq(w, key_idx, "gain")) {
             have_gain = true;
@@ -2821,19 +2878,23 @@ static void decode_fir_effect_band(Walker& w, uint32_t obj, Synth::EffectParamBi
 
 static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slot)
 {
-    uint32_t num_params   = 0;
-    uint32_t params_token = 0;
-    bool     have_params  = false;
-    bool     have_type    = false;
+    uint32_t num_params           = 0;
+    uint32_t params_token         = 0;
+    bool     have_params          = false;
+    bool     have_type            = false;
     bool     have_fir_bands       = false;
     uint32_t fir_band_count       = 1; // absent fir_bands decodes as the legacy single band
     uint32_t fir_band0_gain_token = 0;
     uint32_t fir_band_tokens[3]   = { 0, 0, 0 };
     uint32_t fir_band_keys[3]     = { 0, 0, 0 }; // each token's key, for the out-of-count refusal log
     uint32_t fir_band0_gain_key   = 0;
+    uint32_t multiband_band_tokens[Synth::max_fir_effect_bands] = { 0, 0, 0, 0 };
+    uint32_t multiband_band_keys[Synth::max_fir_effect_bands]   = { 0, 0, 0, 0 }; // keys, for the refusal log
     // Prescan: band keys decode in any key order, mirroring the oscillator's fir_type
     // prescan.
-    const bool is_fir_effect = prescan_effect_type(w, obj) == Synth::EffectType::fir;
+    const Synth::EffectType prescanned_type  = prescan_effect_type(w, obj);
+    const bool              is_fir_effect    = prescanned_type == Synth::EffectType::fir;
+    const bool              is_fir_multiband = prescanned_type == Synth::EffectType::fir_multiband;
 
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
@@ -2859,7 +2920,7 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
             });
         }
         else if (key_eq(w, key_idx, "fir_bands")) {
-            if (is_fir_effect) {
+            if (is_fir_effect || is_fir_multiband) {
                 have_fir_bands = true;
                 want_uint(w, val_idx, Synth::max_fir_effect_bands, &fir_band_count);
                 if (! w.failed && fir_band_count < 1)
@@ -2887,6 +2948,22 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
         else if (is_fir_effect && key_eq(w, key_idx, "fir_band3")) {
             fir_band_tokens[2] = val_idx;
             fir_band_keys[2]   = key_idx;
+        }
+        else if (is_fir_multiband && key_eq(w, key_idx, "fir_band0")) {
+            multiband_band_tokens[0] = val_idx;
+            multiband_band_keys[0]   = key_idx;
+        }
+        else if (is_fir_multiband && key_eq(w, key_idx, "fir_band1")) {
+            multiband_band_tokens[1] = val_idx;
+            multiband_band_keys[1]   = key_idx;
+        }
+        else if (is_fir_multiband && key_eq(w, key_idx, "fir_band2")) {
+            multiband_band_tokens[2] = val_idx;
+            multiband_band_keys[2]   = key_idx;
+        }
+        else if (is_fir_multiband && key_eq(w, key_idx, "fir_band3")) {
+            multiband_band_tokens[3] = val_idx;
+            multiband_band_keys[3]   = key_idx;
         }
         else
             unknown_field(w, key_idx);
@@ -2956,8 +3033,41 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
             if (band >= fir_band_count)
                 break; // dormant bands stay zeroed
             if (fir_band_tokens[band - 1])
-                decode_fir_effect_band(w, fir_band_tokens[band - 1], band_bindings);
+                decode_fir_effect_band(w, fir_band_tokens[band - 1], band_bindings, legacy_fir_edge_keys);
             else {
+                band_bindings[2].base_value = 1.0f;
+                band_bindings[3].base_value = 100.0f;
+            }
+            if (w.failed)
+                return;
+        }
+    }
+    else if (slot.type == Synth::EffectType::fir_multiband) {
+        // Out-of-count band keys misstate the format: a band key beyond the
+        // declared count refuses through the unknown-field path instead of
+        // decoding into a binding nothing stages.  Band 0 always decodes: the
+        // single-band form (the absent count key) is this type's normal shape,
+        // not a legacy marker.
+        for (uint32_t band = 1; band < Synth::max_fir_effect_bands; ++band) {
+            if (multiband_band_tokens[band] && (! have_fir_bands || band >= fir_band_count)) {
+                unknown_field(w, multiband_band_keys[band]);
+                w.failed = true;
+            }
+        }
+        if (w.failed)
+            return;
+        if (have_fir_bands)
+            slot.fir_bands.band_count = static_cast<uint8_t>(fir_band_count);
+        for (uint32_t band = 0; band < Synth::max_fir_effect_bands; band++) {
+            Synth::EffectParamBinding* band_bindings = &slot.fir_bands.bands[4 * band];
+            if (band >= fir_band_count)
+                break; // dormant bands stay zeroed
+            if (multiband_band_tokens[band])
+                decode_fir_effect_band(w, multiband_band_tokens[band], band_bindings, multiband_fir_edge_keys);
+            else {
+                // An absent band object decodes the neutral defaults: the
+                // zeroed center/spread pair keeps the band inactive and the
+                // gain/slope read their neutral 1.0 / 100.
                 band_bindings[2].base_value = 1.0f;
                 band_bindings[3].base_value = 100.0f;
             }
@@ -3660,6 +3770,21 @@ static void canonicalize_effect(Synth::EffectSlotBinding& slot)
                                    ? 1
                                    : 0)
                             : 1 + 4 * (band_count - 1);
+        for (uint32_t band_param = 0; band_param < active_band_params; band_param++)
+            canonicalize_binding(slot.fir_bands.bands[band_param]);
+        if (active_band_params < Synth::num_fir_effect_band_params)
+            memset(&slot.fir_bands.bands[active_band_params],
+                   0,
+                   (Synth::num_fir_effect_band_params - active_band_params) * sizeof(slot.fir_bands.bands[0]));
+    }
+    // A fir_multiband slot reads the band array uniformly: every band of the
+    // clamped count is active, a zeroed count stays zero (the single-band
+    // marker), and the tail zeroes like the plain FIR's dormant bytes.
+    else if (slot.type == Synth::EffectType::fir_multiband) {
+        uint32_t band_count = slot.fir_bands.band_count;
+        if (band_count > Synth::max_fir_effect_bands)
+            band_count = Synth::max_fir_effect_bands;
+        const uint32_t active_band_params = 4 * (band_count < 1 ? 1 : band_count);
         for (uint32_t band_param = 0; band_param < active_band_params; band_param++)
             canonicalize_binding(slot.fir_bands.bands[band_param]);
         if (active_band_params < Synth::num_fir_effect_band_params)

@@ -1151,13 +1151,14 @@ static void fx_canvas_menu(void* user_data)
     (void)user_data;
     Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain);
     ImGui::BeginDisabled(chain.num_effects >= Synth::max_chain_effects);
-    for (uint32_t type = 1; type < Synth::num_effect_types; ++type) {
-        const Sculptor::EffectTypeInfo& info = Sculptor::effect_type_info(static_cast<Synth::EffectType>(type));
+    for (uint32_t entry = 0; entry < Synth::num_effect_types - 1; ++entry) {
+        const Synth::EffectType         type = Sculptor::fx_type_menu_order[entry];
+        const Sculptor::EffectTypeInfo& info = Sculptor::effect_type_info(type);
         char                            label[64];
         snprintf(label, sizeof(label), "Add %s", info.name);
         if (ImGui::MenuItem(label)) {
             fx_canvas_command = fx_cmd_add_effect;
-            fx_canvas_type    = static_cast<Synth::EffectType>(type);
+            fx_canvas_type    = type;
         }
     }
     ImGui::EndDisabled();
@@ -1233,14 +1234,12 @@ static bool fx_node_menu(void* user_data, uint32_t node_idx)
     }
     Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain);
     if (ImGui::BeginMenu("Change Type")) {
-        for (uint32_t type = 1; type < Synth::num_effect_types; ++type) {
-            const bool is_current = chain.effects[slot].type == static_cast<Synth::EffectType>(type);
-            if (ImGui::MenuItem(Sculptor::effect_type_info(static_cast<Synth::EffectType>(type)).name,
-                                nullptr,
-                                false,
-                                ! is_current)) {
+        for (uint32_t entry = 0; entry < Synth::num_effect_types - 1; ++entry) {
+            const Synth::EffectType type       = Sculptor::fx_type_menu_order[entry];
+            const bool              is_current = chain.effects[slot].type == type;
+            if (ImGui::MenuItem(Sculptor::effect_type_info(type).name, nullptr, false, ! is_current)) {
                 fx_canvas_command = fx_cmd_change_type;
-                fx_canvas_type    = static_cast<Synth::EffectType>(type);
+                fx_canvas_type    = type;
                 fx_menu_node      = node_idx;
             }
         }

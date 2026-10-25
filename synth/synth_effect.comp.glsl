@@ -17,6 +17,7 @@ const uint effect_reverb     = 4u;
 const uint effect_compressor = 5u;
 const uint effect_fir        = 6u;
 const uint effect_ring_mod   = 7u;
+const uint effect_fir_multiband = 8u; // Same filter engine as fir; the coefficient entry carries the bands
 
 struct EffectParams {
     uint  type;
@@ -459,6 +460,11 @@ void main()
     }
     else if (eff.type == effect_ring_mod) {
         result = apply_ring_mod(eff);
+    }
+    else if (eff.type == effect_fir_multiband) {
+        // The staged coefficient entry already carries every band, so the
+        // multiband type runs the same filter engine.
+        result = apply_fir(eff);
     }
 
     data[eff.sound_offs + gl_LocalInvocationID.x * 2]     = result.x;

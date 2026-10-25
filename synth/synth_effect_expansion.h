@@ -10,8 +10,10 @@
 
 namespace Synth {
 
-// Per-band live values for a FIR effect instance, in FirEffectBands index order: index 0
-// is band 0's gain, then bands 1..3 each carry lowpass, highpass, gain and slope.
+// Per-band live values for a FIR effect instance, in FirEffectBands index order.  A
+// plain FIR instance keeps the legacy order: index 0 is band 0's gain, then bands 1..3
+// each carry lowpass, highpass, gain and slope.  A fir_multiband instance reads the
+// same array uniformly: band b at 4 * b + (0 center, 1 spread, 2 gain, 3 slope).
 // src_param_id is the resolved modulation node (0 = unmodulated constant).
 struct FirEffectBandValues {
     uint8_t  band_count;

@@ -1886,6 +1886,15 @@ static void apply_effects(const EffectTarget* targets, uint32_t num_targets)
 // namespace above; compute_fir_coefficients builds, compares and dispatches
 // the block.
 
+// The two FIR effect types share the coefficient-staging machinery; the band
+// array's index meaning differs (the plain FIR's dormant legacy order vs the
+// multiband's uniform center/spread/gain/slope), so every type gate and the
+// staging dispatch key on this one predicate.
+static bool is_fir_effect_type(const Synth::EffectType type)
+{
+    return type == Synth::EffectType::fir || type == Synth::EffectType::fir_multiband;
+}
+
 // Copies each modulated effect param's current graph value into the param float the effect shader
 // reads (and compute_fir_coefficients reads for the FIR effect).  Unmodulated params (src_param_id
 // 0) keep their constant value.  Also evaluates the enable decision for every instance and
@@ -1942,7 +1951,7 @@ static void pull_effect_param_chain(EffectChain* chain, bool* reset_barrier_need
         }
         // FIR band values refresh through the same graph-leaf mechanism; the commit records one
         // node per modulated active-band parameter.
-        if (instance.type == Synth::EffectType::fir) {
+        if (is_fir_effect_type(instance.type)) {
             for (uint32_t band_param = 0; band_param < Synth::num_fir_effect_band_params; band_param++) {
                 if (instance.fir_bands.src_param_id[band_param]) {
                     instance.fir_bands.params[band_param] =
@@ -2187,6 +2196,14 @@ static void update_modulation()
 // invariant compute_fir_coefficients asserts).
 static bool stage_effect_fir_entry(const EffectInstance& instance, Synth::FirEffectCoeffEntry* entry)
 {
+    // The multiband form derives every band's edges from its uniform
+    // center/spread pair; the plain FIR keeps its bit-exact legacy staging.
+    if (instance.type == Synth::EffectType::fir_multiband) {
+        return Synth::stage_fir_multiband_coeff_entry(instance.state_offs / 4,
+                                                      instance.fir_bands.band_count,
+                                                      instance.fir_bands.params,
+                                                      entry);
+    }
     return Synth::stage_fir_effect_coeff_entry(instance.state_offs / 4,
                                                instance.fir_bands.band_count,
                                                instance.params[0],
@@ -2204,7 +2221,7 @@ static uint32_t count_effect_fir(const EffectChain& chain)
     uint32_t count = 0;
     for (uint32_t effect_idx = 0; effect_idx < chain.num_effects; effect_idx++) {
         const EffectInstance& instance = chain.effects[effect_idx];
-        if (! instance.enabled || instance.type != Synth::EffectType::fir) {
+        if (! instance.enabled || ! is_fir_effect_type(instance.type)) {
             continue;
         }
         Synth::FirEffectCoeffEntry entry;
@@ -2343,7 +2360,7 @@ static void compute_fir_coefficients()
     auto stage_effect_fir_coeffs = [](const EffectChain& chain, uint32_t* cur_entry) {
         for (uint32_t effect_idx = 0; effect_idx < chain.num_effects; effect_idx++) {
             const EffectInstance& instance = chain.effects[effect_idx];
-            if (! instance.enabled || instance.type != Synth::EffectType::fir) {
+            if (! instance.enabled || ! is_fir_effect_type(instance.type)) {
                 continue;
             }
 

@@ -29,6 +29,7 @@ using Sculptor::with_tooltip;
 
 using Sculptor::connection_into;
 using Sculptor::Graph;
+using Sculptor::osc_band_block_level;
 using Sculptor::osc_band_block_stride;
 using Sculptor::osc_band_first_slot;
 using Sculptor::osc_band_header_slot;
@@ -269,10 +270,6 @@ constexpr uint32_t lfo_rate_input  = 2;
 constexpr uint32_t canonical_first_osc  = Synth::graph_canonical_first_osc;
 constexpr uint32_t canonical_first_env  = Synth::graph_canonical_first_env;
 constexpr uint32_t canonical_node_count = Synth::graph_canonical_node_count;
-// Band rows nest one level under the band header rows, which themselves
-// nest one level under the Filter Type row: header at 1, value rows at
-// 2, blocks at 3, rate/amount rows at 4.
-constexpr uint8_t osc_band_block_level = 3;
 } // namespace
 
 // Oscillator-node rows whose widgets only make sense for the current
