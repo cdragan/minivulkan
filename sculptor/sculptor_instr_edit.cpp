@@ -296,7 +296,7 @@ constexpr size_t editor_resident_state_bytes =
     4096; // remaining editor scalar flags, constants and alignment
 static_assert(editor_resident_state_bytes <=
               128 * 1024 * 1024); // per-bank driver: the oscillator graph pre-provisions twenty-eight
-                                  // 12-slot target blocks per node (max_node_slots 357), which
+                                  // 12-slot target blocks per node (max_node_slots 358), which
                                   // grows sizeof(Graph); the resident total stays below the
                                   // 128 MiB assert.  The per-zone source rows contribute 20 live
                                   // InstrumentEditorBank copies x max_channels x

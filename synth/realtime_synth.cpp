@@ -380,6 +380,7 @@ struct ShaderParams {
         float    string_pick;            // String pick position 0..1, used by the note-on excitation
         float    string_damping;         // String damping 0..1, higher = shorter decay
         float    string_release_damping; // String release damping 0..1
+        float    string_brightness;      // String pluck brightness 0..1, used by the note-on excitation
     };
 
     // synth_chan_combine shader (binding 0); the master-mix pass reuses the
@@ -415,7 +416,7 @@ struct ShaderParams {
         uint32_t in_sound_offs;
     };
 
-    static_assert(sizeof(Oscillator) == 84);
+    static_assert(sizeof(Oscillator) == 88);
 
     static constexpr uint32_t max_param_range = sizeof(Oscillator) * 256;
 };
@@ -594,6 +595,7 @@ struct RunningOscillator {
     float    string_pick;            // String pick position, copied from the layer at note-on
     float    string_damping;         // String damping 0..1, resolved each step
     float    string_release_damping; // String release damping 0..1, resolved each step
+    float    string_brightness;      // String pluck brightness 0..1, copied from the layer at note-on
     uint32_t string_state_offs;      // String state region offset in bytes, fixed per slot
     float    osc_mix;                // Mix between osc_type[0] and osc_type[1] (0..1)
     float    fm_index;               // FM modulation depth
@@ -1519,6 +1521,7 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         osc.osc_mode            = layer.osc_mode;
         osc.mod_ratio           = layer.mod_ratio;
         osc.string_pick         = layer.string_pick;
+        osc.string_brightness   = layer.string_brightness;
         osc.octave_offset       = layer.octave_offset;
         osc.fir_type            = layer.fir_type;
         osc.fir_band_count = layer.fir_type == Synth::fir_bandpass ? (layer.fir_band_count < 1   ? 1
@@ -2599,6 +2602,7 @@ static void render_audio_step()
         param.string_pick            = oscillator.string_pick;
         param.string_damping         = oscillator.string_damping;
         param.string_release_damping = oscillator.string_release_damping;
+        param.string_brightness      = oscillator.string_brightness;
 
         // Wrap the phases so float precision does not degrade on long notes.
         oscillator.phase += phase_step;

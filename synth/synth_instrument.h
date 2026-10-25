@@ -132,6 +132,9 @@ struct Oscillator {
     TargetBinding targets[num_mod_targets]; // One binding per modulated quantity (volume/panning/etc.)
     // String wave pick position 0..1 (0 = no comb).  A plain scalar, not a mod target.
     float string_pick = 0.0f;
+    // String wave pluck brightness 0..1: 1 leaves the excitation burst unfiltered (the default), lower values
+    // low-pass it for a warmer pluck.  A plain scalar, not a mod target.
+    float string_brightness = 1.0f;
 };
 
 struct Instrument {

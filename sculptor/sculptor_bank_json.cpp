@@ -560,6 +560,10 @@ static void enc_oscillator(Out& o, const Synth::Oscillator& osc)
     key_enum(o, "mode", osc_mode_names, num_osc_modes, osc.osc_mode);
     key_float_nonzero(o, "mod_ratio", osc.mod_ratio);
     key_float_nonzero(o, "string_pick", osc.string_pick);
+    // Full brightness is the default and stays out of the document.
+    if (osc.string_brightness != 1.0f) {
+        key_float(o, "string_brightness", osc.string_brightness);
+    }
     key_float_nonzero(o, "octave_offset", static_cast<float>(osc.octave_offset));
 
     // The default slope omits the key, matching the nonzero-key omission
@@ -2309,7 +2313,8 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
     int32_t                 octave_offset                        = 0;
     int32_t                 fir_slope                            = 100;
     float                   pitch_offset                         = 0.0f;
-    const Synth::FilterType fir_type                             = prescan_fir_type(w, obj);
+    float                   string_brightness = 1.0f; // absent means full brightness, not the zeroed bank memory
+    const Synth::FilterType fir_type          = prescan_fir_type(w, obj);
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
         if (key_eq(w, key_idx, "wave_a")) {
@@ -2328,6 +2333,8 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
         }
         else if (key_eq(w, key_idx, "string_pick"))
             want_bounded_real(w, val_idx, 0.0, 1.0, &osc.string_pick);
+        else if (key_eq(w, key_idx, "string_brightness"))
+            want_bounded_real(w, val_idx, 0.0, 1.0, &string_brightness);
         else if (key_eq(w, key_idx, "mod_ratio"))
             want_float(w, val_idx, &osc.mod_ratio);
         else if (key_eq(w, key_idx, "pitch_offset"))
@@ -2406,6 +2413,7 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
         w.failed = true;
     }
     osc.fir_slope_percent = static_cast<uint8_t>(fir_slope);
+    osc.string_brightness = string_brightness;
     osc.fir_type          = fir_type;
     osc.fir_band_count    = static_cast<uint8_t>(band_count);
     // Per-band absent-key defaults, mirroring the portable document
@@ -3925,6 +3933,7 @@ static void canonicalize_editor_bank(Synth::InstrumentEditorBank* editor_bank)
             Synth::Oscillator& osc = instr.layers[l];
             osc.mod_ratio          = canonical_float(osc.mod_ratio);
             osc.string_pick        = canonical_float(osc.string_pick);
+            osc.string_brightness  = canonical_float(osc.string_brightness);
             for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
                 Synth::TargetBinding& binding = osc.targets[t];
                 binding.lfo_depth             = canonical_float(binding.lfo_depth);
@@ -4461,6 +4470,7 @@ static void decode_layer_doc(Walker&                     w,
     float                   mod_ratio                           = 1.0f;
     bool                    fm_ratio_set                        = false;
     float                   string_pick                         = 0.0f;
+    float                   string_brightness                   = 1.0f;
     bool                    doc_slope_routed                    = false;
     uint32_t                doc_band_count                      = 1;
     bool                    doc_touched[Synth::num_mod_targets] = {};
@@ -4480,6 +4490,8 @@ static void decode_layer_doc(Walker&                     w,
         }
         else if (key_eq(w, key_idx, "string_pick"))
             want_bounded_real(w, val_idx, 0.0, 1.0, &string_pick);
+        else if (key_eq(w, key_idx, "string_brightness"))
+            want_bounded_real(w, val_idx, 0.0, 1.0, &string_brightness);
         else if (key_eq(w, key_idx, "mode"))
             want_enum(w, val_idx, osc_mode_names, num_osc_modes, &mode);
         else if (key_eq(w, key_idx, "mod_ratio"))
@@ -4576,11 +4588,12 @@ static void decode_layer_doc(Walker&                     w,
         return;
     }
 
-    osc.osc_type[0] = static_cast<Synth::WaveType>(wave_a);
-    osc.osc_type[1] = static_cast<Synth::WaveType>(wave_b);
-    osc.osc_mode    = static_cast<Synth::OscMode>(mode);
-    osc.mod_ratio   = mod_ratio;
-    osc.string_pick = string_pick;
+    osc.osc_type[0]       = static_cast<Synth::WaveType>(wave_a);
+    osc.osc_type[1]       = static_cast<Synth::WaveType>(wave_b);
+    osc.osc_mode          = static_cast<Synth::OscMode>(mode);
+    osc.mod_ratio         = mod_ratio;
+    osc.string_pick       = string_pick;
+    osc.string_brightness = string_brightness;
     // Legacy documents state only the scalar ratio; when the document has
     // no fm_ratio block the target inherits it, clamped to the slider
     // range when nonzero (0 stays 0).
@@ -5267,6 +5280,10 @@ static uint32_t encode_instrument_json_for_domain(char*                         
         o.key("mod_ratio");
         o.float_value(osc.mod_ratio);
         key_float_nonzero(o, "string_pick", osc.string_pick);
+        // Full brightness is the default and stays out of the document.
+        if (osc.string_brightness != 1.0f) {
+            key_float(o, "string_brightness", osc.string_brightness);
+        }
         o.key("octave_offset");
         o.float_value(static_cast<float>(osc.octave_offset));
         // The FIR Slope target block shares the scalar's key, so the two never appear

@@ -54,6 +54,7 @@ struct OscillatorParams {
     float string_pick;            // String pick position [0..1], comb applied at note-on
     float string_damping;         // String damping [0..1], higher = shorter decay
     float string_release_damping; // String release damping [0..1]
+    float string_brightness;      // String pluck brightness [0..1], 1 = unfiltered burst, applied at note-on
 };
 
 layout(binding = 0) buffer data_buf { float data[]; };
@@ -239,14 +240,22 @@ float string_ring_read(uint ring_offs, float loop_phase)
 
 // Karplus-Strong plucked string, run once per 256-sample block.
 // The ring holds one loop of excitation: a noise burst, optionally combed (circularly, around
-// the ring period) by the pick position and rescaled to the noise RMS.
+// the ring period) by the pick position and rescaled to the noise RMS, then optionally softened
+// by a circular one-pole lowpass (brightness below 1) that keeps the burst RMS.
 // Each sample is read delay_whole samples behind the write point, then damped by a one-pole
 // lowpass (string_damping_coeff) and tuned to the fractional delay by an allpass
 // (string_allpass_coeff).  string_loop_gain sets the decay to the target T60.
 // string_release_gain glides toward release_gain_target on note release to shorten the tail.
 // Header layout: 0 write pos, 1 prev lowpass, 2 prev allpass, 3 release gain, 4 loop length,
 // 5-6 seed tag, 7 unused.
-void string_pass(uint base, float f0, float damping, float release_damping, float pick, bool release, uint note_seed)
+void string_pass(uint  base,
+                 float f0,
+                 float damping,
+                 float release_damping,
+                 float pick,
+                 float brightness,
+                 bool  release,
+                 uint  note_seed)
 {
     const uint  lane        = gl_LocalInvocationID.x;
     const uint  ring_offs   = base + string_header_words;
@@ -348,6 +357,35 @@ void string_pass(uint base, float f0, float damping, float release_damping, floa
             memoryBarrierBuffer();
             barrier();
         }
+        if (lane == 0u && brightness < 1.0) {
+            // Pluck brightness: a circular one-pole lowpass over the finished burst, skipped at 1 so
+            // the default excitation stays bit-identical.  A zero-state lap gives the tail, which
+            // fixes the exact wrap-around start state so the ring closes without a seam.  The
+            // result is re-centered and rescaled to the burst RMS, so brightness shapes tone only.
+            const float tone_coeff = 0.95 * (1.0 - clamp(brightness, 0.0, 1.0));
+            float       tone_state = 0.0;
+            float       energy_in  = 0.0;
+            for (uint k = 0u; k < delay_whole; k++) {
+                const float sample_in = data[ring_offs + k];
+                tone_state            = (1.0 - tone_coeff) * sample_in + tone_coeff * tone_state;
+                energy_in += sample_in * sample_in;
+            }
+            tone_state /= 1.0 - pow(tone_coeff, float(delay_whole));
+            float tone_sum    = 0.0;
+            float tone_energy = 0.0;
+            for (uint k = 0u; k < delay_whole; k++) {
+                tone_state          = (1.0 - tone_coeff) * data[ring_offs + k] + tone_coeff * tone_state;
+                data[ring_offs + k] = tone_state;
+                tone_sum += tone_state;
+                tone_energy += tone_state * tone_state;
+            }
+            const float tone_mean = tone_sum / float(delay_whole);
+            const float tone_var  = tone_energy - tone_sum * tone_mean;
+            const float tone_gain = tone_var > 0.0 ? sqrt(energy_in / tone_var) : 1.0;
+            for (uint k = 0u; k < delay_whole; k++) {
+                data[ring_offs + k] = (data[ring_offs + k] - tone_mean) * tone_gain;
+            }
+        }
         if (lane == 0u) {
             data[base + 5u]     = string_seed_tag_lo;
             data[base + 6u]     = string_seed_tag_hi;
@@ -437,6 +475,7 @@ void main()
                     param.string_damping,
                     param.string_release_damping,
                     param.string_pick,
+                    param.string_brightness,
                     ((param.osc_pack >> 24) & 1u) != 0u,
                     note_seed);
         // barrier() alone does not publish the data[] ring writes.

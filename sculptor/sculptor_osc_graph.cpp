@@ -33,6 +33,7 @@ using Sculptor::osc_band_block_level;
 using Sculptor::osc_band_block_stride;
 using Sculptor::osc_band_first_slot;
 using Sculptor::osc_band_header_slot;
+using Sculptor::osc_brightness_slot;
 using Sculptor::osc_pick_slot;
 using Sculptor::osc_slot_count;
 using Sculptor::osc_target_block_base;
@@ -170,44 +171,46 @@ const LabelTooltip fir_spread_descs[Synth::num_filter_types] = { { "Filter Off",
 // 15 pad tone a (per-layer value, [-1, +1])
 // 16..27 pad tone a's 12-slot modulation block
 // 28 pick position (per oscillator, plain scalar 0..1; nested under waveform a)
+// 29 pluck brightness (per oscillator, plain scalar 0..1, 1 = unfiltered; nested under waveform a)
 // Damping and Release damping have no rows of their own: with waveform a ==
 // string, the duty a row (2) projects as Damping (target 26) and the pad tone
 // a row (15) as Release damping (target 27), each with its block.
-// 29 waveform b (list)
-// 30 duty b (per-layer value, [0, 1])
-// 31..42 duty b's 12-slot modulation block
-// 43 pad tone b (per-layer value, [-1, +1])
-// 44..55 pad tone b's 12-slot modulation block
-// 56 mix mode (list)
-// 57 waveform mix (per-layer value, [0, 1])
-// 58..69 waveform mix's 12-slot modulation block
-// 70 fm depth (per-layer value)
-// 71..82 fm depth's 12-slot modulation block
-// 83 fm ratio (per-layer base value)
-// 84..95 fm ratio's 12-slot modulation block
-// 96 volume (per-layer base value)
-// 97..108 volume's 12-slot modulation block
-// 109 pan (per-layer base value)
-// 110..121 pan's 12-slot modulation block
-// 122 pitch (per-layer base value)
-// 123..134 pitch's 12-slot modulation block
-// 135 octave offset (per oscillator, [-12, +12] whole octaves)
-// 136 filter type (per oscillator, list)
-// 137.. one uniform block per existing band, starting at
-// osc_band_first_slot (137) with a 55-slot stride (osc_band_block_stride):
+
+// 30 waveform b (list)
+// 31 duty b (per-layer value, [0, 1])
+// 32..43 duty b's 12-slot modulation block
+// 44 pad tone b (per-layer value, [-1, +1])
+// 45..56 pad tone b's 12-slot modulation block
+// 57 mix mode (list)
+// 58 waveform mix (per-layer value, [0, 1])
+// 59..70 waveform mix's 12-slot modulation block
+// 71 fm depth (per-layer value)
+// 72..83 fm depth's 12-slot modulation block
+// 84 fm ratio (per-layer base value)
+// 85..96 fm ratio's 12-slot modulation block
+// 97 volume (per-layer base value)
+// 98..109 volume's 12-slot modulation block
+// 110 pan (per-layer base value)
+// 111..122 pan's 12-slot modulation block
+// 123 pitch (per-layer base value)
+// 124..135 pitch's 12-slot modulation block
+// 136 octave offset (per oscillator, [-12, +12] whole octaves)
+// 137 filter type (per oscillator, list)
+// 138.. one uniform block per existing band, starting at
+// osc_band_first_slot (138) with a 55-slot stride (osc_band_block_stride):
 // the "Band N" header label, the band's [-] click slot, the band's [+]
 // click slot, then the band's four parameter rows, each followed by its
 // 12-slot modulation block (a 13-slot stride, in osc_target_row_slot
 // order). Only the stored band count's blocks are projected; band 0's
-// rows sit at 140/153/166/179 and bands 1..3 shift by 3 slots per
-// earlier band (195/208/221/234, 250/263/276/289, 305/318/331/344).
+// rows sit at 141/154/167/180 and bands 1..3 shift by 3 slots per
+// earlier band (196/209/222/235, 251/264/277/290, 306/319/332/345).
 constexpr uint32_t osc_waveform_a_prop    = 1;
-constexpr uint32_t osc_waveform_b_prop    = 29;
-constexpr uint32_t osc_mode_prop          = 56;
-constexpr uint32_t osc_fm_ratio_prop      = 83;
-constexpr uint32_t osc_octave_offset_prop = 135;
-constexpr uint32_t osc_fir_slope_prop     = 179;
-constexpr uint32_t osc_fir_type_prop      = 136;
+constexpr uint32_t osc_waveform_b_prop    = 30;
+constexpr uint32_t osc_mode_prop          = 57;
+constexpr uint32_t osc_fm_ratio_prop      = 84;
+constexpr uint32_t osc_octave_offset_prop = 136;
+constexpr uint32_t osc_fir_slope_prop     = 180;
+constexpr uint32_t osc_fir_type_prop      = 137;
 // Header labels of the band blocks, indexed by band.
 const char* const band_header_names[Sculptor::osc_band_max_bands] = { "Band 1", "Band 2", "Band 3", "Band 4" };
 // Per-target presentation views: the single source of truth for value
@@ -278,7 +281,7 @@ constexpr uint32_t canonical_node_count = Synth::graph_canonical_node_count;
 // a sawtooth, pulse or pad wave on their side; waveform b, mix mode and
 // fm ratio, plus the duty b, waveform mix and fm depth rows, need
 // waveform b; the pad tone rows and their blocks need the pad waveform;
-// the pick, damping and release damping rows and their blocks need the
+// the pick, brightness, damping and release damping rows and their blocks need the
 // string waveform (it grays no mode row);
 // the cutoff row, its block and the fir slope need a filter type other
 // than off).
@@ -300,8 +303,9 @@ bool Sculptor::oscillator_slot_waveform_mode_disabled(const Sculptor::Node& node
     const uint32_t tone1  = osc_target_row_slot[static_cast<uint32_t>(Synth::mod_pad_tilt1)];
     // Waveform a's list starts at sine, so pad sits one below the stored value.
     const uint32_t wave_a = node.slots.entries[osc_waveform_a_prop].value.list_index;
-    if (wave_a != static_cast<uint32_t>(Synth::WaveType::string_wave) - 1u && slot_idx == osc_pick_slot) {
-        return true; // pick position only applies to the string waveform
+    if (wave_a != static_cast<uint32_t>(Synth::WaveType::string_wave) - 1u &&
+        (slot_idx == osc_pick_slot || slot_idx == osc_brightness_slot)) {
+        return true; // pick position and pluck brightness only apply to the string waveform
     }
     if (wave_a != static_cast<uint32_t>(Synth::WaveType::pad_wave) - 1u &&
         wave_a != static_cast<uint32_t>(Synth::WaveType::string_wave) - 1u && slot_idx >= tone0 &&
@@ -947,6 +951,12 @@ static void project_osc_node(Sculptor::Graph*           graph,
                      "Position along the string where the pluck happens; shapes the note-onset timbre");
     pick_slot.child_row = true;
     graph->add_slot(node, pick_slot);
+    // Pluck Brightness (a plain layer scalar like Pick position) follows it.
+    Sculptor::Slot brightness_slot =
+        with_tooltip(bounded_real_slot("Pluck Brightness", osc.string_brightness, 0.0f, 1.0f),
+                     "Brightness of the pluck; lower values low-pass the initial burst for a warmer, softer attack");
+    brightness_slot.child_row = true;
+    graph->add_slot(node, brightness_slot);
 
     graph->add_slot(node,
                     with_tooltip(list_slot("Waveform B", wave_names, 6, static_cast<uint32_t>(osc.osc_type[1])),
@@ -1932,8 +1942,9 @@ static bool read_oscillator_layer(const Sculptor::Graph&           graph,
     if (! read_list_prop(slots[osc_fir_type_prop], &index)) {
         return false;
     }
-    osc.fir_type    = static_cast<Synth::FilterType>(index);
-    osc.string_pick = slots[osc_pick_slot].value.real;
+    osc.fir_type          = static_cast<Synth::FilterType>(index);
+    osc.string_pick       = slots[osc_pick_slot].value.real;
+    osc.string_brightness = slots[osc_brightness_slot].value.real;
 
     // The projected band blocks encode the count: one uniform block per
     // existing band after Filter Type.

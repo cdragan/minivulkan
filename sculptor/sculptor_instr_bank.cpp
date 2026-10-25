@@ -298,6 +298,11 @@ static bool validate_oscillator_body(const Synth::Oscillator& osc)
     if (! (osc.string_pick >= 0.0f && osc.string_pick <= 1.0f)) {
         return false;
     }
+    // Pluck brightness is a plain scalar in [0,1] as well.
+    if (! (osc.string_brightness >= 0.0f && osc.string_brightness <= 1.0f)) {
+        return false;
+    }
+
     for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
         const Synth::TargetBinding& binding = osc.targets[target];
         if (! valid_source_op(static_cast<uint32_t>(binding.lfo_op))) {
