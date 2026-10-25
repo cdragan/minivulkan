@@ -3,7 +3,6 @@
 #include "sculptor_bank_json.h"
 #include "../core/d_printf.h"
 #include "../core/vmath.h"
-#include "sculptor_atomic_file.h"
 #include "sculptor_effect_graph.h"
 #include "sculptor_instr_envelope_edit.h"
 #include "sculptor_osc_graph.h"
@@ -4634,13 +4633,15 @@ static bool decode_document_into_scratch(const char* text, uint32_t len, bool st
     return Sculptor::normalize_effect_layout(&decode_scratch);
 }
 
-int Synth::write_editor_bank_json(FILE* file, const InstrumentEditorBank* bank, uint32_t max_len, uint32_t* out_len)
+// Encodes the bank into the static json_text buffer and verifies that the
+// document reloads through the bounded decode path.  All failure modes happen
+// here, before the caller touches the destination file, so a refused save
+// never creates or truncates anything.
+static int prepare_editor_bank_json(const Synth::InstrumentEditorBank* bank, uint32_t* out_len)
 {
     const uint32_t len = encode_editor_bank_json(bank, json_text, sizeof(json_text));
 
     if (! len)
-        return EOVERFLOW;
-    if (len > max_len)
         return EOVERFLOW;
 
     // Reload guarantee: the document must parse back through the same bounded
@@ -4648,6 +4649,22 @@ int Synth::write_editor_bank_json(FILE* file, const InstrumentEditorBank* bank, 
     // is refused instead of written.
     if (! decode_document_into_scratch(json_text, len))
         return EINVAL;
+
+    *out_len = len;
+
+    return 0;
+}
+
+int Synth::write_editor_bank_json(FILE* file, const InstrumentEditorBank* bank, uint32_t max_len, uint32_t* out_len)
+{
+    uint32_t len = 0;
+
+    const int error = prepare_editor_bank_json(bank, &len);
+    if (error)
+        return error;
+
+    if (len > max_len)
+        return EOVERFLOW;
 
     if (fwrite(json_text, 1, len, file) != len)
         return EIO;
@@ -5359,30 +5376,25 @@ static uint32_t encode_instrument_json_for_domain(char*                         
 
 int Synth::save_editor_bank_file(const char* path, const InstrumentEditorBank* bank)
 {
-    // Rotate the previous file to .bak before writing: a save must never
-    // destroy the last good bank, even when the caller saves a wrong or
-    // default state after a failed load.
-    char bak_path[512];
-    if (snprintf(bak_path, sizeof(bak_path), "%s.bak", path) > 0 && rename(path, bak_path) != 0 && errno != ENOENT) {
-        return errno;
-    }
-    char                           tmp_path[512];
-    const std::variant<FILE*, int> staged = atomic_write_begin(path, tmp_path, sizeof(tmp_path));
+    uint32_t len = 0;
 
-    if (std::holds_alternative<int>(staged))
-        return std::get<int>(staged);
-
-    FILE* const file = std::get<FILE*>(staged);
-    uint32_t    len  = 0;
-
-    const int error = write_editor_bank_json(file, bank, sizeof(json_text), &len);
-    if (error) {
-        fclose(file);
-        remove(tmp_path);
+    const int error = prepare_editor_bank_json(bank, &len);
+    if (error)
         return error;
+
+    FILE* const file = fopen(path, "wb");
+    if (! file)
+        return errno;
+
+    if (fwrite(json_text, 1, len, file) != len) {
+        fclose(file);
+        return EIO;
     }
 
-    return atomic_write_commit(path, tmp_path, file);
+    if (fclose(file))
+        return errno;
+
+    return 0;
 }
 
 Synth::BankFileStatus Synth::load_editor_bank_file(const char* path, InstrumentEditorBank* out)
