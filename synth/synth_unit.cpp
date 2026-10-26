@@ -16565,7 +16565,7 @@ static void m2_band_visibility_regressions()
     const uint32_t        header_slot = find_nth_osc_slot(osc, "Band 1", 0);
     const uint32_t        filter_slot = find_nth_osc_slot(osc, "Filter Type", 0);
     TEST(header_slot == Sculptor::osc_band_header_slot(0) && filter_slot == 137);
-    if (header_slot != Sculptor::osc_band_header_slot(0) || filter_slot != 162) {
+    if (header_slot != Sculptor::osc_band_header_slot(0) || filter_slot != 137) {
         return;
     }
     m2_band_visibility_body<m2_band_seam_present>(graph, mapping.osc_nodes[0], filter_slot);
@@ -22883,8 +22883,14 @@ static StringScalars string_mirror_scalars(float f0, float damping, float releas
     return s;
 }
 
-// Note-on init: noise, optional circular pick comb, mean pass, RMS match.
-static void string_mirror_init(StringMirror* m, float f0, float damping, float pick, uint32_t seed)
+// Note-on init: noise, optional circular pick comb, mean pass, RMS match, then the optional
+// circular one-pole tone stage (brightness < 1; 1 keeps the legacy excitation bit-identical).
+static void string_mirror_init(StringMirror* m,
+                               float         f0,
+                               float         damping,
+                               float         pick,
+                               uint32_t      seed,
+                               float         brightness = 1.0f)
 {
     const StringScalars s = string_mirror_scalars(f0, damping, 0.0f);
     if (s.silent) {
@@ -22931,6 +22937,33 @@ static void string_mirror_init(StringMirror* m, float f0, float damping, float p
             m->ring[k] *= comb_gain;
         }
     }
+    if (brightness < 1.0f) {
+        // Same math as the shader: a zero-state lap gives the tail, which fixes the periodic
+        // wrap start state; then the filtered lap, re-centering and energy-matched rescale.
+        const float tone_coeff = 0.95f * (1.0f - string_unit_clamp(brightness));
+        float       tone_state = 0.0f;
+        float       energy_in  = 0.0f;
+        for (uint32_t k = 0; k < n; ++k) {
+            const float sample_in = m->ring[k];
+            tone_state            = (1.0f - tone_coeff) * sample_in + tone_coeff * tone_state;
+            energy_in += sample_in * sample_in;
+        }
+        tone_state /= 1.0f - powf(tone_coeff, static_cast<float>(n));
+        float tone_sum    = 0.0f;
+        float tone_energy = 0.0f;
+        for (uint32_t k = 0; k < n; ++k) {
+            tone_state = (1.0f - tone_coeff) * m->ring[k] + tone_coeff * tone_state;
+            m->ring[k] = tone_state;
+            tone_sum += tone_state;
+            tone_energy += tone_state * tone_state;
+        }
+        const float tone_mean = tone_sum / static_cast<float>(n);
+        const float tone_var  = tone_energy - tone_sum * tone_mean;
+        const float tone_gain = tone_var > 0.0f ? sqrtf(energy_in / tone_var) : 1.0f;
+        for (uint32_t k = 0; k < n; ++k) {
+            m->ring[k] = (m->ring[k] - tone_mean) * tone_gain;
+        }
+    }
     m->wr     = n;
     m->t1     = 0.0f;
     m->u1     = 0.0f;
@@ -22973,7 +23006,8 @@ static void string_mirror_step(StringMirror* m,
     }
 }
 
-// Shader-equivalent pass: silent skips everything, the first in-range pass of a seed inits.
+// Shader-equivalent pass: silent skips everything, the first in-range pass of a seed inits
+// (full brightness; the optional tone stage is exercised through string_mirror_init directly).
 static void string_mirror_play(StringMirror* m,
                                float         f0,
                                float         damping,
@@ -23497,6 +23531,224 @@ static void check_string_mirror_pick_comb()
     TEST(fabs(sum / n) < 1e-6);
 }
 
+// Pluck brightness tone stage. Frozen legacy reference for brightness 1: the pre-tone-stage
+// excitation, i.e. string_pick_reference (comb and mean passes) followed by the float RMS
+// match the mirror applies for pick > 0, with the shader's 256-lane noise energy order.
+static void string_legacy_excitation_reference(float* ref, uint32_t n, uint32_t seed, uint32_t off)
+{
+    string_pick_reference(ref, n, seed, off, true);
+    if (off == 0) {
+        return;
+    }
+    float noise_energy = 0.0f;
+    for (uint32_t lane = 0; lane < 256; ++lane) {
+        float lane_energy = 0.0f;
+        for (uint32_t i = lane; i < n; i += 256) {
+            const float noise_here = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
+            lane_energy += noise_here * noise_here;
+        }
+        noise_energy += lane_energy;
+    }
+    float comb_energy = 0.0f;
+    for (uint32_t k = 0; k < n; ++k) {
+        comb_energy += ref[k] * ref[k];
+    }
+    const float comb_gain = comb_energy > 0.0f ? sqrtf(noise_energy / comb_energy) : 1.0f;
+    for (uint32_t k = 0; k < n; ++k) {
+        ref[k] *= comb_gain;
+    }
+}
+
+// Independent double-precision tone stage: the exact periodic one-pole
+// y[i] = (1 - a) / (1 - a^n) * sum_j a^j x[(i - j) mod n], mean removed, rescaled to the
+// input energy. Uses the closed-form circular sum, not the shader's two-pass recurrence.
+static void string_tone_reference(float* ref, const float* in, uint32_t n, float brightness)
+{
+    static double y[string_ring_size];
+    const double  a         = static_cast<double>(0.95f * (1.0f - brightness));
+    const double  norm      = (1.0 - a) / (1.0 - pow(a, static_cast<double>(n)));
+    double        energy_in = 0.0;
+    double        sum       = 0.0;
+    for (uint32_t i = 0; i < n; ++i) {
+        double weight = 1.0;
+        double acc    = 0.0;
+        for (uint32_t j = 0; j < n; ++j) {
+            acc += weight * static_cast<double>(in[(i + n - j) % n]);
+            weight *= a;
+        }
+        y[i] = norm * acc;
+        sum += y[i];
+        energy_in += static_cast<double>(in[i]) * static_cast<double>(in[i]);
+    }
+    const double mean = sum / static_cast<double>(n);
+    double       var  = 0.0;
+    for (uint32_t i = 0; i < n; ++i) {
+        var += (y[i] - mean) * (y[i] - mean);
+    }
+    const double gain = var > 0.0 ? sqrt(energy_in / var) : 1.0;
+    for (uint32_t i = 0; i < n; ++i) {
+        ref[i] = static_cast<float>((y[i] - mean) * gain);
+    }
+}
+
+static double string_ring_energy(const float* ring, uint32_t n)
+{
+    double energy = 0.0;
+    for (uint32_t i = 0; i < n; ++i) {
+        energy += static_cast<double>(ring[i]) * static_cast<double>(ring[i]);
+    }
+    return energy;
+}
+
+static double string_ring_sum(const float* ring, uint32_t n)
+{
+    double sum = 0.0;
+    for (uint32_t i = 0; i < n; ++i) {
+        sum += static_cast<double>(ring[i]);
+    }
+    return sum;
+}
+
+// Circular first-difference energy over energy: about 2 for white noise, lower as the
+// high end is attenuated.
+static double string_ring_roughness(const float* ring, uint32_t n)
+{
+    double diff = 0.0;
+    for (uint32_t i = 0; i < n; ++i) {
+        const double step = static_cast<double>(ring[i]) - static_cast<double>(ring[(i + n - 1) % n]);
+        diff += step * step;
+    }
+    const double energy = string_ring_energy(ring, n);
+    return energy > 0.0 ? diff / energy : 0.0;
+}
+
+static void check_string_mirror_brightness()
+{
+    static StringMirror m;
+    static StringMirror base;
+    static float        ref[string_ring_size];
+
+    // (a) Brightness 1 (explicit and defaulted) is bit-identical to the frozen legacy excitation,
+    // with the pick comb disabled and enabled. At damping 0.5: 441 Hz gives N = 98 and 400 Hz
+    // gives N = 108 (both even); 420 Hz gives N = 103 (odd).
+    const float legacy_freqs[3] = { 441.0f, 400.0f, 420.0f };
+    for (const float f0 : legacy_freqs) {
+        const uint32_t n = string_mirror_scalars(f0, 0.5f, 0.0f).n;
+        TEST(n >= 3);
+        TEST((n % 2u) == (f0 == 420.0f ? 1u : 0u));
+        uint32_t off = static_cast<uint32_t>(floorf(0.5f * static_cast<float>(n) + 0.5f));
+        off          = off < n - 1 ? off : n - 1;
+
+        memset(&m, 0, sizeof(m));
+        string_mirror_init(&m, f0, 0.5f, 0.0f, 55, 1.0f);
+        string_legacy_excitation_reference(ref, n, 55, 0);
+        TEST(string_rings_equal(m.ring, ref, n));
+
+        memset(&m, 0, sizeof(m));
+        string_mirror_init(&m, f0, 0.5f, 0.0f, 55);
+        TEST(string_rings_equal(m.ring, ref, n));
+
+        memset(&m, 0, sizeof(m));
+        string_mirror_init(&m, f0, 0.5f, 0.5f, 55, 1.0f);
+        string_legacy_excitation_reference(ref, n, 55, off);
+        TEST(string_rings_equal(m.ring, ref, n));
+
+        memset(&m, 0, sizeof(m));
+        string_mirror_init(&m, f0, 0.5f, 0.5f, 55);
+        TEST(string_rings_equal(m.ring, ref, n));
+
+        // The tone stage is active just below 1.
+        string_mirror_init(&m, f0, 0.5f, 0.5f, 55, 0.99f);
+        TEST(! string_rings_equal(m.ring, ref, n));
+    }
+
+    // (b) and (c): lowered brightness against the independent periodic one-pole reference, plus
+    // energy, mean and wrap-seam invariants. expected_n pins the shortest supported loops
+    // (N = 3, 2, 1 at damping 0.5); 0 means unchecked.
+    struct ToneCase {
+        float    f0;
+        float    pick;
+        uint32_t expected_n;
+    };
+
+    static const ToneCase cases[] = {
+        { 441.0f, 0.0f, 0 }, { 441.0f, 0.5f, 0 },  { 400.0f, 0.0f, 0 },   { 400.0f, 0.3f, 0 },   { 110.0f, 0.0f, 0 },
+        { 110.0f, 0.5f, 0 }, { 8820.0f, 0.0f, 3 }, { 11025.0f, 0.0f, 2 }, { 20000.0f, 0.0f, 1 },
+    };
+    static const float levels[] = { 0.75f, 0.5f, 0.25f, 0.0f };
+    for (const ToneCase& c : cases) {
+        const uint32_t n = string_mirror_scalars(c.f0, 0.5f, 0.0f).n;
+        TEST(c.expected_n == 0 || n == c.expected_n);
+        memset(&base, 0, sizeof(base));
+        string_mirror_init(&base, c.f0, 0.5f, c.pick, 71, 1.0f);
+        const double energy_in = string_ring_energy(base.ring, n);
+        for (const float level : levels) {
+            memset(&m, 0, sizeof(m));
+            string_mirror_init(&m, c.f0, 0.5f, c.pick, 71, level);
+            for (uint32_t k = 0; k < n; ++k) {
+                TEST(std::isfinite(m.ring[k]));
+            }
+
+            string_tone_reference(ref, base.ring, n, level);
+            for (uint32_t k = 0; k < n; ++k) {
+                TEST(approx(m.ring[k], ref[k], 1e-4f));
+            }
+
+            // Energy preserved, mean removed.
+            TEST(fabs(string_ring_energy(m.ring, n) - energy_in) <= 1e-4 * energy_in + 1e-12);
+            TEST(fabs(string_ring_sum(m.ring, n)) / n < 1e-5);
+
+            // Seam-free wrap: the output obeys z[i] - a z[i - 1] = (1 - a) g x[i] at every index,
+            // including i = 0 which reads z[n - 1]. A zero-state start breaks it at the seam.
+            // The common gain g is fitted by projection and must be positive.
+            if (n >= 2 && energy_in > 0.0) {
+                const double a   = static_cast<double>(0.95f * (1.0f - level));
+                double       dot = 0.0;
+                for (uint32_t i = 0; i < n; ++i) {
+                    const double r = static_cast<double>(m.ring[i]) - a * static_cast<double>(m.ring[(i + n - 1) % n]);
+                    dot += r * static_cast<double>(base.ring[i]);
+                }
+                const double scale = dot / ((1.0 - a) * energy_in);
+                TEST(scale > 0.0);
+                for (uint32_t i = 0; i < n; ++i) {
+                    const double r = static_cast<double>(m.ring[i]) - a * static_cast<double>(m.ring[(i + n - 1) % n]);
+                    TEST(fabs(r - (1.0 - a) * scale * static_cast<double>(base.ring[i])) < 1e-4);
+                }
+            }
+        }
+    }
+
+    // Shortest loops: one sample has nothing to filter and stays zero; two samples keep their
+    // alternating shape.
+    memset(&m, 0, sizeof(m));
+    string_mirror_init(&m, 20000.0f, 0.5f, 0.0f, 71, 0.25f);
+    TEST(string_mirror_scalars(20000.0f, 0.5f, 0.0f).n == 1 && m.ring[0] == 0.0f);
+    memset(&m, 0, sizeof(m));
+    string_mirror_init(&m, 11025.0f, 0.5f, 0.0f, 71, 0.25f);
+    TEST(approx(m.ring[0], -m.ring[1], 1e-5f) && m.ring[0] != 0.0f);
+
+    // High-frequency attenuation on a long loop (N is about 400): roughness is near-white at
+    // brightness 1 and falls strictly as brightness drops.
+    static const float ordered[] = { 1.0f, 0.75f, 0.5f, 0.25f, 0.0f };
+    double             previous  = 0.0;
+    double             white     = 0.0;
+    for (uint32_t i = 0; i < 5; ++i) {
+        memset(&m, 0, sizeof(m));
+        string_mirror_init(&m, 110.0f, 0.5f, 0.0f, 71, ordered[i]);
+        const uint32_t n         = string_mirror_scalars(110.0f, 0.5f, 0.0f).n;
+        const double   roughness = string_ring_roughness(m.ring, n);
+        if (i == 0) {
+            white = roughness;
+            TEST(white > 1.6);
+        }
+        else {
+            TEST(roughness < previous);
+        }
+        previous = roughness;
+    }
+    TEST(previous < 0.25 * white);
+}
+
 // FM carrier ring read: slot position
 // q = wr_end - 1 - L + fract(warped_phase) * L, linear interpolation, wrapped
 // into [0, 2040).  The FM carrier string timbre intentionally differs from the
@@ -23943,6 +24195,7 @@ static void string_mirror_m2_regressions_b()
     check_string_mirror_release_lifetime();
     check_string_mirror_sustain_holds();
     check_string_mirror_pick_comb();
+    check_string_mirror_brightness();
     check_string_mirror_pick_circular();
     check_string_mirror_fm_ring_read();
     check_string_mirror_ring_read_edges();
