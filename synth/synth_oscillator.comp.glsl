@@ -45,16 +45,18 @@ struct OscillatorParams {
     float mod_phase_step;   // Modulator's phase step between samples
 
     // Optional filter parameters
-    uint  fir_memory_offs;        // Offset of FIR filter's memory
-    uint  taps_offs;              // Offset of FIR filter's taps
-    uint  noise_counter;          // Sample index into the noise stream, independent of pitch
-    uint  note_seed;              // Per-note constant: the note-on noise counter, never advanced
-    float pad_tilt[2];            // Pad spectral tilt: harmonic exponent is 1 + clamp(tilt, -1, 1)
-    uint  string_state_offs;      // String state region in floats: header words 0..7, then the ring
-    float string_pick;            // String pick position [0..1], comb applied at note-on
-    float string_damping;         // String damping [0..1], higher = shorter decay
-    float string_release_damping; // String release damping [0..1]
-    float string_brightness;      // String pluck brightness [0..1], 1 = unfiltered burst, applied at note-on
+    uint  fir_memory_offs;            // Offset of FIR filter's memory
+    uint  taps_offs;                  // Offset of FIR filter's taps
+    uint  noise_counter;              // Sample index into the noise stream, independent of pitch
+    uint  note_seed;                  // Per-note constant: the note-on noise counter, never advanced
+    float pad_tilt[2];                // Pad spectral tilt: harmonic exponent is 1 + clamp(tilt, -1, 1)
+    uint  string_state_offs;          // String state region in floats: header words 0..13, then the ring
+    float string_pick;                // String pick position [0..1], comb applied at note-on
+    float string_damping;             // String damping [0..1], higher = shorter decay
+    float string_release_damping;     // String release damping [0..1]
+    float string_brightness;          // String pluck brightness [0..1], 1 = unfiltered burst, applied at note-on
+    float string_dispersion;          // String dispersion [0..1], 0 = off (the plain string, bit-identical)
+    float string_dispersion_sections; // String dispersion allpass section count [1..6], ignored at dispersion 0
 };
 
 layout(binding = 0) buffer data_buf { float data[]; };
@@ -210,12 +212,32 @@ float oscillator(uint osc_type, float phase, float duty, float tilt, uint noise_
     }
 }
 
-const uint   string_ring_size    = 2040;
-const uint   string_header_words = 8;
+const uint   string_ring_size    = 2034;
+const uint   string_header_words = 14;
+const uint   string_max_sections = 6u;
 const float  string_min_freq     = 22.0;
+const float  string_dispersion_strength = 0.05863;
 shared float string_block_out[256];
 shared uint  string_write_pos;
 shared float string_loop_length;
+
+// Largest root r >= 1 of r^3 - r = q for q > 0.  Closed form, no iteration: three real roots up to
+// q = 2 / (3 sqrt(3)) (trigonometric form), one real root beyond (Cardano form).
+float string_dispersion_ratio(float q)
+{
+    if (q <= 0.3849002) {
+        const float cos_arg = min(1.0, 2.598076 * q);
+        return 1.1547005 * cos(acos(cos_arg) * 0.33333334);
+    }
+    const float cardano = pow(q * 0.5 + sqrt(q * q * 0.25 - 0.037037037), 0.33333334);
+    return cardano + 0.33333334 / cardano;
+}
+
+// Phase delay in samples of the first-order allpass (coeff + z^-1) / (1 + coeff * z^-1) at omega.
+float string_allpass_phase_delay(float coeff, float omega)
+{
+    return (2.0 / omega) * atan((1.0 - coeff) * sin(0.5 * omega), (1.0 + coeff) * cos(0.5 * omega));
+}
 
 float string_ring_read(uint ring_offs, float loop_phase)
 {
@@ -246,14 +268,19 @@ float string_ring_read(uint ring_offs, float loop_phase)
 // lowpass (string_damping_coeff) and tuned to the fractional delay by an allpass
 // (string_allpass_coeff).  string_loop_gain sets the decay to the target T60.
 // string_release_gain glides toward release_gain_target on note release to shorten the tail.
+// Dispersion (stiff-string inharmonicity) adds up to 6 identical first-order allpass sections after the
+// tuning allpass.  Their phase delay at f0 is subtracted from the loop delay so the pitch stays put,
+// while their delay falls with frequency, which lifts the partials.  Dispersion 0 skips all of it.
 // Header layout: 0 write pos, 1 prev lowpass, 2 prev allpass, 3 release gain, 4 loop length,
-// 5-6 seed tag, 7 unused.
+// 5-6 seed tag, 7-12 dispersion section states, 13 unused.
 void string_pass(uint  base,
                  float f0,
                  float damping,
                  float release_damping,
                  float pick,
                  float brightness,
+                 float dispersion,
+                 float dispersion_sections,
                  bool  release,
                  uint  note_seed)
 {
@@ -281,7 +308,30 @@ void string_pass(uint  base,
                                                                        string_damping_coeff * string_damping_coeff);
     const float loop_gain_raw    = pow(10.0, -3.0 * loop_length / (sample_rate * decay_t60)) / lowpass_mag;
     const float string_loop_gain = loop_gain_raw < 0.9999 ? loop_gain_raw : 0.9999;
-    const float delay            = loop_length - lowpass_delay;
+
+    // Dispersion block-rate setup, gated off entirely at 0 (a zero-coefficient section still delays one sample).
+    // The total curvature is count invariant (each of N sections carries 1/N of it), so the sections knob
+    // trades smoothness for cost without scaling the strength.  The count falls back from the requested value
+    // to the first one that leaves at least 3 samples of loop delay, or to no cascade at all.
+    float disp_coeff   = 0.0;
+    float disp_delay   = 0.0;
+    uint  num_sections = 0u;
+    if (dispersion > 0.0) {
+        const uint requested = uint(clamp(floor(dispersion_sections + 0.5), 1.0, float(string_max_sections)));
+        for (uint count = requested; count > 0u; count -= 1u) {
+            const float disp_q = string_dispersion_strength * dispersion / (float(count) * (omega * omega * omega));
+            const float disp_r = string_dispersion_ratio(disp_q);
+            const float count_coeff = (1.0 - disp_r) / (1.0 + disp_r);
+            const float count_delay = float(count) * string_allpass_phase_delay(count_coeff, omega);
+            if (loop_length - lowpass_delay - count_delay >= 3.0) {
+                disp_coeff   = count_coeff;
+                disp_delay   = count_delay;
+                num_sections = count;
+                break;
+            }
+        }
+    }
+    const float delay                = loop_length - lowpass_delay - disp_delay;
     const uint  delay_whole      = uint(floor(delay - 1.0));
     const float delay_frac       = delay - float(delay_whole);
     const float string_allpass_coeff = (1.0 - delay_frac) / (1.0 + delay_frac);
@@ -297,6 +347,7 @@ void string_pass(uint  base,
     float       string_prev_lowpass;
     float       string_prev_allpass;
     float       string_release_gain;
+    float       disp_state[string_max_sections];
     if (init) {
         // Note-on or retrigger: noise burst, optional circular pick comb, zero mean, RMS match to the noise.
         uint pick_offset = uint(floor(pick * float(delay_whole) + 0.5));
@@ -393,6 +444,10 @@ void string_pass(uint  base,
             string_prev_lowpass = 0.0;
             string_prev_allpass = 0.0;
             string_release_gain = 1.0;
+            for (uint s = 0u; s < string_max_sections; s++) {
+                disp_state[s]       = 0.0;
+                data[base + 7u + s] = 0.0;
+            }
         }
     }
     else if (lane == 0u) {
@@ -400,6 +455,9 @@ void string_pass(uint  base,
         string_prev_lowpass = data[base + 1u];
         string_prev_allpass = data[base + 2u];
         string_release_gain = data[base + 3u];
+        for (uint s = 0u; s < string_max_sections; s++) {
+            disp_state[s] = data[base + 7u + s];
+        }
     }
 
     if (lane != 0u) {
@@ -422,7 +480,13 @@ void string_pass(uint  base,
             (1.0 - string_damping_coeff) * pass_input + string_damping_coeff * string_prev_lowpass;
         const float allpass_out =
             string_allpass_coeff * lowpass_out + string_prev_lowpass - string_allpass_coeff * string_prev_allpass;
-        float loop_output = allpass_out * (string_loop_gain * string_release_gain);
+        float cascade_out = allpass_out;
+        for (uint s = 0u; s < num_sections; s++) {
+            const float section_out = disp_coeff * cascade_out + disp_state[s];
+            disp_state[s]           = cascade_out - disp_coeff * section_out;
+            cascade_out             = section_out;
+        }
+        float loop_output = cascade_out * (string_loop_gain * string_release_gain);
 
         // Flush runaway or non-finite values to silence so a blown-up loop cannot poison the ring.
         loop_output                 = abs(loop_output) < 8.0 ? loop_output : 0.0;
@@ -437,6 +501,9 @@ void string_pass(uint  base,
     data[base + 2u]    = string_prev_allpass;
     data[base + 3u]    = string_release_gain;
     data[base + 4u]    = loop_length;
+    for (uint s = 0u; s < num_sections; s++) {
+        data[base + 7u + s] = disp_state[s];
+    }
     string_write_pos   = write_pos;
     string_loop_length = loop_length;
 }
@@ -476,6 +543,8 @@ void main()
                     param.string_release_damping,
                     param.string_pick,
                     param.string_brightness,
+                    param.string_dispersion,
+                    param.string_dispersion_sections,
                     ((param.osc_pack >> 24) & 1u) != 0u,
                     note_seed);
         // barrier() alone does not publish the data[] ring writes.

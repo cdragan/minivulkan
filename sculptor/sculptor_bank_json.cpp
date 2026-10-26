@@ -458,6 +458,21 @@ static void key_float_nonzero(Out& o, const char* name, float v)
     key_float(o, name, v);
 }
 
+// Dispersion and its section count.  The encoder emits only values the decoder accepts: a finite dispersion in
+// [0,1] other than zero, and an integer section count in [1,6] other than the default four.  Anything else stays out
+// of the document and decodes as the default.
+static void key_dispersion(Out& o, const Synth::Oscillator& osc)
+{
+    if (osc.string_dispersion >= 0.0f && osc.string_dispersion <= 1.0f) {
+        key_float_nonzero(o, "string_dispersion", osc.string_dispersion);
+    }
+    const float sections = osc.string_dispersion_sections;
+    if (sections >= 1.0f && sections <= 6.0f && sections != 4.0f &&
+        sections == static_cast<float>(static_cast<int32_t>(sections))) {
+        key_float(o, "string_dispersion_sections", sections);
+    }
+}
+
 static void key_enum(Out& o, const char* name, const char* const* names, uint32_t num_names, uint32_t v)
 {
     if (v == 0)
@@ -564,6 +579,7 @@ static void enc_oscillator(Out& o, const Synth::Oscillator& osc)
     if (osc.string_brightness != 1.0f) {
         key_float(o, "string_brightness", osc.string_brightness);
     }
+    key_dispersion(o, osc);
     key_float_nonzero(o, "octave_offset", static_cast<float>(osc.octave_offset));
 
     // The default slope omits the key, matching the nonzero-key omission
@@ -1938,6 +1954,20 @@ static void want_int(Walker& w, uint32_t i, int32_t min_value, int32_t max_value
     }
 }
 
+// The dispersion section count is an integer 1..6 stored as a float; any non-integer spelling is refused.
+static void want_dispersion_sections(Walker& w, uint32_t i, float* out)
+{
+    int32_t sections = 0;
+    want_int(w, i, 1, 6, &sections);
+    // want_int applies a nonnegative minimum only to negative spellings, so zero needs its own check.
+    if (! w.failed && sections < 1) {
+        w.failed = true;
+    }
+    if (! w.failed) {
+        *out = static_cast<float>(sections);
+    }
+}
+
 static void want_float(Walker& w, uint32_t i, float* out)
 {
     const jsmntok_t& t = w.toks[i];
@@ -2314,7 +2344,9 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
     int32_t                 fir_slope                            = 100;
     float                   pitch_offset                         = 0.0f;
     float                   string_brightness = 1.0f; // absent means full brightness, not the zeroed bank memory
-    const Synth::FilterType fir_type          = prescan_fir_type(w, obj);
+    float                   string_dispersion = 0.0f;
+    float                   string_dispersion_sections = 4.0f;
+    const Synth::FilterType fir_type                   = prescan_fir_type(w, obj);
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
         if (key_eq(w, key_idx, "wave_a")) {
@@ -2335,6 +2367,10 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
             want_bounded_real(w, val_idx, 0.0, 1.0, &osc.string_pick);
         else if (key_eq(w, key_idx, "string_brightness"))
             want_bounded_real(w, val_idx, 0.0, 1.0, &string_brightness);
+        else if (key_eq(w, key_idx, "string_dispersion"))
+            want_bounded_real(w, val_idx, 0.0, 1.0, &string_dispersion);
+        else if (key_eq(w, key_idx, "string_dispersion_sections"))
+            want_dispersion_sections(w, val_idx, &string_dispersion_sections);
         else if (key_eq(w, key_idx, "mod_ratio"))
             want_float(w, val_idx, &osc.mod_ratio);
         else if (key_eq(w, key_idx, "pitch_offset"))
@@ -2412,10 +2448,12 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
     if (fir_slope < 1 || fir_slope > 100) {
         w.failed = true;
     }
-    osc.fir_slope_percent = static_cast<uint8_t>(fir_slope);
-    osc.string_brightness = string_brightness;
-    osc.fir_type          = fir_type;
-    osc.fir_band_count    = static_cast<uint8_t>(band_count);
+    osc.fir_slope_percent          = static_cast<uint8_t>(fir_slope);
+    osc.string_brightness          = string_brightness;
+    osc.string_dispersion          = string_dispersion;
+    osc.string_dispersion_sections = string_dispersion_sections;
+    osc.fir_type                   = fir_type;
+    osc.fir_band_count             = static_cast<uint8_t>(band_count);
     // Per-band absent-key defaults, mirroring the portable document
     // decoder, apply to a legacy single-band bandpass bank (no fir_bands,
     // no band keys) too. Band 0's offset decodes the neutral 0.
@@ -3930,10 +3968,12 @@ static void canonicalize_editor_bank(Synth::InstrumentEditorBank* editor_bank)
         instr.release_seconds      = canonical_float(instr.release_seconds);
 
         for (uint32_t l = 0; l < instr.layer_count; l++) {
-            Synth::Oscillator& osc = instr.layers[l];
-            osc.mod_ratio          = canonical_float(osc.mod_ratio);
-            osc.string_pick        = canonical_float(osc.string_pick);
-            osc.string_brightness  = canonical_float(osc.string_brightness);
+            Synth::Oscillator& osc         = instr.layers[l];
+            osc.mod_ratio                  = canonical_float(osc.mod_ratio);
+            osc.string_pick                = canonical_float(osc.string_pick);
+            osc.string_brightness          = canonical_float(osc.string_brightness);
+            osc.string_dispersion          = canonical_float(osc.string_dispersion);
+            osc.string_dispersion_sections = canonical_float(osc.string_dispersion_sections);
             for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
                 Synth::TargetBinding& binding = osc.targets[t];
                 binding.lfo_depth             = canonical_float(binding.lfo_depth);
@@ -4471,6 +4511,8 @@ static void decode_layer_doc(Walker&                     w,
     bool                    fm_ratio_set                        = false;
     float                   string_pick                         = 0.0f;
     float                   string_brightness                   = 1.0f;
+    float                   string_dispersion                   = 0.0f;
+    float                   string_dispersion_sections          = 4.0f;
     bool                    doc_slope_routed                    = false;
     uint32_t                doc_band_count                      = 1;
     bool                    doc_touched[Synth::num_mod_targets] = {};
@@ -4492,6 +4534,10 @@ static void decode_layer_doc(Walker&                     w,
             want_bounded_real(w, val_idx, 0.0, 1.0, &string_pick);
         else if (key_eq(w, key_idx, "string_brightness"))
             want_bounded_real(w, val_idx, 0.0, 1.0, &string_brightness);
+        else if (key_eq(w, key_idx, "string_dispersion"))
+            want_bounded_real(w, val_idx, 0.0, 1.0, &string_dispersion);
+        else if (key_eq(w, key_idx, "string_dispersion_sections"))
+            want_dispersion_sections(w, val_idx, &string_dispersion_sections);
         else if (key_eq(w, key_idx, "mode"))
             want_enum(w, val_idx, osc_mode_names, num_osc_modes, &mode);
         else if (key_eq(w, key_idx, "mod_ratio"))
@@ -4588,12 +4634,14 @@ static void decode_layer_doc(Walker&                     w,
         return;
     }
 
-    osc.osc_type[0]       = static_cast<Synth::WaveType>(wave_a);
-    osc.osc_type[1]       = static_cast<Synth::WaveType>(wave_b);
-    osc.osc_mode          = static_cast<Synth::OscMode>(mode);
-    osc.mod_ratio         = mod_ratio;
-    osc.string_pick       = string_pick;
-    osc.string_brightness = string_brightness;
+    osc.osc_type[0]                = static_cast<Synth::WaveType>(wave_a);
+    osc.osc_type[1]                = static_cast<Synth::WaveType>(wave_b);
+    osc.osc_mode                   = static_cast<Synth::OscMode>(mode);
+    osc.mod_ratio                  = mod_ratio;
+    osc.string_pick                = string_pick;
+    osc.string_brightness          = string_brightness;
+    osc.string_dispersion          = string_dispersion;
+    osc.string_dispersion_sections = string_dispersion_sections;
     // Legacy documents state only the scalar ratio; when the document has
     // no fm_ratio block the target inherits it, clamped to the slider
     // range when nonzero (0 stays 0).
@@ -5284,6 +5332,7 @@ static uint32_t encode_instrument_json_for_domain(char*                         
         if (osc.string_brightness != 1.0f) {
             key_float(o, "string_brightness", osc.string_brightness);
         }
+        key_dispersion(o, osc);
         o.key("octave_offset");
         o.float_value(static_cast<float>(osc.octave_offset));
         // The FIR Slope target block shares the scalar's key, so the two never appear

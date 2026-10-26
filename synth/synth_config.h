@@ -54,7 +54,7 @@ constexpr uint32_t rt_step_samples = 256;
 constexpr uint32_t max_oscillators = 64;
 
 // Device bytes feeding the synth: effect state, oscillator FIR buffers, per-step outputs.
-// Floats of string wave state per oscillator slot: 8 header floats + the 2040-float ring (loop delays
+// Floats of string wave state per oscillator slot: 14 header floats + the 2034-float ring (loop delays
 // down to 22 Hz).
 constexpr uint32_t string_state_floats = 2048;
 // 2 MiB of effect state plus one string state region (8192 bytes) for each of oscillator slots

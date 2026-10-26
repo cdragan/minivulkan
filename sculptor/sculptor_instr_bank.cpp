@@ -302,6 +302,17 @@ static bool validate_oscillator_body(const Synth::Oscillator& osc)
     if (! (osc.string_brightness >= 0.0f && osc.string_brightness <= 1.0f)) {
         return false;
     }
+    // Dispersion is a plain scalar in [0,1] too.
+    if (! (osc.string_dispersion >= 0.0f && osc.string_dispersion <= 1.0f)) {
+        return false;
+    }
+    // The section count is an integer value in [1,6] whatever the dispersion, so the codec contract holds for every
+    // bank.  The comparison also refuses NaN.
+    if (! (osc.string_dispersion_sections >= 1.0f && osc.string_dispersion_sections <= 6.0f &&
+           osc.string_dispersion_sections ==
+               static_cast<float>(static_cast<uint32_t>(osc.string_dispersion_sections)))) {
+        return false;
+    }
 
     for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
         const Synth::TargetBinding& binding = osc.targets[target];

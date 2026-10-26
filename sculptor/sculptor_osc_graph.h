@@ -79,7 +79,7 @@ static_assert(Synth::graph_canonical_input_node_count + 2 + Synth::max_layers +
 // LFO instance key up to two source edges into its depth/rate inputs.
 static_assert(Synth::max_layers + 6 * Synth::max_layers * Synth::num_mod_targets <= max_connections);
 
-// Oscillator node slot grammar: 35 fixed slots (oscillator properties,
+// Oscillator node slot grammar: 37 fixed slots (oscillator properties,
 // the FIR slope and filter type properties, and target value rows, order
 // pinned by osc_target_row_slot below),
 // and every ModTarget owns one 12-slot modulation block directly after
@@ -92,20 +92,18 @@ static_assert(Synth::max_layers + 6 * Synth::max_layers * Synth::num_mod_targets
 // (target, row): the LFO row groups 3*t + 1, the source rows 3*t + 2 and 3*t + 3, the envelope row 3*t + 4; the fixed
 // slots own their lines (group 0). Four value rows nest as children of a
 // parent row: duty and pad tone under their waveform rows, plus Pick position,
-// Pluck Brightness, Damping and Release Damping under waveform a, waveform mix /
-// fm depth / fm ratio under mix mode, octave offset under
-// pitch, and the band header rows and the band parameter rows under
-// filter type. A nested row's whole modulation block shifts one tree
-// level deeper.
-constexpr uint32_t osc_slot_count          = 35;
+// Pluck Brightness, String Dispersion, Dispersion Sections, Damping and Release Damping under waveform a, waveform mix
+// / fm depth / fm ratio under mix mode, octave offset under pitch, and the band header rows and the band parameter rows
+// under filter type. A nested row's whole modulation block shifts one tree level deeper.
+constexpr uint32_t osc_slot_count          = 37;
 constexpr uint32_t osc_target_block_stride = 12;
 // One uniform block per existing band, directly after Filter Type (slot
-// 137; osc_slot_count is the legacy fixed-row additive constant, not the
+// 139; osc_slot_count is the legacy fixed-row additive constant, not the
 // fixed slot count): the "Band N" header label row, its [-] and [+] click
 // slots, then the band's four parameter rows each followed by a 12-slot
 // modulation block. Only the stored band count's blocks are projected, so
 // the projected slot count encodes the band count.
-constexpr uint32_t osc_band_first_slot = 138;
+constexpr uint32_t osc_band_first_slot = 140;
 // The Pick position row follows the pad tone a block, nested under Waveform A
 // like duty and pad tone, before Waveform B.  Damping and Release Damping
 // reuse the Duty A and Pad Tone A rows (slots 2 and 15, with their blocks)
@@ -114,9 +112,14 @@ constexpr uint32_t osc_band_first_slot = 138;
 constexpr uint32_t osc_pick_slot = 28;
 // The Pluck Brightness row directly follows the Pick position row and nests
 // the same way; it is a plain layer scalar in [0, 1] (1 = unfiltered burst).
-constexpr uint32_t osc_brightness_slot   = 29;
-constexpr uint32_t osc_band_max_bands    = 4;
-constexpr uint32_t osc_band_block_stride = 3u + 4u * (osc_target_block_stride + 1u);
+constexpr uint32_t osc_brightness_slot = 29;
+// The String Dispersion and Dispersion Sections rows directly follow Pluck Brightness and nest the
+// same way.  Dispersion is a plain layer scalar in [0, 1] (0 = off); the section count is an integer
+// stepper 1..6, ignored while dispersion is 0.  Neither row is connectible.
+constexpr uint32_t osc_dispersion_slot          = 30;
+constexpr uint32_t osc_dispersion_sections_slot = 31;
+constexpr uint32_t osc_band_max_bands           = 4;
+constexpr uint32_t osc_band_block_stride        = 3u + 4u * (osc_target_block_stride + 1u);
 
 // First slot of band `band`'s block (0-based): the header label; the
 // [-] and [+] click slots follow at +1 and +2.
@@ -140,32 +143,32 @@ constexpr uint8_t osc_band_block_level = 3;
 // properties, and the rows after an earlier target's block shift down
 // by that block.  Indexed by ModTarget.
 constexpr uint32_t osc_target_row_slot[Synth::num_mod_targets] = {
-    97,  // volume
-    123, // pitch
-    110, // pan
+    99,  // volume
+    125, // pitch
+    112, // pan
     2,   // duty a
-    31,  // duty b
-    58,  // waveform mix
-    71,  // fm depth
-    154, // fir pitch spread (band 0 Spread row)
-    84,  // fm ratio
+    33,  // duty b
+    60,  // waveform mix
+    73,  // fm depth
+    156, // fir pitch spread (band 0 Spread row)
+    86,  // fm ratio
     15,  // pad tone a
-    44,  // pad tone b
-    180, // fir slope
-    141, // fir band 0 offset
-    167, // fir band 0 gain
-    196, // fir band 1 offset
-    209, // fir band 1 spread
-    222, // fir band 1 gain
-    235, // fir band 1 slope
-    251, // fir band 2 offset
-    264, // fir band 2 spread
-    277, // fir band 2 gain
-    290, // fir band 2 slope
-    306, // fir band 3 offset
-    319, // fir band 3 spread
-    332, // fir band 3 gain
-    345, // fir band 3 slope
+    46,  // pad tone b
+    182, // fir slope
+    143, // fir band 0 offset
+    169, // fir band 0 gain
+    198, // fir band 1 offset
+    211, // fir band 1 spread
+    224, // fir band 1 gain
+    237, // fir band 1 slope
+    253, // fir band 2 offset
+    266, // fir band 2 spread
+    279, // fir band 2 gain
+    292, // fir band 2 slope
+    308, // fir band 3 offset
+    321, // fir band 3 spread
+    334, // fir band 3 gain
+    347, // fir band 3 slope
     2,   // damping
     15,  // release damping
 };
@@ -218,7 +221,10 @@ static_assert(osc_target_row_slot[Synth::mod_string_damping] == osc_target_row_s
 static_assert(osc_target_row_slot[Synth::mod_string_release_damping] == osc_target_row_slot[Synth::mod_pad_tilt0]);
 static_assert(osc_pick_slot == osc_target_row_slot[Synth::mod_pad_tilt0] + osc_target_block_stride + 1u);
 static_assert(osc_brightness_slot == osc_pick_slot + 1u);
-static_assert(osc_brightness_slot + 1u < osc_target_row_slot[Synth::mod_duty1]);
+static_assert(osc_dispersion_slot == osc_brightness_slot + 1u);
+static_assert(osc_dispersion_sections_slot == osc_dispersion_slot + 1u);
+static_assert(osc_dispersion_sections_slot + 1u < osc_target_row_slot[Synth::mod_duty1]);
+static_assert(osc_band_header_slot(osc_band_max_bands - 1u) + osc_band_block_stride == max_node_slots);
 static_assert(osc_target_row_slot[Synth::mod_pad_tilt1] + osc_target_block_stride <
               osc_target_row_slot[Synth::mod_osc_mix]);
 static_assert(osc_target_row_slot[Synth::mod_fm_ratio] + osc_target_block_stride <

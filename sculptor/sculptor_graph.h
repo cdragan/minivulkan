@@ -100,13 +100,14 @@ extern const char* const lfo_wave_names[2];
 extern const char* const lfo_sync_names[6];
 extern const char* const lfo_start_names[3];
 
-// Sized for the widest projected node - the oscillator: 35 fixed slots
-// plus Filter Type and the Pick position and Pluck Brightness rows (string damping reuses the duty/pad tone rows), then
-// one uniform block per existing band (the "Band N" header label, its [-]/[+] click slots, and four parameter rows each
-// followed by a 12-slot modulation block; 55 slots per band, up to four bands). The high-water mark is band 4's last
-// block slot at 357, so 358 slots. The widest effect (a 5-param effect's 3 + 5*10 = 53 slots) is well under it. Slot
-// carries list_options[8][32], so a larger cap would balloon every Node allocation.
-constexpr uint32_t max_node_slots = 358;
+// Sized for the widest projected node - the oscillator: 37 fixed slots
+// plus Filter Type and the Pick position, Pluck Brightness, String Dispersion and Dispersion Sections rows (string
+// damping reuses the duty/pad tone rows), then one uniform block per existing band (the "Band N" header label, its
+// [-]/[+] click slots, and four parameter rows each followed by a 12-slot modulation block; 55 slots per band, up to
+// four bands). The high-water mark is band 4's last block slot at 359, so 360 slots. The widest effect (a 5-param
+// effect's 3 + 5*10 = 53 slots) is well under it. Slot carries list_options[8][32], so a larger cap would balloon every
+// Node allocation.
+constexpr uint32_t max_node_slots = 360;
 
 // One row label together with its hover text; the tooltip may be null.
 struct LabelTooltip {

@@ -374,13 +374,15 @@ struct ShaderParams {
         uint32_t fir_memory_offs;
         uint32_t taps_offs;
         uint32_t noise_counter;
-        uint32_t note_seed;              // Per-note constant: the note-on noise counter, never advanced
-        float    pad_tilt[2];            // Pad spectral tilt; harmonic exponent is 1 + clamp(tilt, -1, 1).
-        uint32_t string_state_offs;      // String state region in floats: header, then ring
-        float    string_pick;            // String pick position 0..1, used by the note-on excitation
-        float    string_damping;         // String damping 0..1, higher = shorter decay
-        float    string_release_damping; // String release damping 0..1
-        float    string_brightness;      // String pluck brightness 0..1, used by the note-on excitation
+        uint32_t note_seed;                  // Per-note constant: the note-on noise counter, never advanced
+        float    pad_tilt[2];                // Pad spectral tilt; harmonic exponent is 1 + clamp(tilt, -1, 1).
+        uint32_t string_state_offs;          // String state region in floats: header, then ring
+        float    string_pick;                // String pick position 0..1, used by the note-on excitation
+        float    string_damping;             // String damping 0..1, higher = shorter decay
+        float    string_release_damping;     // String release damping 0..1
+        float    string_brightness;          // String pluck brightness 0..1, used by the note-on excitation
+        float    string_dispersion;          // String dispersion 0..1, 0 = off
+        float    string_dispersion_sections; // String dispersion allpass section count 1..6
     };
 
     // synth_chan_combine shader (binding 0); the master-mix pass reuses the
@@ -416,7 +418,7 @@ struct ShaderParams {
         uint32_t in_sound_offs;
     };
 
-    static_assert(sizeof(Oscillator) == 88);
+    static_assert(sizeof(Oscillator) == 96);
 
     static constexpr uint32_t max_param_range = sizeof(Oscillator) * 256;
 };
@@ -583,22 +585,24 @@ struct RunningOscillator {
 
     // Resolved values written by update_modulation each step, read by the
     // shader-param fill.
-    float    volume;                 // Current volume
-    float    panning;                // Current panning
-    float    pitch;                  // Absolute equivalent MIDI pitch (69 = A4), resolved by update_modulation from
-                                     // note + octave offset + pitch offset/skews + the modulated pitch target value
-    float    spread;                 // FIR Pitch Spread in semitones, from the spread target's dest
-                                     // node; <= 0 means the oscillator's FIR is off
-    float    fir_slope;              // FIR window slope percent, from the slope target's dest node
-    float    duty[2];                // Duty cycle for sawtooth and pulse oscillator (0..1)
-    float    pad_tilt[2];            // Pad spectral tilt; harmonic exponent is 1 + clamp(tilt, -1, 1).
-    float    string_pick;            // String pick position, copied from the layer at note-on
-    float    string_damping;         // String damping 0..1, resolved each step
-    float    string_release_damping; // String release damping 0..1, resolved each step
-    float    string_brightness;      // String pluck brightness 0..1, copied from the layer at note-on
-    uint32_t string_state_offs;      // String state region offset in bytes, fixed per slot
-    float    osc_mix;                // Mix between osc_type[0] and osc_type[1] (0..1)
-    float    fm_index;               // FM modulation depth
+    float    volume;                     // Current volume
+    float    panning;                    // Current panning
+    float    pitch;                      // Absolute equivalent MIDI pitch (69 = A4), resolved by update_modulation from
+                                         // note + octave offset + pitch offset/skews + the modulated pitch target value
+    float    spread;                     // FIR Pitch Spread in semitones, from the spread target's dest
+                                         // node; <= 0 means the oscillator's FIR is off
+    float    fir_slope;                  // FIR window slope percent, from the slope target's dest node
+    float    duty[2];                    // Duty cycle for sawtooth and pulse oscillator (0..1)
+    float    pad_tilt[2];                // Pad spectral tilt; harmonic exponent is 1 + clamp(tilt, -1, 1).
+    float    string_pick;                // String pick position, copied from the layer at note-on
+    float    string_damping;             // String damping 0..1, resolved each step
+    float    string_release_damping;     // String release damping 0..1, resolved each step
+    float    string_brightness;          // String pluck brightness 0..1, copied from the layer at note-on
+    float    string_dispersion;          // String dispersion 0..1, copied from the layer at note-on
+    float    string_dispersion_sections; // String dispersion section count 1..6, copied at note-on
+    uint32_t string_state_offs;          // String state region offset in bytes, fixed per slot
+    float    osc_mix;                    // Mix between osc_type[0] and osc_type[1] (0..1)
+    float    fm_index;                   // FM modulation depth
 
     // Multi-band bandpass state, refreshed by update_modulation each step.
     // Band 0 mirrors the legacy spread/slope fields above, so its kernel math
@@ -1515,15 +1519,17 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         osc.note               = note;
         osc.freq_mult          = 1;
 
-        const Oscillator& layer = instrument.layers[layer_idx];
-        osc.osc_type[0]         = layer.osc_type[0];
-        osc.osc_type[1]         = layer.osc_type[1];
-        osc.osc_mode            = layer.osc_mode;
-        osc.mod_ratio           = layer.mod_ratio;
-        osc.string_pick         = layer.string_pick;
-        osc.string_brightness   = layer.string_brightness;
-        osc.octave_offset       = layer.octave_offset;
-        osc.fir_type            = layer.fir_type;
+        const Oscillator& layer        = instrument.layers[layer_idx];
+        osc.osc_type[0]                = layer.osc_type[0];
+        osc.osc_type[1]                = layer.osc_type[1];
+        osc.osc_mode                   = layer.osc_mode;
+        osc.mod_ratio                  = layer.mod_ratio;
+        osc.string_pick                = layer.string_pick;
+        osc.string_brightness          = layer.string_brightness;
+        osc.string_dispersion          = layer.string_dispersion;
+        osc.string_dispersion_sections = layer.string_dispersion_sections;
+        osc.octave_offset              = layer.octave_offset;
+        osc.fir_type                   = layer.fir_type;
         osc.fir_band_count = layer.fir_type == Synth::fir_bandpass ? (layer.fir_band_count < 1   ? 1
                                                                       : layer.fir_band_count > 4 ? 4
                                                                                                  : layer.fir_band_count)
@@ -2593,16 +2599,18 @@ static void render_audio_step()
         // The cached engagement flag gates the shader: an inactive filter
         // passes through (taps offset 0), an all-zero-gain bandpass keeps
         // reading its staged zeroed kernel (silence).
-        param.taps_offs              = oscillator.fir_active ? oscillator.fir_taps_offs / 4 : 0;
-        param.noise_counter          = oscillator.noise_counter;
-        param.note_seed              = oscillator.note_seed;
-        param.pad_tilt[0]            = oscillator.pad_tilt[0];
-        param.pad_tilt[1]            = oscillator.pad_tilt[1];
-        param.string_state_offs      = oscillator.string_state_offs / 4;
-        param.string_pick            = oscillator.string_pick;
-        param.string_damping         = oscillator.string_damping;
-        param.string_release_damping = oscillator.string_release_damping;
-        param.string_brightness      = oscillator.string_brightness;
+        param.taps_offs                  = oscillator.fir_active ? oscillator.fir_taps_offs / 4 : 0;
+        param.noise_counter              = oscillator.noise_counter;
+        param.note_seed                  = oscillator.note_seed;
+        param.pad_tilt[0]                = oscillator.pad_tilt[0];
+        param.pad_tilt[1]                = oscillator.pad_tilt[1];
+        param.string_state_offs          = oscillator.string_state_offs / 4;
+        param.string_pick                = oscillator.string_pick;
+        param.string_damping             = oscillator.string_damping;
+        param.string_release_damping     = oscillator.string_release_damping;
+        param.string_brightness          = oscillator.string_brightness;
+        param.string_dispersion          = oscillator.string_dispersion;
+        param.string_dispersion_sections = oscillator.string_dispersion_sections;
 
         // Wrap the phases so float precision does not degrade on long notes.
         oscillator.phase += phase_step;

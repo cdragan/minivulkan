@@ -893,6 +893,17 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                             }
                             else {
                                 value_edited = ImGui::InputInt("##value", &node.slots.entries[slot_idx].value.integer);
+                                // An unbounded integer with a nonempty range is a stepper: clamp-on-edit keeps it
+                                // inside [real_min, real_max].
+                                int32_t& edited_integer = node.slots.entries[slot_idx].value.integer;
+                                if (value_edited && slot.real_min < slot.real_max) {
+                                    if (edited_integer < static_cast<int32_t>(slot.real_min)) {
+                                        edited_integer = static_cast<int32_t>(slot.real_min);
+                                    }
+                                    if (edited_integer > static_cast<int32_t>(slot.real_max)) {
+                                        edited_integer = static_cast<int32_t>(slot.real_max);
+                                    }
+                                }
                             }
                             item_submitted = true;
                             break;

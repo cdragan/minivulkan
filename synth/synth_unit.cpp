@@ -167,32 +167,32 @@ constexpr uint32_t t7_rate_field      = 5;
 // The value row slot of each ModTarget on an oscillator node; its
 // 12-slot block starts directly after it.
 constexpr uint32_t t7_target_row_slots[Synth::num_mod_targets] = {
-    97,  // volume
-    123, // pitch
-    110, // pan
+    99,  // volume
+    125, // pitch
+    112, // pan
     2,   // duty a
-    31,  // duty b
-    58,  // waveform mix
-    71,  // fm depth
-    154, // fir pitch spread
-    84,  // fm ratio
+    33,  // duty b
+    60,  // waveform mix
+    73,  // fm depth
+    156, // fir pitch spread
+    86,  // fm ratio
     15,  // pad tone a
-    44,  // pad tone b
-    180, // fir slope
-    141, // fir band 0 offset
-    167, // fir band 0 gain
-    196, // fir band 1 offset
-    209, // fir band 1 spread
-    222, // fir band 1 gain
-    235, // fir band 1 slope
-    251, // fir band 2 offset
-    264, // fir band 2 spread
-    277, // fir band 2 gain
-    290, // fir band 2 slope
-    306, // fir band 3 offset
-    319, // fir band 3 spread
-    332, // fir band 3 gain
-    345, // fir band 3 slope
+    46,  // pad tone b
+    182, // fir slope
+    143, // fir band 0 offset
+    169, // fir band 0 gain
+    198, // fir band 1 offset
+    211, // fir band 1 spread
+    224, // fir band 1 gain
+    237, // fir band 1 slope
+    253, // fir band 2 offset
+    266, // fir band 2 spread
+    279, // fir band 2 gain
+    292, // fir band 2 slope
+    308, // fir band 3 offset
+    321, // fir band 3 spread
+    334, // fir band 3 gain
+    347, // fir band 3 slope
     2,   // damping
     15,  // release damping
 };
@@ -213,8 +213,9 @@ static bool t7_target_has_row(const Synth::Oscillator& osc, uint32_t t)
 const std::unique_ptr<Sculptor::Graph> t7_graph_storage = std::make_unique<Sculptor::Graph>();
 Sculptor::Graph&                       t7_graph         = *t7_graph_storage;
 Sculptor::OscGraphMapping              t7_mapping;
-constexpr float                        string_fs        = 44100.0f;
-constexpr uint32_t                     string_ring_size = 2040;
+constexpr float                        string_fs           = 44100.0f;
+constexpr uint32_t                     string_ring_size    = 2034;
+constexpr uint32_t                     string_max_sections = 6;
 
 struct StringScalars {
     float    c;
@@ -223,11 +224,15 @@ struct StringScalars {
     float    gr;
     uint32_t n;
     bool     silent;
+    float    disp_a;
+    uint32_t num_sections;
+    float    disp_delay;
 };
 
 struct StringMirror {
     bool     tagged; // Models shader header words 5-6: set when the first in-range pass inits
     uint32_t tag;
+    float    ds[string_max_sections];
     float    ring[string_ring_size];
     uint32_t wr;
     float    t1;
@@ -574,6 +579,15 @@ static void zero_dormant_layers(Synth::Instrument& instrument)
     }
 }
 
+// Zeroed instrument memory carries no dispersion section count; the validator requires an integer 1..6, so
+// fixtures that build instruments from raw memory restore the default four.
+static void set_default_dispersion_sections(Synth::Instrument& instrument)
+{
+    for (uint32_t layer = 0; layer < Synth::max_layers; ++layer) {
+        instrument.layers[layer].string_dispersion_sections = 4.0f;
+    }
+}
+
 // Round-trip uniformity: an instrument whose live layers all carry the same
 // routing (as the editor's fanned-out fixtures do) decodes with that routing
 // intact on every live layer; decode itself no longer fans anything out.
@@ -833,15 +847,17 @@ static void build_small_bank_fixture(Synth::InstrumentBank& bank)
 {
     memset(static_cast<void*>(&bank), 0, sizeof(bank));
     Synth::init_default_bank(&bank);
-    const uint32_t env                                          = bank.envelopes.allocate();
-    bank.envelopes.entries[env].num_points                      = 2;
-    bank.envelopes.entries[env].points[1].position              = 100;
-    const uint32_t lfo                                          = bank.lfos.allocate();
-    bank.lfos.entries[lfo].wave                                 = Synth::WaveType::sine_wave;
-    bank.lfos.entries[lfo].period_ms                            = 50;
-    const uint32_t instr                                        = bank.instruments.allocate();
-    bank.instruments.entries[instr].layer_count                 = 1;
-    bank.instruments.entries[instr].layers[0].fir_slope_percent = 100;
+    const uint32_t env                             = bank.envelopes.allocate();
+    bank.envelopes.entries[env].num_points         = 2;
+    bank.envelopes.entries[env].points[1].position = 100;
+    const uint32_t lfo                             = bank.lfos.allocate();
+    bank.lfos.entries[lfo].wave                    = Synth::WaveType::sine_wave;
+    bank.lfos.entries[lfo].period_ms               = 50;
+    const uint32_t instr                           = bank.instruments.allocate();
+    bank.instruments.entries[instr].layer_count    = 1;
+    set_default_dispersion_sections(bank.instruments.entries[instr]);
+    bank.instruments.entries[instr].layers[0].fir_slope_percent          = 100;
+    bank.instruments.entries[instr].layers[0].string_dispersion_sections = 4.0f;
     bank.instruments.entries[instr].layers[0].targets[Synth::mod_volume].envelope_desc_id =
         static_cast<uint16_t>(env + 1);
     bank.instruments.entries[instr].layers[0].targets[Synth::mod_pitch].lfo_desc_id = static_cast<uint16_t>(lfo + 1);
@@ -2132,11 +2148,12 @@ static void check_osc_add_lowest_free_slot()
         TEST(disconnect_osc_sum_slot(&bank, graph, mapping, 1));
         const uint32_t slot = Sculptor::osc_lowest_free_slot(bank.graph_osc_source[0][0]);
         TEST(slot == 1);
-        Synth::Instrument& editor         = bank.bank.instruments.entries[0];
-        Synth::Oscillator  fresh          = {};
-        fresh.osc_type[0]                 = Synth::WaveType::sine_wave;
-        editor.layers[3]                  = fresh;
-        editor.layer_count                = 4;
+        Synth::Instrument& editor = bank.bank.instruments.entries[0];
+        Synth::Oscillator  fresh  = {};
+        fresh.osc_type[0]         = Synth::WaveType::sine_wave;
+        editor.layers[3]          = fresh;
+        editor.layer_count        = 4;
+        set_default_dispersion_sections(editor);
         bank.graph_osc_source[0][0][slot] = 4;
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping, 0, 0));
         (void)graph.take_changes(discard, Sculptor::max_pending_changes);
@@ -2160,11 +2177,12 @@ static void check_osc_add_lowest_free_slot()
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping, 0, 0));
         const uint32_t slot = Sculptor::osc_lowest_free_slot(bank.graph_osc_source[0][0]);
         TEST(slot == 2);
-        Synth::Instrument& editor         = bank.bank.instruments.entries[0];
-        Synth::Oscillator  fresh          = {};
-        fresh.osc_type[0]                 = Synth::WaveType::sine_wave;
-        editor.layers[3]                  = fresh;
-        editor.layer_count                = 4;
+        Synth::Instrument& editor = bank.bank.instruments.entries[0];
+        Synth::Oscillator  fresh  = {};
+        fresh.osc_type[0]         = Synth::WaveType::sine_wave;
+        editor.layers[3]          = fresh;
+        editor.layer_count        = 4;
+        set_default_dispersion_sections(editor);
         bank.graph_osc_source[0][0][slot] = 4;
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping, 0, 0));
         TEST(find_osc_graph_connection(graph, { mapping.output_node, mapping.output_layer_input_slot[2] }) !=
@@ -2181,6 +2199,7 @@ static void check_osc_add_lowest_free_slot()
         Sculptor::set_identity_osc_sources(&bank, 0, 0);
         Synth::Instrument& editor = bank.bank.instruments.entries[0];
         editor.layer_count        = Synth::max_layers;
+        set_default_dispersion_sections(editor);
         Sculptor::set_identity_osc_sources(&bank, 0, 0);
         TEST(Sculptor::osc_lowest_free_slot(bank.graph_osc_source[0][0]) == Sculptor::pool_no_slot);
     }
@@ -2508,8 +2527,9 @@ static void check_osc_clipboard_preserves_unwired()
     paste.bank.channel_zones[0][1].start_note = 61;
     const uint32_t small_slot                 = paste.bank.instruments.allocate();
     TEST(small_slot != pool_no_slot);
-    Synth::Instrument small_instr              = {};
-    small_instr.layer_count                    = 1;
+    Synth::Instrument small_instr = {};
+    small_instr.layer_count       = 1;
+    set_default_dispersion_sections(small_instr);
     small_instr.layers[0].osc_type[0]          = Synth::WaveType::sine_wave;
     paste.bank.instruments.entries[small_slot] = small_instr;
     paste.bank.channel_zones[0][1].instrument  = static_cast<uint8_t>(small_slot);
@@ -3265,10 +3285,10 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
     const Sculptor::Node& sum = graph.node(mapping.output_node);
     TEST(sum.position.x == 600 && sum.position.y == -450);
     TEST(sum.content_width_override == 360 && sum.content_height_override == 270);
-    const uint32_t          wave_b_slot   = 30; // waveform b, layout contract
-    const uint32_t          mode_slot     = 57; // mix mode, layout contract
+    const uint32_t          wave_b_slot   = 32; // waveform b, layout contract
+    const uint32_t          mode_slot     = 59; // mix mode, layout contract
     const uint32_t          fm_depth_slot = Sculptor::osc_target_row(Synth::mod_fm_index);
-    const uint32_t          fm_ratio_slot = 84; // fm ratio, layout contract
+    const uint32_t          fm_ratio_slot = 86; // fm ratio, layout contract
     Sculptor::PropertyValue wave          = {};
     wave.list_index                       = 0;
     graph.set_slot_value(mapping.osc_nodes[0], wave_b_slot, wave);
@@ -3300,6 +3320,7 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
         for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
             const bool gated =
                 row == Sculptor::osc_pick_slot || row == Sculptor::osc_brightness_slot ||
+                row == Sculptor::osc_dispersion_slot || row == Sculptor::osc_dispersion_sections_slot ||
                 row == Sculptor::osc_target_row(Synth::mod_duty1) || row == mode_slot ||
                 row == Sculptor::osc_target_row(Synth::mod_osc_mix) || row == fm_depth_slot || row == fm_ratio_slot ||
                 (tone_a_gated && row >= tone0 && row <= tone0 + Sculptor::osc_target_block_stride) ||
@@ -3324,6 +3345,7 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
         const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
         for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
             const bool gated = row == Sculptor::osc_pick_slot || row == Sculptor::osc_brightness_slot ||
+                               row == Sculptor::osc_dispersion_slot || row == Sculptor::osc_dispersion_sections_slot ||
                                (row >= duty1_row && row <= duty1_row + Sculptor::osc_target_block_stride) ||
                                (row >= tone0 && row <= tone0 + Sculptor::osc_target_block_stride) ||
                                (row >= tone1 && row <= tone1 + Sculptor::osc_target_block_stride) || row == mix_row ||
@@ -3344,6 +3366,7 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
         const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
         for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
             const bool gated = row == Sculptor::osc_pick_slot || row == Sculptor::osc_brightness_slot ||
+                               row == Sculptor::osc_dispersion_slot || row == Sculptor::osc_dispersion_sections_slot ||
                                (row >= tone_b_row && row <= tone_b_row + Sculptor::osc_target_block_stride) ||
                                row == Sculptor::osc_target_row(Synth::mod_duty1) || row == mode_slot ||
                                row == Sculptor::osc_target_row(Synth::mod_osc_mix) || row == fm_depth_slot ||
@@ -3362,6 +3385,7 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
         const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
         for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
             const bool gated = row == Sculptor::osc_pick_slot || row == Sculptor::osc_brightness_slot ||
+                               row == Sculptor::osc_dispersion_slot || row == Sculptor::osc_dispersion_sections_slot ||
                                (row >= spread_row && row <= Sculptor::osc_target_row(Synth::mod_fir_slope) +
                                                                 Sculptor::osc_target_block_stride) ||
                                row == Sculptor::osc_target_row(Synth::mod_osc_mix);
@@ -3378,6 +3402,7 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
         const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
         for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
             const bool gated = row == Sculptor::osc_pick_slot || row == Sculptor::osc_brightness_slot ||
+                               row == Sculptor::osc_dispersion_slot || row == Sculptor::osc_dispersion_sections_slot ||
                                (row >= duty0_row && row <= duty0_row + Sculptor::osc_target_block_stride) ||
                                (row >= tone0 && row <= tone0 + Sculptor::osc_target_block_stride) || row == mix_row ||
                                (row >= spread_row && row <= Sculptor::osc_target_row(Synth::mod_fir_slope) +
@@ -3771,8 +3796,9 @@ static void check_identical_envelopes_library_round_trips()
     TEST(second_env != pool_no_slot);
     source.bank.envelopes.entries[second_env] = env;
 
-    Synth::Instrument instrument                                     = {};
-    instrument.layer_count                                           = 2;
+    Synth::Instrument instrument = {};
+    instrument.layer_count       = 2;
+    set_default_dispersion_sections(instrument);
     instrument.layers[0].osc_type[0]                                 = Synth::WaveType::sawtooth_wave;
     instrument.layers[1].osc_type[0]                                 = Synth::WaveType::sawtooth_wave;
     instrument.layers[0].targets[Synth::mod_volume].envelope_desc_id = 1;
@@ -3879,8 +3905,9 @@ static void check_fragmented_pool_ids_library_round_trips()
     // Two zones with two instruments: each zone's volume target carries its
     // own envelope plus the shared LFO, and one detached record per generator
     // rides along so the save must remap both kind-1 and kind-2 records.
-    Synth::Instrument instrument                                     = {};
-    instrument.layer_count                                           = 1;
+    Synth::Instrument instrument = {};
+    instrument.layer_count       = 1;
+    set_default_dispersion_sections(instrument);
     instrument.layers[0].osc_type[0]                                 = Synth::WaveType::sawtooth_wave;
     instrument.layers[0].targets[Synth::mod_volume].envelope_desc_id = 4;
     instrument.layers[0].targets[Synth::mod_volume].lfo_desc_id      = 3;
@@ -4052,7 +4079,7 @@ static void check_zero_fm_clipboard_library_round_trips()
                     TEST(instr.layers[l].osc_mode == (active ? Synth::osc_mode_fm : Synth::osc_mode_blend));
                     const Sculptor::Node& node = graph.node(mapping.osc_nodes[l]);
                     TEST(node.slots.entries[Sculptor::osc_target_row(Synth::mod_fm_index)].value.real == depth);
-                    TEST(node.slots.entries[84].value.real == ratio); // fm ratio, layout contract
+                    TEST(node.slots.entries[86].value.real == ratio); // fm ratio, layout contract
                     TEST(fm_widget_enabled(graph, mapping.osc_nodes[l]) == (active != 0));
                 }
             }
@@ -11893,7 +11920,8 @@ static void child_row_projection_regressions()
         // parents.
         const bool band_header = s >= Sculptor::osc_band_first_slot &&
                                  (s - Sculptor::osc_band_first_slot) % Sculptor::osc_band_block_stride == 0u;
-        child_row_expected     = child_row_expected || band_header || s == 28 || s == 29 || s == 136 || s == 180 ||
+        child_row_expected     = child_row_expected || band_header || s == 28 || s == 29 || s == 30 || s == 31 ||
+                                 s == 138 || s == 182 ||
                                  (s >= Sculptor::osc_band_first_slot + 3u &&
                                   s < Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride);
         TEST(osc.slots.entries[s].child_row == child_row_expected);
@@ -11968,11 +11996,13 @@ static void osc_layer_projection_regressions()
     instrument.layers[2].targets[Synth::mod_pitch].envelope_desc_id  = 1;
     instrument.layers[2].fir_slope_percent                           = 37;
     instrument.layer_count                                           = 3;
+    set_default_dispersion_sections(instrument);
 
     const Synth::Oscillator appended = instrument.layers[2];
     Synth::Instrument&      entry    = source.bank.instruments.entries[0];
     entry.layers[3]                  = appended;
     entry.layer_count                = 4;
+    set_default_dispersion_sections(entry);
     Sculptor::set_identity_osc_sources(&source, 0, 0);
 
     TEST(Synth::validate_instrument_bank(&source.bank));
@@ -12222,10 +12252,10 @@ static void osc_direct_modulator_regressions()
             // the widened slot count.  Wave B starts off and the mode starts
             // on blend, so the duty b / mix mode / waveform mix / fm depth / fm
             // ratio rows plus both pad tone families are disabled and nothing else is.
-            const uint32_t wave_b_slot    = 30; // waveform b, layout contract
-            const uint32_t mode_slot      = 57; // mix mode, layout contract
+            const uint32_t wave_b_slot    = 32; // waveform b, layout contract
+            const uint32_t mode_slot      = 59; // mix mode, layout contract
             const uint32_t fm_depth_slot  = Sculptor::osc_target_row(Synth::mod_fm_index);
-            const uint32_t fm_ratio_slot  = 84; // fm ratio, layout contract
+            const uint32_t fm_ratio_slot  = 86; // fm ratio, layout contract
             const uint32_t gated_slots[4] = { Sculptor::osc_target_row(Synth::mod_duty1),
                                               mode_slot,
                                               fm_depth_slot,
@@ -12587,6 +12617,7 @@ static void osc_direct_modulator_regressions()
         shared.lfo_rate_source         = Synth::ModSource::mod_wheel;
         shared.lfo_rate_scale_ms       = 20.0f;
         instrument.layer_count         = 3;
+        set_default_dispersion_sections(instrument);
         for (uint32_t layer = 0; layer < 3; layer++) {
             instrument.layers[layer].osc_type[0] = Synth::WaveType::sawtooth_wave;
         }
@@ -13257,6 +13288,7 @@ static void osc_direct_modulator_regressions()
         Synth::init_default_bank(&bank);
         instrument             = Synth::Instrument{};
         instrument.layer_count = Synth::max_layers;
+        set_default_dispersion_sections(instrument);
         for (uint32_t cell = 0; cell < Synth::max_layers * Synth::num_mod_targets; cell++) {
             const uint32_t layer    = cell / Synth::num_mod_targets;
             const uint32_t target   = cell % Synth::num_mod_targets;
@@ -13302,6 +13334,7 @@ static void osc_direct_modulator_regressions()
         memset(static_cast<void*>(&low_bank), 0, sizeof(low_bank));
         instrument             = Synth::Instrument{};
         instrument.layer_count = 1;
+        set_default_dispersion_sections(instrument);
         for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
             const uint32_t env_slot = low_bank.bank.envelopes.allocate();
             TEST(env_slot != pool_no_slot);
@@ -13884,9 +13917,10 @@ static void osc_cc_regressions()
         const uint32_t instr_slot = runtime_bank.instruments.allocate();
         TEST(instr_slot == 0);
         if (instr_slot == 0) {
-            Synth::Instrument&    cc_instr              = runtime_bank.instruments.entries[instr_slot];
-            Synth::TargetBinding& cc_volume             = cc_instr.layers[0].targets[Synth::mod_volume];
-            cc_instr.layer_count                        = 1;
+            Synth::Instrument&    cc_instr  = runtime_bank.instruments.entries[instr_slot];
+            Synth::TargetBinding& cc_volume = cc_instr.layers[0].targets[Synth::mod_volume];
+            cc_instr.layer_count            = 1;
+            set_default_dispersion_sections(cc_instr);
             cc_instr.layers[0].osc_type[0]              = Synth::WaveType::sine_wave;
             cc_volume.base_value                        = 0.8f;
             cc_volume.num_inputs                        = 1;
@@ -14105,7 +14139,8 @@ static void osc_fir_slope_projection_regressions()
     env.points[0]                  = { 0, 0x4000 };
     env.points[1]                  = { 200, 0x8000 };
 
-    instrument.layer_count                                              = 3;
+    instrument.layer_count = 3;
+    set_default_dispersion_sections(instrument);
     instrument.layers[0].osc_type[0]                                    = Synth::WaveType::sine_wave;
     instrument.layers[0].osc_type[1]                                    = Synth::WaveType::pulse_wave;
     instrument.layers[0].osc_mode                                       = Synth::osc_mode_blend;
@@ -14146,13 +14181,13 @@ static void osc_fir_slope_projection_regressions()
     const uint32_t expected_slots =
         Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride * instrument.layers[0].fir_band_count;
     TEST(osc.slots.num_allocated == expected_slots);
-    TEST(expected_slots == 193);
+    TEST(expected_slots == 195);
 
-    // Slot 180 is the connectable FIR Slope row.
-    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_slope] == 180);
-    TEST(Sculptor::osc_target_row(Synth::mod_fir_slope) == 180);
+    // Slot 182 is the connectable FIR Slope row.
+    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_slope] == 182);
+    TEST(Sculptor::osc_target_row(Synth::mod_fir_slope) == 182);
     {
-        const Sculptor::Slot& row = osc.slots.entries[180];
+        const Sculptor::Slot& row = osc.slots.entries[182];
         TEST(row.connectable);
         TEST(row.drop_menu);
         TEST(strncmp(row.name, "FIR Slope", sizeof(row.name)) == 0);
@@ -14160,31 +14195,31 @@ static void osc_fir_slope_projection_regressions()
     }
     // The block follows the row: the env dot at 181 and the source dots at
     // 187/190, all twelve slots allocated.
-    TEST(Sculptor::osc_target_env_dot(Synth::mod_fir_slope) == 181);
-    TEST(Sculptor::osc_target_src_dot(Synth::mod_fir_slope, 0) == 187);
-    TEST(Sculptor::osc_target_src_dot(Synth::mod_fir_slope, 1) == 190);
+    TEST(Sculptor::osc_target_env_dot(Synth::mod_fir_slope) == 183);
+    TEST(Sculptor::osc_target_src_dot(Synth::mod_fir_slope, 0) == 189);
+    TEST(Sculptor::osc_target_src_dot(Synth::mod_fir_slope, 1) == 192);
     {
-        const Sculptor::Slot& env_dot = osc.slots.entries[181];
+        const Sculptor::Slot& env_dot = osc.slots.entries[183];
         TEST(env_dot.kind == Sculptor::SlotKind::input);
         TEST(strncmp(env_dot.name, "Envelope", sizeof(env_dot.name)) == 0);
-        const Sculptor::Slot& src_a = osc.slots.entries[187];
+        const Sculptor::Slot& src_a = osc.slots.entries[189];
         TEST(src_a.kind == Sculptor::SlotKind::input);
         TEST(strncmp(src_a.name, "Source A Op", sizeof(src_a.name)) == 0);
-        const Sculptor::Slot& src_b = osc.slots.entries[190];
+        const Sculptor::Slot& src_b = osc.slots.entries[192];
         TEST(src_b.kind == Sculptor::SlotKind::input);
         TEST(strncmp(src_b.name, "Source B Op", sizeof(src_b.name)) == 0);
     }
     // No existing row shifted.
-    TEST(Sculptor::osc_target_row_slot[Synth::mod_volume] == 97);
-    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_spread] == 154);
+    TEST(Sculptor::osc_target_row_slot[Synth::mod_volume] == 99);
+    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_spread] == 156);
     // Literal budget pins: a future drift cannot pass silently.
     TEST(Sculptor::max_nodes == 402);
-    TEST(Sculptor::max_node_slots == 358);
+    TEST(Sculptor::max_node_slots == 360);
 
     // Disabled state matches the filter-off predicate: the fir-off layer
-    // grays the whole 154..192 range; the band-pass layers keep every slot
+    // grays the whole 156..194 range; the band-pass layers keep every slot
     // of the range active.
-    for (uint32_t s = 154; s <= 192; s++) {
+    for (uint32_t s = 156; s <= 194; s++) {
         TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(mapping.osc_nodes[1]), s));
         TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, s));
         TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(mapping.osc_nodes[2]), s));
@@ -14193,9 +14228,9 @@ static void osc_fir_slope_projection_regressions()
     // Display: a routed base wins over the scalar; a wired base of zero
     // clamps to 1 at the display boundary (the integer percent domain); a
     // zeroed binding shows the scalar, even with the filter off.
-    TEST(osc.slots.entries[180].value.integer == 64);
-    TEST(graph.node(mapping.osc_nodes[2]).slots.entries[180].value.integer == 1);
-    TEST(graph.node(mapping.osc_nodes[1]).slots.entries[180].value.integer == 37);
+    TEST(osc.slots.entries[182].value.integer == 64);
+    TEST(graph.node(mapping.osc_nodes[2]).slots.entries[182].value.integer == 1);
+    TEST(graph.node(mapping.osc_nodes[1]).slots.entries[182].value.integer == 37);
 
     // An envelope wired into the slope block's env dot compiles onto the
     // slope binding; the wired row is the binding's base, so the routed
@@ -14844,7 +14879,7 @@ static void check_osc_pitch_gating()
         TEST(find_graph_slot(graph, mapping.osc_nodes[0], "Pitch", &pitch_slot));
         TEST(find_graph_slot(graph, mapping.osc_nodes[0], "Octave Offset", &octave_slot));
         TEST(pitch_slot == Sculptor::osc_target_row(Synth::mod_pitch));
-        TEST(octave_slot == 136);
+        TEST(octave_slot == 138);
         const Sculptor::Slot& pitch_row = graph.node(mapping.osc_nodes[0]).slots.entries[pitch_slot];
         TEST(pitch_row.property_type == Sculptor::PropertyType::real);
         TEST(! pitch_row.real_bounded); // a bare input box, not a slider
@@ -14860,7 +14895,7 @@ static void check_osc_pitch_gating()
         const Sculptor::OscTargetView spread_view = Sculptor::osc_target_view(Synth::mod_fir_spread);
         TEST(spread_view.min_value == 0.0f && spread_view.max_value == 36.0f);
         TEST(spread_view.bank_scale == 1.0f && ! spread_view.logarithmic);
-        TEST(Sculptor::osc_target_row(Synth::mod_fir_spread) == 154);
+        TEST(Sculptor::osc_target_row(Synth::mod_fir_spread) == 156);
 
         // Round-trip: an octave edit applies through the value_changed path,
         // lands in the bank and reprojection shows it again.
@@ -14935,7 +14970,7 @@ static void check_osc_pitch_gating()
         graph.take_changes(discarded, Sculptor::max_pending_changes);
         uint32_t slope_slot = Sculptor::pool_no_slot;
         TEST(find_graph_slot(graph, mapping.osc_nodes[0], "FIR Slope", &slope_slot));
-        TEST(slope_slot == 180);
+        TEST(slope_slot == 182);
         const Sculptor::Slot& slope_row = graph.node(mapping.osc_nodes[0]).slots.entries[slope_slot];
         TEST(slope_row.property_type == Sculptor::PropertyType::integer);
         TEST(slope_row.int_bounded);
@@ -16223,7 +16258,8 @@ static bool begin_m2_band_graph(Synth::InstrumentEditorBank* bank,
 {
     Synth::Instrument instrument = {};
     build_m2_bandpass_fixture<M2>(bank, instrument.layers[0], seed_higher_bands, rich_band0);
-    instrument.layer_count        = 1;
+    instrument.layer_count = 1;
+    set_default_dispersion_sections(instrument);
     bank->bank.channel_enabled[0] = 1;
     TEST(bank->bank.instruments.allocate() == 0);
     bank->bank.instruments.entries[0]         = instrument;
@@ -16425,10 +16461,10 @@ static void m2_band_layout_regressions()
         return;
     }
     const Sculptor::Node& osc = graph.node(mapping.osc_nodes[0]);
-    // One band block: 138 + 55 slots.
+    // One band block: 140 + 55 slots.
     TEST(osc.slots.num_allocated == Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride);
     TEST(find_nth_osc_slot(osc, "Band 1", 0) == Sculptor::osc_band_header_slot(0));
-    TEST(find_nth_osc_slot(osc, "Filter Type", 0) == 137);
+    TEST(find_nth_osc_slot(osc, "Filter Type", 0) == 139);
     const uint32_t        header_slot = Sculptor::osc_band_header_slot(0);
     const Sculptor::Slot& header      = osc.slots.entries[header_slot];
     TEST(strncmp(header.name, "Band 1", sizeof(header.name)) == 0);
@@ -16443,17 +16479,17 @@ static void m2_band_layout_regressions()
     TEST(! minus.child_row && minus.child_level == 0);
     TEST(! plus.child_row && plus.child_level == 0);
 
-    // Four bands: band 0's rows sit at 141/154/167/180 and
+    // Four bands: band 0's rows sit at 143/156/169/182 and
     // bands 1..3 shift by 3 slots per earlier band.
     static const struct {
         uint32_t    slot;
         const char* name;
         uint32_t    target;
     } band_rows[16] = {
-        { 141, "Offset", 12 }, { 154, "Spread", 7 },  { 167, "Gain", 13 }, { 180, "FIR Slope", 11 },
-        { 196, "Offset", 14 }, { 209, "Spread", 15 }, { 222, "Gain", 16 }, { 235, "FIR Slope", 17 },
-        { 251, "Offset", 18 }, { 264, "Spread", 19 }, { 277, "Gain", 20 }, { 290, "FIR Slope", 21 },
-        { 306, "Offset", 22 }, { 319, "Spread", 23 }, { 332, "Gain", 24 }, { 345, "FIR Slope", 25 },
+        { 143, "Offset", 12 }, { 156, "Spread", 7 },  { 169, "Gain", 13 }, { 182, "FIR Slope", 11 },
+        { 198, "Offset", 14 }, { 211, "Spread", 15 }, { 224, "Gain", 16 }, { 237, "FIR Slope", 17 },
+        { 253, "Offset", 18 }, { 266, "Spread", 19 }, { 279, "Gain", 20 }, { 292, "FIR Slope", 21 },
+        { 308, "Offset", 22 }, { 321, "Spread", 23 }, { 334, "Gain", 24 }, { 347, "FIR Slope", 25 },
     };
 
     bank.bank.instruments.entries[0].layers[0].fir_band_count = 4;
@@ -16482,8 +16518,8 @@ static void m2_band_layout_regressions()
         const Sculptor::Node& lowpass_osc = graph.node(mapping.osc_nodes[0]);
         const uint32_t        cutoff_slot = find_nth_osc_slot(lowpass_osc, "Cutoff (Hz)", 0);
         const uint32_t        slope_slot  = find_nth_osc_slot(lowpass_osc, "FIR Slope", 0);
-        TEST(cutoff_slot == 154);
-        TEST(slope_slot == 180);
+        TEST(cutoff_slot == 156);
+        TEST(slope_slot == 182);
         // The legacy single-edge rows keep the fix-6 legacy depths: the
         // Cutoff and FIR Slope rows stay one level under Filter Type.
         TEST(lowpass_osc.slots.entries[cutoff_slot].child_row &&
@@ -16564,8 +16600,8 @@ static void m2_band_visibility_regressions()
     const Sculptor::Node& osc         = graph.node(mapping.osc_nodes[0]);
     const uint32_t        header_slot = find_nth_osc_slot(osc, "Band 1", 0);
     const uint32_t        filter_slot = find_nth_osc_slot(osc, "Filter Type", 0);
-    TEST(header_slot == Sculptor::osc_band_header_slot(0) && filter_slot == 137);
-    if (header_slot != Sculptor::osc_band_header_slot(0) || filter_slot != 137) {
+    TEST(header_slot == Sculptor::osc_band_header_slot(0) && filter_slot == 139);
+    if (header_slot != Sculptor::osc_band_header_slot(0) || filter_slot != 139) {
         return;
     }
     m2_band_visibility_body<m2_band_seam_present>(graph, mapping.osc_nodes[0], filter_slot);
@@ -16595,8 +16631,8 @@ static void m2_band_source_gray_regressions()
     const uint32_t velocity_slot = mapping.input_source_slots[static_cast<uint32_t>(Synth::ModSource::velocity) - 1];
     TEST(find_osc_graph_connection(graph, { osc_node, dot }) != Sculptor::pool_no_slot);
     const uint32_t filter_slot = find_nth_osc_slot(graph.node(osc_node), "Filter Type", 0);
-    TEST(filter_slot == 137);
-    if (filter_slot != 137) {
+    TEST(filter_slot == 139);
+    if (filter_slot != 139) {
         return;
     }
     // Filter to off through the apply path, then rebuild from the model.
@@ -19642,7 +19678,8 @@ static void m2_bank_json_round_trip_regressions()
     Synth::Instrument                                  instrument     = {};
     build_m2_bandpass_fixture<m2_band_state_present>(&source, instrument.layers[0], false, false);
     // The fixture fills layer 0 only; the encoder needs the count set.
-    instrument.layer_count         = 1;
+    instrument.layer_count = 1;
+    set_default_dispersion_sections(instrument);
     source.bank.channel_enabled[0] = 1;
     TEST(source.bank.instruments.allocate() == 0);
     source.bank.instruments.entries[0]         = instrument;
@@ -19726,7 +19763,8 @@ static void m2_bank_json_round_trip_regressions()
         Synth::Instrument            single_instrument = {};
         build_m2_bandpass_fixture<m2_band_state_present>(&single, single_instrument.layers[0], false, false);
         // The fixture fills layer 0 only; the encoder needs the count set.
-        single_instrument.layer_count  = 1;
+        single_instrument.layer_count = 1;
+        set_default_dispersion_sections(single_instrument);
         single.bank.channel_enabled[0] = 1;
         TEST(single.bank.instruments.allocate() == 0);
         single.bank.instruments.entries[0]         = single_instrument;
@@ -19753,7 +19791,8 @@ static void m2_library_zone_regressions()
     Synth::Instrument                                  instrument     = {};
     build_m2_bandpass_fixture<m2_band_state_present>(&source, instrument.layers[0], true, false);
     // The fixture fills layer 0 only; the encoder needs the count set.
-    instrument.layer_count         = 1;
+    instrument.layer_count = 1;
+    set_default_dispersion_sections(instrument);
     source.bank.channel_enabled[0] = 1;
     TEST(source.bank.instruments.allocate() == 0);
     source.bank.instruments.entries[0]         = instrument;
@@ -20057,8 +20096,8 @@ static void m2_fix2_wave_regressions()
                 return Sculptor::osc_node_slot_hidden(graph, osc_node, slot);
             };
             // Bandpass: band 1's whole block shows, header and buttons included.
-            TEST(! hidden(138) && ! hidden(139) && ! hidden(140));
-            TEST(! hidden(141) && ! hidden(154) && ! hidden(167) && ! hidden(180));
+            TEST(! hidden(140) && ! hidden(141) && ! hidden(142));
+            TEST(! hidden(143) && ! hidden(156) && ! hidden(169) && ! hidden(182));
             // The single-edge filter types keep the legacy cutoff and FIR
             // Slope rows visible while the band UI hides wholesale.
             for (uint32_t type = 0; type < Synth::num_filter_types; type++) {
@@ -20068,8 +20107,8 @@ static void m2_fix2_wave_regressions()
                 Sculptor::PropertyValue select_type = {};
                 select_type.list_index              = static_cast<uint8_t>(type);
                 graph.set_slot_value(osc_node, filter_slot, select_type);
-                TEST(! hidden(154) && ! hidden(180));
-                TEST(hidden(138) && hidden(139) && hidden(140) && hidden(141) && hidden(167));
+                TEST(! hidden(156) && ! hidden(182));
+                TEST(hidden(140) && hidden(141) && hidden(142) && hidden(143) && hidden(169));
             }
         }
     }
@@ -20412,7 +20451,8 @@ static void check_fir_spread_helpers()
     {
         Synth::Instrument mirror_instr = {};
         mirror_instr.layer_count       = 1;
-        auto has_filter                = [](const Synth::Instrument& instrument, uint32_t layer_idx) {
+        set_default_dispersion_sections(mirror_instr);
+        auto has_filter = [](const Synth::Instrument& instrument, uint32_t layer_idx) {
             const Synth::Oscillator&    layer  = instrument.layers[layer_idx];
             const Synth::TargetBinding& spread = layer.targets[Synth::mod_fir_spread];
             return spread.base_value != 0.0f || spread.envelope_desc_id != 0 || spread.lfo_desc_id != 0 ||
@@ -21743,8 +21783,8 @@ static void osc_slot_disable_stamped_rules_regressions()
     const uint32_t tone1       = Sculptor::osc_target_row(Synth::mod_pad_tilt1);
     const uint32_t volume      = Sculptor::osc_target_row(Synth::mod_volume);
     const uint32_t wave_a_slot = 1;  // waveform a, layout contract
-    const uint32_t wave_b_slot = 30; // waveform b, layout contract
-    const uint32_t mode_slot   = 57; // mix mode, layout contract
+    const uint32_t wave_b_slot = 32; // waveform b, layout contract
+    const uint32_t mode_slot   = 59; // mix mode, layout contract
 
     Sculptor::PropertyValue wave = {};
     // Sine wave a (list 0; the wave a list starts at sine), waveform b
@@ -22299,8 +22339,9 @@ static void check_string_wave_json_codec()
             std::make_unique<Synth::InstrumentEditorBank>();
         Synth::InstrumentEditorBank& bank = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
-        Synth::Instrument instr           = {};
-        instr.layer_count                 = 1;
+        Synth::Instrument instr = {};
+        instr.layer_count       = 1;
+        set_default_dispersion_sections(instr);
         instr.layers[0].osc_type[0]       = Synth::WaveType::string_wave;
         instr.layers[0].fir_slope_percent = 100;
         const uint32_t slot               = bank.bank.instruments.allocate();
@@ -22327,16 +22368,18 @@ static void check_string_wave_json_codec()
 static void string_make_bank(Synth::InstrumentBank& bank, Synth::WaveType wave_a, Synth::WaveType wave_b)
 {
     memset(static_cast<void*>(&bank), 0, sizeof(bank));
-    const uint32_t env                                = bank.envelopes.allocate();
-    bank.envelopes.entries[env].num_points            = 2;
-    bank.envelopes.entries[env].points[1].position    = 100;
-    const uint32_t lfo                                = bank.lfos.allocate();
-    bank.lfos.entries[lfo].wave                       = Synth::WaveType::sine_wave;
-    bank.lfos.entries[lfo].period_ms                  = 50;
-    const uint32_t     instr                          = bank.instruments.allocate();
-    Synth::Oscillator& layer                          = bank.instruments.entries[instr].layers[0];
-    bank.instruments.entries[instr].layer_count       = 1;
+    const uint32_t env                             = bank.envelopes.allocate();
+    bank.envelopes.entries[env].num_points         = 2;
+    bank.envelopes.entries[env].points[1].position = 100;
+    const uint32_t lfo                             = bank.lfos.allocate();
+    bank.lfos.entries[lfo].wave                    = Synth::WaveType::sine_wave;
+    bank.lfos.entries[lfo].period_ms               = 50;
+    const uint32_t     instr                       = bank.instruments.allocate();
+    Synth::Oscillator& layer                       = bank.instruments.entries[instr].layers[0];
+    bank.instruments.entries[instr].layer_count    = 1;
+    set_default_dispersion_sections(bank.instruments.entries[instr]);
     layer.fir_slope_percent                           = 100;
+    layer.string_dispersion_sections                  = 4.0f;
     layer.osc_type[0]                                 = wave_a;
     layer.osc_type[1]                                 = wave_b;
     layer.targets[Synth::mod_volume].envelope_desc_id = static_cast<uint16_t>(env + 1);
@@ -22457,15 +22500,15 @@ static void check_string_wave_gating()
         const Sculptor::Node& node = graph.node(node_index);
         TEST(node.slots.entries[1].num_list_options == 6);
         TEST(strcmp(node.slots.entries[1].list_options[5], "string") == 0);
-        TEST(node.slots.entries[30].num_list_options == 6);
-        for (uint32_t i = 0; i < node.slots.entries[30].num_list_options; ++i) {
-            TEST(strcmp(node.slots.entries[30].list_options[i], "string") != 0);
+        TEST(node.slots.entries[32].num_list_options == 6);
+        for (uint32_t i = 0; i < node.slots.entries[32].num_list_options; ++i) {
+            TEST(strcmp(node.slots.entries[32].list_options[i], "string") != 0);
         }
     }
 
     constexpr uint32_t wave_a_slot = 1;
-    constexpr uint32_t wave_b_slot = 30;
-    constexpr uint32_t mode_slot   = 57;
+    constexpr uint32_t wave_b_slot = 32;
+    constexpr uint32_t mode_slot   = 59;
     constexpr uint32_t pick_slot   = 28;
 
     Sculptor::PropertyValue value = {};
@@ -22475,7 +22518,7 @@ static void check_string_wave_gating()
     graph.set_slot_value(node_index, mode_slot, value);
 
     bool           mode_rows_saw[5] = {};
-    const uint32_t mode_rows[5]     = { mode_slot, 70, 83, 57, 30 };
+    const uint32_t mode_rows[5]     = { mode_slot, 72, 85, 59, 32 };
     value.list_index                = 1; // sawtooth: reference for the mode rows
     graph.set_slot_value(node_index, wave_a_slot, value);
     for (uint32_t r = 0; r < 5; ++r) {
@@ -22607,7 +22650,7 @@ static void check_string_shader_source_pins()
             end,
             "string_allpass_coeff * lowpass_out + string_prev_lowpass - string_allpass_coeff * string_prev_allpass;") !=
         nullptr);
-    TEST(find_in_range(shader, end, "float loop_output = allpass_out * (string_loop_gain * string_release_gain);") !=
+    TEST(find_in_range(shader, end, "float loop_output = cascade_out * (string_loop_gain * string_release_gain);") !=
          nullptr);
     TEST(find_in_range(shader, end, "= abs(loop_output) < 8.0 ? loop_output : 0.0;") != nullptr);
     TEST(find_in_range(shader,
@@ -22756,8 +22799,9 @@ static void check_string_brightness()
     const std::unique_ptr<Synth::InstrumentEditorBank> ebank_storage = std::make_unique<Synth::InstrumentEditorBank>();
     Synth::InstrumentEditorBank&                       ebank         = *ebank_storage;
     memset(static_cast<void*>(&ebank), 0, sizeof(ebank));
-    Synth::Instrument instr     = {};
-    instr.layer_count           = 1;
+    Synth::Instrument instr = {};
+    instr.layer_count       = 1;
+    set_default_dispersion_sections(instr);
     instr.layers[0].osc_type[0] = Synth::WaveType::string_wave;
     const uint32_t slot         = ebank.bank.instruments.allocate();
     TEST(slot != pool_no_slot);
@@ -22828,12 +22872,255 @@ static void check_string_brightness()
     }
 }
 
+// Builds a one-layer clipboard document carrying one extra layer key; returns the document in buf.
+static const char* string_disp_clip_doc(char (&buf)[320], const char* key, const char* value)
+{
+    snprintf(buf,
+             sizeof(buf),
+             "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\",\"%s\":%s}]}",
+             key,
+             value);
+    return buf;
+}
+
+// Same for the editor bank document.
+static const char* string_disp_bank_doc(char (&buf)[512], const char* key, const char* value)
+{
+    snprintf(buf,
+             sizeof(buf),
+             "{\"instrument_editor_bank\":{\"instruments\":[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\","
+             "\"%s\":%s,\"routing\":{}}]}],"
+             "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}",
+             key,
+             value);
+    return buf;
+}
+
+// String dispersion and its section count: optional plain layer keys. Absent decodes as 0 and 4; dispersion
+// must be a finite number in [0,1] and sections an integer in [1,6]; both survive encode, decode, graph
+// projection and compile, and the validator refuses bad values whatever the other field holds.
+static void check_string_dispersion_codec()
+{
+    const std::unique_ptr<ClipboardDecode> storage = std::make_unique<ClipboardDecode>();
+    ClipboardDecode&                       decoded = *storage;
+    char                                   clip_buf[320];
+    char                                   bank_buf[512];
+
+    // Absent keys: defaults 0 and 4.
+    static const char absent_doc[] = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\"}]}";
+    TEST(string_clip_decode(absent_doc, &decoded));
+    TEST(decoded.instr.layers[0].string_dispersion == 0.0f);
+    TEST(decoded.instr.layers[0].string_dispersion_sections == 4.0f);
+    TEST(Synth::Oscillator{}.string_dispersion == 0.0f);
+    TEST(Synth::Oscillator{}.string_dispersion_sections == 4.0f);
+
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    const std::unique_ptr<Synth::InstrumentEditorBank> keep_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       decoded_bank = *bank_storage;
+    memset(static_cast<void*>(&decoded_bank), 0, sizeof(decoded_bank));
+    static const char bank_absent[] =
+        "{\"instrument_editor_bank\":{\"instruments\":[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\","
+        "\"routing\":{}}]}],\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}";
+    TEST(Synth::decode_editor_bank_json(bank_absent, static_cast<uint32_t>(strlen(bank_absent)), &decoded_bank));
+    TEST(decoded_bank.bank.instruments.entries[0].layers[0].string_dispersion == 0.0f);
+    TEST(decoded_bank.bank.instruments.entries[0].layers[0].string_dispersion_sections == 4.0f);
+
+    // Accepted values, through both decoders: dispersion bounds 0 and 1, sections bounds 1 and 6.
+    static const char* const disp_ok[]       = { "0", "0.25", "1" };
+    static const float       disp_ok_value[] = { 0.0f, 0.25f, 1.0f };
+    static const char* const sect_ok[]       = { "1", "4", "6" };
+    static const float       sect_ok_value[] = { 1.0f, 4.0f, 6.0f };
+    for (uint32_t i = 0; i < 3; ++i) {
+        TEST(string_clip_decode(string_disp_clip_doc(clip_buf, "string_dispersion", disp_ok[i]), &decoded));
+        TEST(decoded.instr.layers[0].string_dispersion == disp_ok_value[i]);
+        TEST(decoded.instr.layers[0].string_dispersion_sections == 4.0f);
+        TEST(string_clip_decode(string_disp_clip_doc(clip_buf, "string_dispersion_sections", sect_ok[i]), &decoded));
+        TEST(decoded.instr.layers[0].string_dispersion_sections == sect_ok_value[i]);
+        TEST(decoded.instr.layers[0].string_dispersion == 0.0f);
+        const char* const bd = string_disp_bank_doc(bank_buf, "string_dispersion", disp_ok[i]);
+        TEST(Synth::decode_editor_bank_json(bd, static_cast<uint32_t>(strlen(bd)), &decoded_bank));
+        TEST(decoded_bank.bank.instruments.entries[0].layers[0].string_dispersion == disp_ok_value[i]);
+        const char* const bs = string_disp_bank_doc(bank_buf, "string_dispersion_sections", sect_ok[i]);
+        TEST(Synth::decode_editor_bank_json(bs, static_cast<uint32_t>(strlen(bs)), &decoded_bank));
+        TEST(decoded_bank.bank.instruments.entries[0].layers[0].string_dispersion_sections == sect_ok_value[i]);
+    }
+
+    // Refused values, through both decoders; each failed bank decode leaves the destination unchanged.
+    const char* const bank_good = string_disp_bank_doc(bank_buf, "string_dispersion", "0.5");
+    TEST(Synth::decode_editor_bank_json(bank_good, static_cast<uint32_t>(strlen(bank_good)), &decoded_bank));
+    memcpy(static_cast<void*>(keep_storage.get()), &decoded_bank, sizeof(decoded_bank));
+    static const char* const disp_bad[] = { "-0.1",      "1.1",     "2",    "NaN",  "Infinity",
+                                            "-Infinity", "\"0.5\"", "true", "null", "[0.5]" };
+    static const char* const sect_bad[] = { "0",   "-1",       "7",     "2.5",  "4.0000001",
+                                            "NaN", "Infinity", "\"4\"", "true", "null" };
+    for (const char* value : disp_bad) {
+        TEST(! string_clip_decode(string_disp_clip_doc(clip_buf, "string_dispersion", value), &decoded));
+        const char* const bd = string_disp_bank_doc(bank_buf, "string_dispersion", value);
+        TEST(! Synth::decode_editor_bank_json(bd, static_cast<uint32_t>(strlen(bd)), &decoded_bank));
+        TEST(memcmp(&decoded_bank, keep_storage.get(), sizeof(decoded_bank)) == 0);
+    }
+    for (const char* value : sect_bad) {
+        TEST(! string_clip_decode(string_disp_clip_doc(clip_buf, "string_dispersion_sections", value), &decoded));
+        const char* const bs = string_disp_bank_doc(bank_buf, "string_dispersion_sections", value);
+        TEST(! Synth::decode_editor_bank_json(bs, static_cast<uint32_t>(strlen(bs)), &decoded_bank));
+        TEST(memcmp(&decoded_bank, keep_storage.get(), sizeof(decoded_bank)) == 0);
+    }
+    // A refused clipboard decode never reports success after a valid sibling key.
+    static const char both_bad[] = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\","
+                                   "\"string_dispersion\":0.5,\"string_dispersion_sections\":9}]}";
+    TEST(! string_clip_decode(both_bad, &decoded));
+
+    // Negative zero spelling decodes as zero; the editor bank decoder canonicalizes it to positive zero.
+    TEST(string_clip_decode(string_disp_clip_doc(clip_buf, "string_dispersion", "-0"), &decoded));
+    TEST(decoded.instr.layers[0].string_dispersion == 0.0f);
+    const char* const bneg = string_disp_bank_doc(bank_buf, "string_dispersion", "-0.0");
+    TEST(Synth::decode_editor_bank_json(bneg, static_cast<uint32_t>(strlen(bneg)), &decoded_bank));
+    TEST(! std::signbit(decoded_bank.bank.instruments.entries[0].layers[0].string_dispersion));
+
+    // Validator: unconditional contract, independent of the other field.
+    const std::unique_ptr<Synth::InstrumentBank> vstorage       = std::make_unique<Synth::InstrumentBank>();
+    Synth::InstrumentBank&                       vbank          = *vstorage;
+    static const float                           bad_sections[] = { 0.0f, -1.0f, 7.0f, 2.5f, NAN, INFINITY };
+    static const float                           bad_disp[]     = { -0.1f, 1.1f, 2.0f, NAN, INFINITY };
+    static const float                           other_disp[]   = { 0.0f, 0.5f };
+    static const float                           other_sect[]   = { 1.0f, 4.0f, 6.0f };
+    for (const float other : other_disp) {
+        for (const float value : bad_sections) {
+            string_make_bank(vbank, Synth::WaveType::string_wave, Synth::WaveType::no_wave);
+            vbank.instruments.entries[0].layers[0].string_dispersion          = other;
+            vbank.instruments.entries[0].layers[0].string_dispersion_sections = value;
+            TEST(! Synth::validate_instrument_bank(&vbank));
+        }
+    }
+    for (const float other : other_sect) {
+        for (const float value : bad_disp) {
+            string_make_bank(vbank, Synth::WaveType::string_wave, Synth::WaveType::no_wave);
+            vbank.instruments.entries[0].layers[0].string_dispersion          = value;
+            vbank.instruments.entries[0].layers[0].string_dispersion_sections = other;
+            TEST(! Synth::validate_instrument_bank(&vbank));
+        }
+    }
+    for (uint32_t i = 0; i < 3; ++i) {
+        string_make_bank(vbank, Synth::WaveType::string_wave, Synth::WaveType::no_wave);
+        vbank.instruments.entries[0].layers[0].string_dispersion          = disp_ok_value[i];
+        vbank.instruments.entries[0].layers[0].string_dispersion_sections = sect_ok_value[i];
+        TEST(Synth::validate_instrument_bank(&vbank));
+    }
+
+    // Clipboard encode: defaults are omitted, valid non-defaults are emitted and round-trip, values the decoder
+    // would refuse stay out of the document.
+    const std::unique_ptr<Synth::InstrumentEditorBank> ebank_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       ebank         = *ebank_storage;
+    memset(static_cast<void*>(&ebank), 0, sizeof(ebank));
+    Synth::Instrument instr = {};
+    instr.layer_count       = 1;
+    set_default_dispersion_sections(instr);
+    instr.layers[0].osc_type[0] = Synth::WaveType::string_wave;
+    const uint32_t slot         = ebank.bank.instruments.allocate();
+    TEST(slot != pool_no_slot);
+    ebank.bank.instruments.entries[slot] = instr;
+    const std::unique_ptr<FixedArray<char, clipboard_capacity>> text_storage =
+        std::make_unique<FixedArray<char, clipboard_capacity>>();
+    char (&text)[clipboard_capacity] = text_storage->elements;
+    uint32_t length                  = Synth::encode_instrument_json(text, sizeof(text), &instr, &ebank.bank);
+    TEST(length > 0);
+    TEST(strstr(text, "string_dispersion") == nullptr);
+    TEST(string_clip_decode(text, &decoded));
+    TEST(decoded.instr.layers[0].string_dispersion == 0.0f &&
+         decoded.instr.layers[0].string_dispersion_sections == 4.0f);
+
+    instr.layers[0].string_dispersion = -0.0f;
+    length                            = Synth::encode_instrument_json(text, sizeof(text), &instr, &ebank.bank);
+    TEST(length > 0 && strstr(text, "string_dispersion") == nullptr);
+
+    instr.layers[0].string_dispersion = 0.375f;
+    length                            = Synth::encode_instrument_json(text, sizeof(text), &instr, &ebank.bank);
+    TEST(length > 0);
+    TEST(strstr(text, "\"string_dispersion\":0.375") != nullptr);
+    TEST(strstr(text, "string_dispersion_sections") == nullptr);
+    TEST(string_clip_decode(text, &decoded));
+    TEST(decoded.instr.layers[0].string_dispersion == 0.375f &&
+         decoded.instr.layers[0].string_dispersion_sections == 4.0f);
+
+    instr.layers[0].string_dispersion_sections = 2.0f;
+    length                                     = Synth::encode_instrument_json(text, sizeof(text), &instr, &ebank.bank);
+    TEST(length > 0);
+    TEST(strstr(text, "\"string_dispersion_sections\":2") != nullptr);
+    TEST(string_clip_decode(text, &decoded));
+    TEST(decoded.instr.layers[0].string_dispersion == 0.375f &&
+         decoded.instr.layers[0].string_dispersion_sections == 2.0f);
+
+    static const float unencodable[] = { 0.0f, 7.0f, 2.5f, NAN };
+    for (const float value : unencodable) {
+        instr.layers[0].string_dispersion          = 0.0f;
+        instr.layers[0].string_dispersion_sections = value;
+        length = Synth::encode_instrument_json(text, sizeof(text), &instr, &ebank.bank);
+        TEST(length == 0 || strstr(text, "string_dispersion_sections") == nullptr);
+    }
+    instr.layers[0].string_dispersion_sections = 4.0f;
+    instr.layers[0].string_dispersion          = NAN;
+    length                                     = Synth::encode_instrument_json(text, sizeof(text), &instr, &ebank.bank);
+    TEST(length == 0 || strstr(text, "string_dispersion") == nullptr);
+
+    // Editor bank round trip, then graph projection and compile keep both values.
+    const std::unique_ptr<Synth::InstrumentEditorBank> src_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       src         = *src_storage;
+    Synth::Instrument                                  fixture     = {};
+    build_binding_fixture(&src, &fixture);
+    src.bank.instruments.entries[0].layers[0].osc_type[0]                = Synth::WaveType::string_wave;
+    src.bank.instruments.entries[0].layers[0].fir_band_count             = 1;
+    src.bank.instruments.entries[0].layers[0].string_dispersion          = 0.625f;
+    src.bank.instruments.entries[0].layers[0].string_dispersion_sections = 3.0f;
+    TEST(Synth::validate_instrument_bank(&src.bank));
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&payload)[Synth::library_payload_max] = payload_storage->elements;
+    const uint32_t payload_length               = Synth::encode_editor_bank_json(&src, payload, sizeof(payload));
+    TEST(payload_length > 0);
+    TEST(strstr(payload, "\"string_dispersion\":0.625") != nullptr);
+    TEST(strstr(payload, "\"string_dispersion_sections\":3") != nullptr);
+    const std::unique_ptr<Synth::InstrumentEditorBank> dst_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       dst         = *dst_storage;
+    memset(static_cast<void*>(&dst), 0, sizeof(dst));
+    TEST(Synth::decode_editor_bank_json(payload, payload_length, &dst));
+    const Synth::Oscillator& dec = dst.bank.instruments.entries[dst.bank.channel_zones[0][0].instrument].layers[0];
+    TEST(dec.string_dispersion == 0.625f && dec.string_dispersion_sections == 3.0f);
+
+    // Negative zero in an editor bank encodes without the key and decodes as positive zero; defaults omit both keys.
+    src.bank.instruments.entries[0].layers[0].string_dispersion          = -0.0f;
+    src.bank.instruments.entries[0].layers[0].string_dispersion_sections = 4.0f;
+    const uint32_t plain_length = Synth::encode_editor_bank_json(&src, payload, sizeof(payload));
+    TEST(plain_length > 0 && strstr(payload, "string_dispersion") == nullptr);
+    memset(static_cast<void*>(&dst), 0, sizeof(dst));
+    TEST(Synth::decode_editor_bank_json(payload, plain_length, &dst));
+    TEST(! std::signbit(
+        dst.bank.instruments.entries[dst.bank.channel_zones[0][0].instrument].layers[0].string_dispersion));
+    src.bank.instruments.entries[0].layers[0].string_dispersion          = 0.625f;
+    src.bank.instruments.entries[0].layers[0].string_dispersion_sections = 3.0f;
+    const uint32_t full_length = Synth::encode_editor_bank_json(&src, payload, sizeof(payload));
+    memset(static_cast<void*>(&dst), 0, sizeof(dst));
+    TEST(Synth::decode_editor_bank_json(payload, full_length, &dst));
+
+    const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph         = *graph_storage;
+    Sculptor::OscGraphMapping              mapping       = {};
+    TEST(Sculptor::project_editor_to_graph(dst, &graph, &mapping, 0, 0));
+    const Sculptor::Node& node = graph.node(mapping.osc_nodes[0]);
+    TEST(node.slots.entries[Sculptor::osc_dispersion_slot].value.real == 0.625f);
+    TEST(node.slots.entries[Sculptor::osc_dispersion_sections_slot].value.integer == 3);
+    Synth::Instrument compiled = {};
+    TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+    TEST(compiled.layers[0].string_dispersion == 0.625f);
+    TEST(compiled.layers[0].string_dispersion_sections == 3.0f);
+}
+
 static void string_wave_m2_regressions()
 {
     check_string_wave_json_codec();
     check_string_wave_validator();
     check_string_param_json_bounds();
     check_string_brightness();
+    check_string_dispersion_codec();
     check_string_wave_gating();
     check_string_row_reuse();
     check_string_runtime_source_pins();
@@ -22857,7 +23144,35 @@ static float string_unit_clamp(float value)
 }
 
 // Per-step scalar block, evaluated once per dispatch in float32.
-static StringScalars string_mirror_scalars(float f0, float damping, float release_damping)
+// Dispersion helpers, same closed forms and float operation order as the shader.
+static float string_disp_ratio(float q)
+{
+    if (q <= 0.3849002f) {
+        const float cos_arg = fminf(1.0f, 2.598076f * q);
+        return 1.1547005f * cosf(acosf(cos_arg) * 0.33333334f);
+    }
+    const float cardano = powf(q * 0.5f + sqrtf(q * q * 0.25f - 0.037037037f), 0.33333334f);
+    return cardano + 0.33333334f / cardano;
+}
+
+static float string_disp_phase_delay(float coeff, float omega)
+{
+    return (2.0f / omega) * atan2f((1.0f - coeff) * sinf(0.5f * omega), (1.0f + coeff) * cosf(0.5f * omega));
+}
+
+// Test-only mutation selector for check_string_mirror_dispersion: 0 = the real mirror, 1 = a_disp sign flip,
+// 2 = retune term omitted, 3 = corrupted TDF-II state update, 4 = wrong state word read, 5 = f0 compensation dropped,
+// 6 = section count normalisation dropped.
+static int string_disp_mutation = 0;
+
+// Dispersion strength, mirroring string_dispersion_strength in synth_oscillator.comp.glsl.
+static constexpr float string_dispersion_strength = 0.05863f;
+
+static StringScalars string_mirror_scalars(float f0,
+                                           float damping,
+                                           float release_damping,
+                                           float dispersion = 0.0f,
+                                           float sections   = 4.0f)
 {
     StringScalars s = {};
     s.silent        = ! (f0 >= 22.0f);
@@ -22875,7 +23190,29 @@ static StringScalars string_mirror_scalars(float f0, float damping, float releas
     const float mag   = (1.0f - s.c) / sqrtf(1.0f - 2.0f * s.c * cosf(omega) + s.c * s.c);
     const float g     = powf(10.0f, -3.0f * len / (string_fs * t60)) / mag;
     s.g               = g < 0.9999f ? g : 0.9999f;
-    const float delay = len - tau;
+    float disp_delay  = 0.0f;
+    if (dispersion > 0.0f) {
+        const float    omega_q = string_disp_mutation == 5 ? 6.2831853f * 220.0f / string_fs : omega;
+        const float    rounded = floorf(sections + 0.5f);
+        const uint32_t requested =
+            static_cast<uint32_t>(fminf(fmaxf(rounded, 1.0f), static_cast<float>(string_max_sections)));
+        for (uint32_t count = requested; count > 0; --count) {
+            const float count_f = string_disp_mutation == 6 ? 1.0f : static_cast<float>(count);
+            const float disp_q  = string_dispersion_strength * dispersion / (count_f * (omega_q * omega_q * omega_q));
+            const float disp_r  = string_disp_ratio(disp_q);
+            const float count_a = (1.0f - disp_r) / (1.0f + disp_r);
+            const float coeff   = string_disp_mutation == 1 ? -count_a : count_a;
+            const float count_delay = static_cast<float>(count) * string_disp_phase_delay(coeff, omega);
+            if (len - tau - count_delay >= 3.0f) {
+                s.disp_a       = coeff;
+                s.num_sections = count;
+                disp_delay     = count_delay;
+                break;
+            }
+        }
+    }
+    s.disp_delay      = string_disp_mutation == 2 ? 0.0f : disp_delay;
+    const float delay = len - tau - s.disp_delay;
     s.n               = static_cast<uint32_t>(floorf(delay - 1.0f));
     const float d     = delay - static_cast<float>(s.n);
     s.a               = (1.0f - d) / (1.0f + d);
@@ -22890,9 +23227,11 @@ static void string_mirror_init(StringMirror* m,
                                float         damping,
                                float         pick,
                                uint32_t      seed,
-                               float         brightness = 1.0f)
+                               float         brightness = 1.0f,
+                               float         dispersion = 0.0f,
+                               float         sections   = 4.0f)
 {
-    const StringScalars s = string_mirror_scalars(f0, damping, 0.0f);
+    const StringScalars s = string_mirror_scalars(f0, damping, 0.0f, dispersion, sections);
     if (s.silent) {
         return;
     }
@@ -22964,10 +23303,13 @@ static void string_mirror_init(StringMirror* m,
             m->ring[k] = (m->ring[k] - tone_mean) * tone_gain;
         }
     }
-    m->wr     = n;
-    m->t1     = 0.0f;
-    m->u1     = 0.0f;
-    m->e      = 1.0f;
+    m->wr = n;
+    m->t1 = 0.0f;
+    m->u1 = 0.0f;
+    m->e  = 1.0f;
+    for (uint32_t k = 0; k < string_max_sections; ++k) {
+        m->ds[k] = 0.0f;
+    }
     m->tagged = true;
     m->tag    = seed;
 }
@@ -22979,9 +23321,11 @@ static void string_mirror_step(StringMirror* m,
                                float         release_damping,
                                bool          release,
                                float*        out,
-                               uint32_t      count)
+                               uint32_t      count,
+                               float         dispersion = 0.0f,
+                               float         sections   = 4.0f)
 {
-    const StringScalars s = string_mirror_scalars(f0, damping, release_damping);
+    const StringScalars s = string_mirror_scalars(f0, damping, release_damping, dispersion, sections);
     if (s.silent) {
         for (uint32_t i = 0; i < count; ++i) {
             out[i] = 0.0f;
@@ -22995,9 +23339,15 @@ static void string_mirror_step(StringMirror* m,
         const float    x  = m->ring[rd];
         out[i]            = x;
         m->e += kr * (target - m->e);
-        const float t  = (1.0f - s.c) * x + s.c * m->t1;
-        const float u  = s.a * t + m->t1 - s.a * m->u1;
-        float       v  = u * (s.g * m->e);
+        const float t       = (1.0f - s.c) * x + s.c * m->t1;
+        const float u       = s.a * t + m->t1 - s.a * m->u1;
+        float       cascade = u;
+        for (uint32_t k = 0; k < s.num_sections; ++k) {
+            const float section_out = s.disp_a * cascade + m->ds[string_disp_mutation == 4 ? 0 : k];
+            m->ds[k] = string_disp_mutation == 3 ? cascade + s.disp_a * section_out : cascade - s.disp_a * section_out;
+            cascade  = section_out;
+        }
+        float v        = cascade * (s.g * m->e);
         v              = fabsf(v) < 8.0f ? v : 0.0f;
         m->ring[m->wr] = v;
         m->t1          = t;
@@ -23751,7 +24101,7 @@ static void check_string_mirror_brightness()
 
 // FM carrier ring read: slot position
 // q = wr_end - 1 - L + fract(warped_phase) * L, linear interpolation, wrapped
-// into [0, 2040).  The FM carrier string timbre intentionally differs from the
+// into [0, 2034). The FM carrier string timbre intentionally differs from the
 // natural-phase string sound (fixed post-pass window, interpolated), so these
 // tests pin the mapping, not equality with the pass output.
 static float string_ring_read(const float* ring, uint32_t wr, float len, float phase, int32_t* index0, int32_t* index1)
@@ -23826,15 +24176,15 @@ static void check_string_mirror_fm_ring_read()
     }
 }
 
-// Edge bounds: indices stay in [0, 2040) and output is finite for wr = 0 and
-// 2039, a loop as long as the 22 Hz floor, and the awkward warped phases.
+// Edge bounds: indices stay in [0, 2034) and output is finite for wr = 0 and
+// 2033, a loop as long as the 22 Hz floor, and the awkward warped phases.
 static void check_string_mirror_ring_read_edges()
 {
     static float ring[string_ring_size];
     for (uint32_t i = 0; i < string_ring_size; ++i) {
         ring[i] = static_cast<float>(string_pcg_hash(i) & 0xFFFFu) / 32767.5f - 1.0f;
     }
-    const uint32_t writes[4] = { 0, 1, 2038, 2039 };
+    const uint32_t writes[4] = { 0, 1, 2032, 2033 };
     const float    lens[2]   = { 2004.545f, 3.0f };
     const float    phases[9] = { 0.0f, 0.5f, 0.999f, nextafterf(1.0f, 0.0f), -0.3f, -1e-9f, -2.75f, 5.5f, 1.0f };
     for (uint32_t w = 0; w < 4; ++w) {
@@ -23854,12 +24204,77 @@ static void check_string_mirror_ring_read_edges()
     int32_t i0 = 0;
     int32_t i1 = 0;
     string_ring_read(ring, 0, 2004.545f, nextafterf(1.0f, 0.0f), &i0, &i1);
-    TEST(i0 == 2038 || i0 == 2039);
-    string_ring_read(ring, 2039, 2004.545f, nextafterf(1.0f, 0.0f), &i0, &i1);
-    TEST(i0 == 2037 || i0 == 2038);
+    TEST(i0 == 2032 || i0 == 2033);
+    string_ring_read(ring, 2033, 2004.545f, nextafterf(1.0f, 0.0f), &i0, &i1);
+    TEST(i0 == 2031 || i0 == 2032);
     // Negative phase that rounds fract to exactly 1.0: closed endpoint wr - 1.
     string_ring_read(ring, 0, 2004.545f, -1e-9f, &i0, &i1);
-    TEST(i0 == 2039 && i1 == 0);
+    TEST(i0 == 2033 && i1 == 0);
+}
+
+// FM characterization across the ring layout change. The legacy layout kept an 8-word header and a 2040-slot
+// ring; the new one keeps 14 header words and a 2034-slot ring. Both layouts read the same logical last-L
+// samples; only the wrap point and the float magnitude of wr differ. This feeds one smooth string-like source
+// into a simulated legacy ring (size 2040) and a new ring (size 2034), reads both through the same FM mapping
+// across several wrap boundaries of each layout, and bounds the difference by the float rounding of the read
+// position (one ULP of a value below 2048 is 2^-13 slot) times the source slope.
+// Measured on this grid: max |new - legacy| = 1.94e-5 absolute (1.1e-5 of the 1.75 peak source amplitude), under
+// the 8.4e-5 position-rounding bound (float rounding of the read position, ~2^-13 slot, times source slope).
+// That is 1.1e-5 of peak amplitude, i.e. ULP-scale of the position arithmetic, not of the sample values
+// (reported to the parent: slightly above the 1e-5 relative target); evidence class accepted by user ruling 6.
+static float string_ring_read_sized(const float* ring, uint32_t size, uint32_t wr, float len, float phase)
+{
+    const float f  = (phase - floorf(phase)) * len;
+    const float q  = static_cast<float>(wr) - 1.0f - len + f;
+    int32_t     i0 = static_cast<int32_t>(floorf(q));
+    const float a  = q - static_cast<float>(i0);
+    i0 += i0 < 0 ? static_cast<int32_t>(size) : 0;
+    int32_t i1 = i0 + 1;
+    i1 -= i1 >= static_cast<int32_t>(size) ? static_cast<int32_t>(size) : 0;
+    return ring[i0] + a * (ring[i1] - ring[i0]);
+}
+
+static void check_string_fm_layout_characterization()
+{
+    static float legacy_ring[2040];
+    static float new_ring[2034];
+    const float  f0s[5]        = { 22.0f, 55.0f, 329.63f, 441.0f, 880.0f };
+    const float  phases[6]     = { 0.0f, 0.1f, 0.37f, 0.5f, 0.9f, 0.9999f };
+    double       max_diff      = 0.0;
+    double       max_ulp_bound = 0.0;
+    for (const float f0 : f0s) {
+        const double len = 44100.0 / static_cast<double>(f0);
+        const double w   = 2.0 * M_PI / len;
+        // Peak slope per sample of the source: sum of k * amplitude_k * w.
+        const double slope = w * (1.0 + 2.0 * 0.5 + 3.0 * 0.25);
+        memset(legacy_ring, 0, sizeof(legacy_ring));
+        memset(new_ring, 0, sizeof(new_ring));
+        uint32_t checked = 0;
+        for (uint32_t t = 1; t <= 3 * 2040 + 40; ++t) {
+            const double x =
+                sin(w * (t - 1.0)) + 0.5 * sin(2.0 * w * (t - 1.0) + 1.0) + 0.25 * sin(3.0 * w * (t - 1.0) + 2.0);
+            legacy_ring[(t - 1) % 2040] = static_cast<float>(x);
+            new_ring[(t - 1) % 2034]    = static_cast<float>(x);
+            const uint32_t wr_old       = t % 2040;
+            const uint32_t wr_new       = t % 2034;
+            // Wrap boundaries of either layout plus a regular sweep.
+            const bool boundary = wr_old < 3 || wr_old > 2037 || wr_new < 3 || wr_new > 2031 || t % 211 == 0;
+            if (! boundary || t < static_cast<uint32_t>(len) + 2) {
+                continue;
+            }
+            for (const float phase : phases) {
+                const float old_v = string_ring_read_sized(legacy_ring, 2040, wr_old, static_cast<float>(len), phase);
+                const float new_v = string_ring_read_sized(new_ring, 2034, wr_new, static_cast<float>(len), phase);
+                TEST(std::isfinite(old_v) && std::isfinite(new_v));
+                max_diff      = fmax(max_diff, fabs(static_cast<double>(new_v) - static_cast<double>(old_v)));
+                max_ulp_bound = fmax(max_ulp_bound, 2.0 * slope * 0.0001221);
+                ++checked;
+            }
+        }
+        TEST(checked > 200);
+    }
+    TEST(max_diff < 3e-5);
+    TEST(max_diff <= max_ulp_bound);
 }
 
 // NaN/inf/huge guard: a poisoned ring slot or filter state never leaves the
@@ -23898,12 +24313,14 @@ static void check_string_mirror_nan_guard()
 // Slot-grammar literal pins for the string rows and the shifted band blocks.
 static void check_string_slot_grammar_pins()
 {
-    TEST(Sculptor::osc_band_first_slot == 138);
-    TEST(Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride == 193);
-    TEST(Sculptor::osc_band_header_slot(3) + Sculptor::osc_band_block_stride == 358);
-    TEST(Sculptor::max_node_slots == 358);
+    TEST(Sculptor::osc_band_first_slot == 140);
+    TEST(Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride == 195);
+    TEST(Sculptor::osc_band_header_slot(3) + Sculptor::osc_band_block_stride == 360);
+    TEST(Sculptor::max_node_slots == 360);
     TEST(Sculptor::osc_pick_slot == 28);
     TEST(Sculptor::osc_brightness_slot == 29);
+    TEST(Sculptor::osc_dispersion_slot == 30);
+    TEST(Sculptor::osc_dispersion_sections_slot == 31);
     const char* const osc_h    = load_source_file("sculptor/sculptor_osc_graph.h");
     const char* const osc_cpp  = load_source_file("sculptor/sculptor_osc_graph.cpp");
     const char* const graph_h  = load_source_file("sculptor/sculptor_graph.h");
@@ -23915,12 +24332,12 @@ static void check_string_slot_grammar_pins()
         return;
     }
     // Pick row 28 and brightness row 29; damping and release damping reuse the
-    // duty a / pad tone a rows (2 and 15); first band slot 138.
+    // duty a / pad tone a rows (2 and 15); first band slot 140; dispersion rows 30 and 31.
     TEST(find_in_range(osc_h, osc_h + strlen(osc_h), "osc_pick_slot = 28") != nullptr);
-    TEST(find_in_range(osc_h, osc_h + strlen(osc_h), "osc_band_first_slot = 138") != nullptr);
+    TEST(find_in_range(osc_h, osc_h + strlen(osc_h), "osc_band_first_slot = 140") != nullptr);
     TEST(Sculptor::osc_target_row_slot[Synth::mod_string_damping] == 2);
     TEST(Sculptor::osc_target_row_slot[Synth::mod_string_release_damping] == 15);
-    TEST(find_in_range(graph_h, graph_h + strlen(graph_h), "max_node_slots = 358") != nullptr);
+    TEST(find_in_range(graph_h, graph_h + strlen(graph_h), "max_node_slots = 360") != nullptr);
     TEST(find_in_range(instr_h, instr_h + strlen(instr_h), "mod_string_damping") != nullptr);
     TEST(find_in_range(instr_h, instr_h + strlen(instr_h), "mod_string_release_damping") != nullptr);
     TEST(find_in_range(osc_cpp, osc_cpp + strlen(osc_cpp), "static_assert(Synth::num_mod_targets == 28)") != nullptr);
@@ -23930,7 +24347,7 @@ static void check_string_slot_grammar_pins()
     TEST(find_in_range(json_cpp, json_cpp + strlen(json_cpp), "\"string_pick\"") != nullptr);
     TEST(find_in_range(json_cpp, json_cpp + strlen(json_cpp), "\"string_brightness\"") != nullptr);
     TEST(find_in_range(runtime, runtime + strlen(runtime), "static_assert(num_osc_roles == 84)") != nullptr);
-    TEST(find_in_range(runtime, runtime + strlen(runtime), "static_assert(sizeof(Oscillator) == 88)") != nullptr);
+    TEST(find_in_range(runtime, runtime + strlen(runtime), "static_assert(sizeof(Oscillator) == 96)") != nullptr);
 }
 
 // Overdriven damping destinations clamp to [0, 1] at the host read, so the
@@ -24188,6 +24605,559 @@ static void check_string_mirror_pick_circular()
     }
 }
 
+// ---- String dispersion. Frozen legacy loop (no cascade) for the d = 0 bit-identity check.
+static void string_legacy_step(StringMirror* m, float f0, float damping, float* out, uint32_t count)
+{
+    const StringScalars s  = string_mirror_scalars(f0, damping, 0.0f);
+    const float         kr = 1.0f - expf(-1.0f / (string_fs * 0.003f));
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t rd = m->wr >= s.n ? m->wr - s.n : m->wr + string_ring_size - s.n;
+        const float    x  = m->ring[rd];
+        out[i]            = x;
+        m->e += kr * (1.0f - m->e);
+        const float t  = (1.0f - s.c) * x + s.c * m->t1;
+        const float u  = s.a * t + m->t1 - s.a * m->u1;
+        float       v  = u * (s.g * m->e);
+        v              = fabsf(v) < 8.0f ? v : 0.0f;
+        m->ring[m->wr] = v;
+        m->t1          = t;
+        m->u1          = u;
+        m->wr          = m->wr + 1 == string_ring_size ? 0 : m->wr + 1;
+    }
+}
+
+// Independent double-precision phase-closure oracle for the loop (lowpass + fractional allpass + cascade):
+// returns the frequency (Hz) of the k-th loop resonance, k = 1..4. Its own count loop and Newton solve.
+static void string_disp_oracle(double f0, double dispersion, double sections, double damping, double* partials)
+{
+    const double fs  = 44100.0;
+    const double len = fs / f0;
+    const double c   = 0.1 + 0.3 * damping;
+    const double w0  = 2.0 * M_PI * f0 / fs;
+    // Own count loop and Newton solve of r^3 - r = strength * dispersion / (count * w0^3) for each candidate count.
+    double count = floor(sections + 0.5);
+    double ad    = 0.0;
+    double pd    = 0.0;
+    for (; count > 0.0; count -= 1.0) {
+        const double q = static_cast<double>(string_dispersion_strength) * dispersion / (count * w0 * w0 * w0);
+        double       r = 1.0 + cbrt(q);
+        for (int it = 0; it < 80; ++it) {
+            r -= (r * r * r - r - q) / (3.0 * r * r - 1.0);
+        }
+        ad = (1.0 - r) / (1.0 + r);
+        pd = (2.0 / w0) * atan2((1.0 - ad) * sin(0.5 * w0), (1.0 + ad) * cos(0.5 * w0));
+        if (len - c / (1.0 - c) - count * pd >= 3.0) {
+            break;
+        }
+    }
+    const double delay       = len - c / (1.0 - c) - count * pd;
+    const double whole       = floor(delay - 1.0);
+    const double frac        = delay - whole;
+    const double a           = (1.0 - frac) / (1.0 + frac);
+    auto         allpass_lag = [](double coeff, double w) {
+        return atan2(sin(w), coeff + cos(w)) - atan2(coeff * sin(w), 1.0 + coeff * cos(w));
+    };
+    for (int k = 1; k <= 4; ++k) {
+        double lo = (k - 0.5) * w0;
+        double hi = (k + 0.5) * w0;
+        for (int it = 0; it < 80; ++it) {
+            const double w = 0.5 * (lo + hi);
+            const double lag =
+                whole * w + atan2(c * sin(w), 1.0 - c * cos(w)) + allpass_lag(a, w) + count * allpass_lag(ad, w);
+            (lag < 2.0 * M_PI * k ? lo : hi) = w;
+        }
+        partials[k] = 0.5 * (lo + hi) * fs / (2.0 * M_PI);
+    }
+}
+
+// True when a bracketed peak search found a peak: finite, inside 90% of the half width around the centre, and
+// stronger than the spectrum at both bracket ends.
+static bool string_peak_valid(double peak, double center, double half_width)
+{
+    if (! std::isfinite(peak) || fabs(peak - center) >= 0.9 * half_width) {
+        return false;
+    }
+    const double at_peak = string_amp_at(string_test_out, 11025, 32768, peak);
+    return std::isfinite(at_peak) && at_peak > string_amp_at(string_test_out, 11025, 32768, center - half_width) &&
+           at_peak > string_amp_at(string_test_out, 11025, 32768, center + half_width);
+}
+
+// Extra measurements of one string_disp_case render: stretch (cents over k f1) of partials 2 and 3, and the
+// oracle's 4th-partial stretch.
+struct StringDispExtra {
+    double stretch_p2;
+    double stretch_p3;
+    double oracle_stretch;
+};
+
+// Renders a fresh note and measures the fundamental and partials 2..4. Returns true when the fundamental is
+// within 1 cent of f0, and the stretch of each of partials 2, 3 and 4 (cents over k f1) is within 1 cent of
+// the oracle's.
+static bool string_disp_case(float            f0,
+                             float            dispersion,
+                             float            sections,
+                             double*          stretch,
+                             StringDispExtra* extra = nullptr)
+{
+    memset(&string_test_mirror, 0, sizeof(string_test_mirror));
+    string_mirror_init(&string_test_mirror, f0, 0.0f, 0.0f, 4321, 1.0f, dispersion, sections);
+    for (uint32_t i = 0; i < string_test_samples; i += 256) {
+        string_mirror_step(&string_test_mirror, f0, 0.0f, 0.0f, false, string_test_out + i, 256, dispersion, sections);
+    }
+    double oracle[5];
+    string_disp_oracle(static_cast<double>(f0),
+                       static_cast<double>(dispersion),
+                       static_cast<double>(sections),
+                       0.0,
+                       oracle);
+    const double f1_width = fmax(0.4, 0.006 * static_cast<double>(f0));
+    const double f1       = string_peak_freq(string_test_out, 11025, 32768, static_cast<double>(f0), f1_width);
+    double       peaks[5] = {};
+    // Each bracketed search must land on a real peak: finite, strictly inside its bracket (not pinned to an
+    // edge) and above the spectrum at both bracket ends.
+    bool valid = string_peak_valid(f1, static_cast<double>(f0), f1_width);
+    for (int k = 2; k <= 4; ++k) {
+        peaks[k] = string_peak_freq(string_test_out, 11025, 32768, oracle[k], 1.5);
+        valid    = valid && string_peak_valid(peaks[k], oracle[k], 1.5);
+    }
+    if (! valid) {
+        return false;
+    }
+    double measured[5] = {};
+    bool   matches     = true;
+    for (int k = 2; k <= 4; ++k) {
+        measured[k]           = 1200.0 * log2(peaks[k] / (k * f1));
+        const double expected = 1200.0 * log2(oracle[k] / (k * oracle[1]));
+        matches               = matches && fabs(measured[k] - expected) < 1.0;
+    }
+    *stretch = measured[4];
+    if (extra) {
+        extra->stretch_p2     = measured[2];
+        extra->stretch_p3     = measured[3];
+        extra->oracle_stretch = 1200.0 * log2(oracle[4] / (4.0 * oracle[1]));
+    }
+    return fabs(1200.0 * log2(f1 / static_cast<double>(f0))) < 1.0 && matches;
+}
+
+// Frozen legacy memory layout (8-word header, 2040-slot ring) running the natural d = 0 string loop. Only the
+// ring wrap point differs from the current layout (14-word header, 2034 slots); the loop is integer indexed
+// (delay_whole + fractional allpass), so its output must match the current layout bit for bit.
+static constexpr uint32_t string_legacy_ring_size = 2040;
+
+static void string_legacy_layout_step(float*               ring,
+                                      uint32_t*            wr,
+                                      float*               t1,
+                                      float*               u1,
+                                      float*               e,
+                                      const StringScalars& s,
+                                      float*               out,
+                                      uint32_t             count)
+{
+    const float kr = 1.0f - expf(-1.0f / (string_fs * 0.003f));
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t rd = *wr >= s.n ? *wr - s.n : *wr + string_legacy_ring_size - s.n;
+        const float    x  = ring[rd];
+        out[i]            = x;
+        *e += kr * (1.0f - *e);
+        const float t = (1.0f - s.c) * x + s.c * *t1;
+        const float u = s.a * t + *t1 - s.a * *u1;
+        float       v = u * (s.g * *e);
+        v             = fabsf(v) < 8.0f ? v : 0.0f;
+        ring[*wr]     = v;
+        *t1           = t;
+        *u1           = u;
+        *wr           = *wr + 1 == string_legacy_ring_size ? 0 : *wr + 1;
+    }
+}
+
+// Frozen pre-dispersion note-on arithmetic, ported verbatim (same float operation order) from HEAD 34d1b94
+// string_mirror_scalars / string_mirror_init (brightness 1 path). Independent of the current scalar and
+// excitation code, so a regression there cannot hide in the legacy-capacity comparison. Update only deliberately.
+static StringScalars string_legacy_frozen_scalars(float f0, float damping, float release_damping)
+{
+    StringScalars s = {};
+    s.silent        = ! (f0 >= 22.0f);
+    if (s.silent) {
+        return s;
+    }
+    damping           = string_unit_clamp(damping);
+    release_damping   = string_unit_clamp(release_damping);
+    float len         = string_fs / f0;
+    len               = len < 3.0f ? 3.0f : len;
+    s.c               = 0.10f + 0.30f * damping;
+    const float tau   = s.c / (1.0f - s.c);
+    const float t60   = 20.0f * powf(0.25f / 20.0f, damping);
+    const float omega = 6.2831853f * f0 / string_fs;
+    const float mag   = (1.0f - s.c) / sqrtf(1.0f - 2.0f * s.c * cosf(omega) + s.c * s.c);
+    const float g     = powf(10.0f, -3.0f * len / (string_fs * t60)) / mag;
+    s.g               = g < 0.9999f ? g : 0.9999f;
+    const float delay = len - tau;
+    s.n               = static_cast<uint32_t>(floorf(delay - 1.0f));
+    const float d     = delay - static_cast<float>(s.n);
+    s.a               = (1.0f - d) / (1.0f + d);
+    s.gr              = powf(10.0f, -release_damping * 3.0f * len / (string_fs * 0.05f));
+    return s;
+}
+
+static void string_legacy_frozen_init(float* ring, const StringScalars& s, float pick, uint32_t seed)
+{
+    const uint32_t n   = s.n;
+    uint32_t       off = static_cast<uint32_t>(floorf(pick * static_cast<float>(n) + 0.5f));
+    off                = (pick > 0.0f && off < 1) ? 1 : off;
+    off                = off < n - 1 ? off : n - 1;
+    float noise_energy = 0.0f;
+    if (off > 0) {
+        for (uint32_t lane = 0; lane < 256; ++lane) {
+            float lane_energy = 0.0f;
+            for (uint32_t i = lane; i < n; i += 256) {
+                const uint32_t src        = (i + n - off) % n;
+                const float    noise_here = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
+                const float noise_prior   = static_cast<float>(string_pcg_hash(seed + src) & 0xFFFFu) / 32767.5f - 1.0f;
+                ring[i]                   = noise_here - noise_prior;
+                lane_energy += noise_here * noise_here;
+            }
+            noise_energy += lane_energy;
+        }
+    }
+    else {
+        for (uint32_t i = 0; i < n; ++i) {
+            ring[i] = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
+        }
+    }
+    float sum = 0.0f;
+    for (uint32_t k = 0; k < n; ++k) {
+        sum += ring[k];
+    }
+    const float mean = sum / static_cast<float>(n);
+    for (uint32_t k = 0; k < n; ++k) {
+        ring[k] -= mean;
+    }
+    if (off > 0) {
+        float comb_energy = 0.0f;
+        for (uint32_t k = 0; k < n; ++k) {
+            comb_energy += ring[k] * ring[k];
+        }
+        const float comb_gain = comb_energy > 0.0f ? sqrtf(noise_energy / comb_energy) : 1.0f;
+        for (uint32_t k = 0; k < n; ++k) {
+            ring[k] *= comb_gain;
+        }
+    }
+}
+
+// d = 0 natural string path: current layout (with the dispersion rows at 0 and with them omitted) versus the
+// legacy 2040-slot layout. Output must be bit-identical, and the last 2034 logical ring slots must match
+// exactly across several wraps of both layouts.
+static void check_string_natural_path_legacy_capacity()
+{
+    static StringMirror current;
+    static float        legacy_ring[string_legacy_ring_size];
+    static float        out_current[6144];
+    static float        out_plain[6144];
+    static float        out_legacy[6144];
+    static StringMirror plain;
+    constexpr uint32_t  count       = 6144;
+    const float         f0s[9]      = { 22.5f, 30.0f, 55.0f, 110.0f, 261.63f, 441.0f, 880.0f, 3000.0f, 8000.0f };
+    const float         dampings[2] = { 0.5f, 0.0f };
+    const float         picks[2]    = { 0.0f, 0.5f };
+    uint32_t            compared    = 0;
+    for (const float f0 : f0s) {
+        for (const float damping : dampings) {
+            for (const float pick : picks) {
+                const StringScalars s = string_legacy_frozen_scalars(f0, damping, 0.0f);
+                TEST(! s.silent && s.n >= 2 && s.n < string_ring_size);
+                const StringScalars now = string_mirror_scalars(f0, damping, 0.0f);
+                TEST(now.n == s.n && now.c == s.c && now.a == s.a && now.g == s.g && now.gr == s.gr);
+                memset(&current, 0, sizeof(current));
+                memset(&plain, 0, sizeof(plain));
+                string_mirror_init(&current, f0, damping, pick, 77, 1.0f, 0.0f, 4.0f);
+                string_mirror_init(&plain, f0, damping, pick, 77);
+                // The legacy side uses the frozen pre-dispersion scalars and excitation, not the current helpers.
+                memset(legacy_ring, 0, sizeof(legacy_ring));
+                string_legacy_frozen_init(legacy_ring, s, pick, 77);
+                uint32_t legacy_wr = s.n;
+                float    t1        = 0.0f;
+                float    u1        = 0.0f;
+                float    e         = 1.0f;
+                for (uint32_t i = 0; i < count; i += 256) {
+                    string_mirror_step(&current, f0, damping, 0.0f, false, out_current + i, 256, 0.0f, 4.0f);
+                    string_mirror_step(&plain, f0, damping, 0.0f, false, out_plain + i, 256);
+                    string_legacy_layout_step(legacy_ring, &legacy_wr, &t1, &u1, &e, s, out_legacy + i, 256);
+                }
+                TEST(memcmp(out_current, out_legacy, sizeof(out_legacy)) == 0);
+                TEST(memcmp(out_plain, out_legacy, sizeof(out_legacy)) == 0);
+                double energy = 0.0;
+                for (uint32_t i = 0; i < count; ++i) {
+                    energy += static_cast<double>(out_legacy[i]) * static_cast<double>(out_legacy[i]);
+                }
+                TEST(energy > 0.0);
+                TEST(current.wr == (s.n + count) % string_ring_size &&
+                     legacy_wr == (s.n + count) % string_legacy_ring_size);
+                // Logical write j lives at (n + j) modulo the layout's ring size; compare the last 2034 writes.
+                bool ring_same = true;
+                for (uint32_t j = count - string_ring_size; j < count; ++j) {
+                    ring_same = ring_same && current.ring[(s.n + j) % string_ring_size] ==
+                                                 legacy_ring[(s.n + j) % string_legacy_ring_size];
+                }
+                TEST(ring_same);
+                ++compared;
+            }
+        }
+    }
+    TEST(compared == 36);
+}
+
+// Held note whose pitch sweeps from `start` up to `peak` (in the fallback region) and down to `target`, then
+// holds. Every sample stays finite and bounded. Returns true when the settled fundamental (measured long after
+// the sweep) is within 1 cent of the target.
+static bool string_disp_held_sweep(float start, float peak, float target, float dispersion, float sections)
+{
+    memset(&string_test_mirror, 0, sizeof(string_test_mirror));
+    string_mirror_init(&string_test_mirror, start, 0.0f, 0.0f, 4321, 1.0f, dispersion, sections);
+    for (uint32_t block = 0; block < string_test_samples / 256; ++block) {
+        float f0 = target;
+        if (block < 10) {
+            f0 = start * powf(peak / start, static_cast<float>(block + 1) / 10.0f);
+        }
+        else if (block < 20) {
+            f0 = peak * powf(target / peak, static_cast<float>(block - 9) / 10.0f);
+        }
+        float* const out = string_test_out + block * 256;
+        string_mirror_step(&string_test_mirror, f0, 0.0f, 0.0f, false, out, 256, dispersion, sections);
+        for (uint32_t i = 0; i < 256; ++i) {
+            TEST(std::isfinite(out[i]) && fabsf(out[i]) < 8.0f);
+        }
+    }
+    double tail_energy = 0.0;
+    for (uint32_t i = string_test_samples - 256; i < string_test_samples; ++i) {
+        tail_energy += static_cast<double>(string_test_out[i]) * static_cast<double>(string_test_out[i]);
+    }
+    TEST(tail_energy > 0.0);
+    const double width = fmax(0.4, 0.006 * static_cast<double>(target));
+    const double f1    = string_peak_freq(string_test_out, 11025, 32768, static_cast<double>(target), width);
+    return string_peak_valid(f1, static_cast<double>(target), width) &&
+           fabs(1200.0 * log2(f1 / static_cast<double>(target))) < 1.0;
+}
+
+// Renders a fresh note and measures the stretch (cents over k f1) of partials 2..4 without consulting the oracle:
+// a coarse scan around each ideal harmonic position, then a bracketed refinement. Returns false when f1 or a
+// partial did not land on a valid peak.
+static bool string_disp_measure_stretch(float f0, float dispersion, float sections, double* stretch)
+{
+    memset(&string_test_mirror, 0, sizeof(string_test_mirror));
+    string_mirror_init(&string_test_mirror, f0, 0.0f, 0.0f, 4321, 1.0f, dispersion, sections);
+    for (uint32_t i = 0; i < string_test_samples; i += 256) {
+        string_mirror_step(&string_test_mirror, f0, 0.0f, 0.0f, false, string_test_out + i, 256, dispersion, sections);
+    }
+    const double f1_width = fmax(0.4, 0.006 * static_cast<double>(f0));
+    const double f1       = string_peak_freq(string_test_out, 11025, 32768, static_cast<double>(f0), f1_width);
+    bool         valid    = string_peak_valid(f1, static_cast<double>(f0), f1_width);
+    for (int k = 2; k <= 4; ++k) {
+        const double center   = k * f1;
+        double       best     = center;
+        double       best_amp = -1.0;
+        for (double f = center - 0.3 * static_cast<double>(f0); f <= center + 0.3 * static_cast<double>(f0); f += 0.5) {
+            const double amp = string_amp_at(string_test_out, 11025, 32768, f);
+            if (amp > best_amp) {
+                best_amp = amp;
+                best     = f;
+            }
+        }
+        const double peak = string_peak_freq(string_test_out, 11025, 32768, best, 0.5);
+        valid             = valid && std::isfinite(peak);
+        stretch[k]        = 1200.0 * log2(peak / center);
+    }
+    return valid;
+}
+
+// Cross-count equality: with the per-count normalisation the stretch of partials 2..4 at fixed d and f0 is nearly
+// the same for 1..6 sections, with only a small systematic rise at the higher partials. Mutation 6 breaks it.
+static bool string_disp_count_invariant()
+{
+    const float pitches[3] = { 55.0f, 110.0f, 220.0f };
+    bool        ok         = true;
+    for (const float f0 : pitches) {
+        double lowest[5]  = { 1e9, 1e9, 1e9, 1e9, 1e9 };
+        double highest[5] = { -1e9, -1e9, -1e9, -1e9, -1e9 };
+        double previous4  = -1e9;
+        double first4     = 0.0;
+        for (uint32_t sections = 1; sections <= 6; ++sections) {
+            double stretch[5] = {};
+            ok                = string_disp_measure_stretch(f0, 1.0f, static_cast<float>(sections), stretch) && ok;
+            for (int k = 2; k <= 4; ++k) {
+                lowest[k]  = fmin(lowest[k], stretch[k]);
+                highest[k] = fmax(highest[k], stretch[k]);
+            }
+            // Slight, systematic, measurable: partial 4 rises with every added section.
+            ok        = stretch[4] > previous4 + 0.1 && ok;
+            previous4 = stretch[4];
+            first4    = sections == 1 ? stretch[4] : first4;
+            ok        = (sections < 6 || (stretch[4] - first4 > 2.0 && stretch[4] - first4 < 5.0)) && ok;
+        }
+        ok = highest[2] - lowest[2] < 0.6 && highest[3] - lowest[3] < 1.8 && highest[4] - lowest[4] < 4.2 && ok;
+    }
+    return ok;
+}
+
+static void check_string_mirror_dispersion()
+{
+    static StringMirror a;
+    static StringMirror b;
+    static StringMirror legacy;
+    static float        out_a[2048];
+    static float        out_b[2048];
+    static float        out_l[2048];
+    static float        ring_l[string_ring_size];
+    // (a) d = 0 is bit-identical to the frozen legacy loop for every sections value, pick off and on.
+    // At damping 0.5: 441 Hz gives N = 98 and 400 Hz N = 108 (even), 420 Hz gives N = 103 (odd).
+    const float legacy_freqs[3] = { 441.0f, 400.0f, 420.0f };
+    for (const float f0 : legacy_freqs) {
+        const StringScalars plain = string_mirror_scalars(f0, 0.5f, 0.0f);
+        TEST(plain.n % 2 == (f0 == 420.0f ? 1u : 0u));
+        for (uint32_t pick = 0; pick < 2; ++pick) {
+            for (uint32_t sections = 1; sections <= 6; ++sections) {
+                const StringScalars gated = string_mirror_scalars(f0, 0.5f, 0.0f, 0.0f, static_cast<float>(sections));
+                TEST(gated.num_sections == 0 && gated.disp_delay == 0.0f && gated.n == plain.n && gated.a == plain.a);
+                memset(&a, 0, sizeof(a));
+                memset(&b, 0, sizeof(b));
+                memset(&legacy, 0, sizeof(legacy));
+                const float p = pick ? 0.5f : 0.0f;
+                string_mirror_init(&a, f0, 0.5f, p, 55, 1.0f, 0.0f, static_cast<float>(sections));
+                string_mirror_init(&b, f0, 0.5f, p, 55);
+                string_mirror_init(&legacy, f0, 0.5f, p, 55);
+                string_mirror_step(&a, f0, 0.5f, 0.0f, false, out_a, 2048, 0.0f, static_cast<float>(sections));
+                string_mirror_step(&b, f0, 0.5f, 0.0f, false, out_b, 2048);
+                for (uint32_t i = 0; i < 2048; i += 256) {
+                    string_legacy_step(&legacy, f0, 0.5f, out_l + i, 256);
+                }
+                TEST(memcmp(out_a, out_l, sizeof(out_a)) == 0 && memcmp(out_b, out_l, sizeof(out_b)) == 0);
+                memcpy(ring_l, legacy.ring, sizeof(ring_l));
+                TEST(memcmp(a.ring, ring_l, sizeof(ring_l)) == 0 && memcmp(b.ring, ring_l, sizeof(ring_l)) == 0);
+                TEST(a.ds[0] == 0.0f && a.ds[5] == 0.0f);
+            }
+        }
+    }
+    // (b) Tuning and (c) stretch vs the oracle, over d x sections x f0; the 4th-partial stretch is
+    // also near 18 cents * d (4 sections) and pitch-invariant across [55, 880] Hz.
+    const float disps[4]          = { 0.01f, 0.25f, 0.5f, 1.0f };
+    const float section_counts[3] = { 1.0f, 4.0f, 6.0f };
+    const float pitches[10] = { 55.0f, 65.41f, 82.41f, 110.0f, 164.81f, 220.0f, 329.63f, 440.0f, 659.26f, 880.0f };
+    for (const float d : disps) {
+        for (const float sections : section_counts) {
+            double lowest   = 1e9;
+            double highest  = -1e9;
+            double lowest2  = 1e9;
+            double highest2 = -1e9;
+            double lowest3  = 1e9;
+            double highest3 = -1e9;
+            for (const float f0 : pitches) {
+                double          stretch = 0.0;
+                StringDispExtra extra   = {};
+                TEST(string_disp_case(f0, d, sections, &stretch, &extra));
+                TEST(stretch > 0.0 && extra.stretch_p2 > 0.0 && extra.stretch_p3 > 0.0);
+                TEST(stretch > extra.stretch_p3 && extra.stretch_p3 > extra.stretch_p2);
+                // Gate boundary just above zero: the stretch is small, positive and matches the oracle.
+                if (d == 0.01f) {
+                    // Small and positive overall (18 cents at d = 1). Above 440 Hz the fractional-allpass
+                    // re-quantisation of the loop delay (measured up to +-3 cents) swamps the increment, so the
+                    // increment over the d = 0 oracle is only bounded below that.
+                    TEST(stretch < 4.0);
+                    if (f0 <= 440.0f) {
+                        double flat[5];
+                        double tiny[5];
+                        string_disp_oracle(static_cast<double>(f0), 0.0, 0.0, 0.0, flat);
+                        string_disp_oracle(static_cast<double>(f0), 0.01, static_cast<double>(sections), 0.0, tiny);
+                        const double increment = 1200.0 * log2((tiny[4] / tiny[1]) / (flat[4] / flat[1]));
+                        TEST(increment > 0.05 && increment < 0.4 * static_cast<double>(sections));
+                    }
+                    TEST(fabs(stretch - extra.oracle_stretch) < 1.0);
+                }
+                lowest   = fmin(lowest, stretch);
+                highest  = fmax(highest, stretch);
+                lowest2  = fmin(lowest2, extra.stretch_p2);
+                highest2 = fmax(highest2, extra.stretch_p2);
+                lowest3  = fmin(lowest3, extra.stretch_p3);
+                highest3 = fmax(highest3, extra.stretch_p3);
+                if (sections == 4.0f) {
+                    TEST(fabs(stretch - 18.0 * static_cast<double>(d)) < 6.0);
+                }
+            }
+            TEST(highest - lowest < 4.5);
+            // Partials 2 and 3 stretch less (about (k^2 - 1) / 15 of partial 4) and stay pitch invariant.
+            TEST(highest2 - lowest2 < 1.0);
+            TEST(highest3 - lowest3 < 2.5);
+        }
+    }
+    // (d) The sections knob does not scale the strength: at fixed d and f0 the stretch of partials 2..4 is nearly
+    // the same for 1..6 sections (the residual is the higher-order growth of the cascade's curvature with the
+    // section count, a small systematic rise at the higher partials), and every count stays in tune.
+    for (uint32_t sections = 1; sections <= 6; ++sections) {
+        double stretch = 0.0;
+        TEST(string_disp_case(110.0f, 1.0f, static_cast<float>(sections), &stretch));
+    }
+    TEST(string_disp_count_invariant());
+    // (d2) Mutation 6 (no division by the section count) makes the strength scale with the count.
+    string_disp_mutation = 6;
+    TEST(! string_disp_count_invariant());
+    string_disp_mutation = 0;
+
+    // (e) Fallback sweep: scalars stay in domain over a wide f0 range, all counts are used unreduced
+    // inside [55, 880] Hz, and a held-note pitch sweep up and down stays finite, bounded and audible.
+    for (float f0 = 22.0f; f0 < 8000.0f; f0 *= 1.01f) {
+        for (const float d : disps) {
+            const StringScalars s = string_mirror_scalars(f0, 0.5f, 0.0f, d, 6.0f);
+            TEST(std::isfinite(s.disp_a) && s.num_sections <= 6 && s.n >= 2 && s.n < string_ring_size);
+            TEST(s.disp_delay >= 0.0f && std::isfinite(s.a) && fabsf(s.a) < 1.0f);
+            if (f0 >= 55.0f && f0 <= 880.0f) {
+                TEST(s.num_sections == 6);
+            }
+        }
+    }
+    memset(&a, 0, sizeof(a));
+    string_mirror_init(&a, 880.0f, 0.5f, 0.0f, 7, 1.0f, 1.0f, 6.0f);
+    double tail_energy = 0.0;
+    for (uint32_t block = 0; block < 400; ++block) {
+        const float phase = static_cast<float>(block < 200 ? block : 400 - block) / 200.0f;
+        const float f0    = 880.0f * powf(3000.0f / 880.0f, phase);
+        string_mirror_step(&a, f0, 0.5f, 0.0f, false, out_a, 256, 1.0f, 6.0f);
+        for (uint32_t i = 0; i < 256; ++i) {
+            TEST(std::isfinite(out_a[i]) && fabsf(out_a[i]) < 8.0f);
+            tail_energy += block >= 399 ? static_cast<double>(out_a[i]) * static_cast<double>(out_a[i]) : 0.0;
+        }
+    }
+    TEST(tail_energy > 0.0);
+    // Settled tuning after fallback: the note is held through a sweep into the fallback region (where cascade
+    // sections are dropped) and back; once settled, the fundamental is in tune whenever the resulting pitch is
+    // inside [55, 880] Hz. Outside that domain only the finite/bounded checks in the helper apply.
+    {
+        const float sweeps[6][3] = { { 880.0f, 3000.0f, 880.0f },  { 55.0f, 3000.0f, 440.0f },
+                                     { 220.0f, 8000.0f, 220.0f },  { 880.0f, 1500.0f, 55.0f },
+                                     { 440.0f, 3000.0f, 659.26f }, { 110.0f, 8000.0f, 2000.0f } };
+        for (const auto& sweep : sweeps) {
+            for (const float d : disps) {
+                const bool in_domain = sweep[2] >= 55.0f && sweep[2] <= 880.0f;
+                if (in_domain) {
+                    TEST(string_disp_held_sweep(sweep[0], sweep[1], sweep[2], d, 6.0f));
+                }
+                else {
+                    string_disp_held_sweep(sweep[0], sweep[1], sweep[2], d, 6.0f);
+                }
+            }
+        }
+    }
+    // (f) Mutations must each fail the tuning / oracle-stretch case at some pitch.
+    const float mutation_pitches[3] = { 55.0f, 220.0f, 880.0f };
+    for (int mutation = 1; mutation <= 6; ++mutation) {
+        string_disp_mutation = mutation;
+        bool all_ok          = true;
+        for (const float f0 : mutation_pitches) {
+            double stretch = 0.0;
+            all_ok         = string_disp_case(f0, 1.0f, 4.0f, &stretch) && all_ok;
+        }
+        string_disp_mutation = 0;
+        TEST(! all_ok);
+    }
+}
+
 static void string_mirror_m2_regressions_b()
 {
     check_string_mirror_release_click_free();
@@ -24195,10 +25165,13 @@ static void string_mirror_m2_regressions_b()
     check_string_mirror_release_lifetime();
     check_string_mirror_sustain_holds();
     check_string_mirror_pick_comb();
+    check_string_mirror_dispersion();
+    check_string_natural_path_legacy_capacity();
     check_string_mirror_brightness();
     check_string_mirror_pick_circular();
     check_string_mirror_fm_ring_read();
     check_string_mirror_ring_read_edges();
+    check_string_fm_layout_characterization();
     check_string_mirror_nan_guard();
     check_string_mirror_damping_clamp();
     check_string_mirror_silent_onset_init();
@@ -25564,8 +26537,9 @@ int main()
     // two-layer behavior is covered by the manual audio check because realtime_synth.cpp is
     // not linked into the test suites.
     {
-        Synth::Instrument instrument     = {};
-        instrument.layer_count           = 2;
+        Synth::Instrument instrument = {};
+        instrument.layer_count       = 2;
+        set_default_dispersion_sections(instrument);
         instrument.layers[0].osc_type[0] = Synth::WaveType::sine_wave;
         instrument.layers[1].osc_type[0] = Synth::WaveType::sawtooth_wave;
 
@@ -25657,7 +26631,8 @@ int main()
         bank.envelopes.entries[4].num_points = 42;
         const uint32_t instr                 = bank.instruments.allocate();
         TEST(instr != pool_no_slot);
-        bank.instruments.entries[instr].layer_count                                           = 1;
+        bank.instruments.entries[instr].layer_count = 1;
+        set_default_dispersion_sections(bank.instruments.entries[instr]);
         bank.instruments.entries[instr].layers[0].targets[Synth::mod_volume].envelope_desc_id = 5;
 
         uint32_t env_map[Synth::max_envelopes];
@@ -25718,14 +26693,16 @@ int main()
         Synth::InstrumentBank&                       bank         = *bank_storage;
         const uint32_t                               instr        = bank.instruments.allocate();
         bank.instruments.entries[instr].layer_count               = 3;
-        const uint32_t env                                        = bank.envelopes.allocate();
-        bank.envelopes.entries[env].num_points                    = 7;
+        set_default_dispersion_sections(bank.instruments.entries[instr]);
+        const uint32_t env                     = bank.envelopes.allocate();
+        bank.envelopes.entries[env].num_points = 7;
 
         const std::unique_ptr<Synth::InstrumentBank> snapshot_storage = std::make_unique<Synth::InstrumentBank>();
         Synth::InstrumentBank&                       snapshot         = *snapshot_storage;
         memcpy(&snapshot, &bank, sizeof(bank));
 
         bank.instruments.entries[instr].layer_count = 99;
+        set_default_dispersion_sections(bank.instruments.entries[instr]);
         bank.instruments.free(instr);
 
         memcpy(&bank, &snapshot, sizeof(bank));
@@ -26024,15 +27001,17 @@ int main()
     // Builds a small valid bank: one instrument, one envelope, one LFO, one zone.
     auto make_valid_bank = [](Synth::InstrumentBank& bank) {
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
-        const uint32_t env                                          = bank.envelopes.allocate();
-        bank.envelopes.entries[env].num_points                      = 2;
-        bank.envelopes.entries[env].points[1].position              = 100;
-        const uint32_t lfo                                          = bank.lfos.allocate();
-        bank.lfos.entries[lfo].wave                                 = Synth::WaveType::sine_wave;
-        bank.lfos.entries[lfo].period_ms                            = 50;
-        const uint32_t instr                                        = bank.instruments.allocate();
-        bank.instruments.entries[instr].layer_count                 = 1;
-        bank.instruments.entries[instr].layers[0].fir_slope_percent = 100;
+        const uint32_t env                             = bank.envelopes.allocate();
+        bank.envelopes.entries[env].num_points         = 2;
+        bank.envelopes.entries[env].points[1].position = 100;
+        const uint32_t lfo                             = bank.lfos.allocate();
+        bank.lfos.entries[lfo].wave                    = Synth::WaveType::sine_wave;
+        bank.lfos.entries[lfo].period_ms               = 50;
+        const uint32_t instr                           = bank.instruments.allocate();
+        bank.instruments.entries[instr].layer_count    = 1;
+        set_default_dispersion_sections(bank.instruments.entries[instr]);
+        bank.instruments.entries[instr].layers[0].fir_slope_percent          = 100;
+        bank.instruments.entries[instr].layers[0].string_dispersion_sections = 4.0f;
         bank.instruments.entries[instr].layers[0].targets[Synth::mod_volume].envelope_desc_id =
             static_cast<uint16_t>(env + 1);
         bank.instruments.entries[instr].layers[0].targets[Synth::mod_pitch].lfo_desc_id =
@@ -26162,6 +27141,7 @@ int main()
         rm_entry.layers[0].fir_slope_percent = 63; // the survivor keeps its own slope
         rm_entry.layers[1].fir_slope_percent = 37;
         rm_entry.layer_count                 = 2;
+        set_default_dispersion_sections(rm_entry);
         TEST(Synth::validate_instrument_bank(&rm_bank.bank));
         TEST(Sculptor::project_editor_to_graph(rm_bank, &rm_graph, &rm_mapping));
         TEST(rm_mapping.osc_nodes[1] != Sculptor::pool_no_slot);
@@ -26189,6 +27169,7 @@ int main()
         bank.lfos.entries[0].period_ms = 50;
         TEST(bank.instruments.allocate() == 0);
         bank.instruments.entries[0].layer_count = 1;
+        set_default_dispersion_sections(bank.instruments.entries[0]);
         TEST(Synth::init_default_channel(&bank, 5));
         TEST(bank.instruments.num_allocated == 2);
         TEST(bank.envelopes.num_allocated == 1);
@@ -26217,6 +27198,7 @@ int main()
         Synth::InstrumentBank&                       bank         = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         bank.instruments.entries[0].layer_count = 1;
+        set_default_dispersion_sections(bank.instruments.entries[0]);
         for (uint32_t i = 0; i < Synth::max_instruments; i++) {
             TEST(bank.instruments.allocate() == i);
         }
@@ -26237,10 +27219,12 @@ int main()
         make_valid_bank(bank.bank); // instrument 0 (env 1, lfo 1) on ch0; ch0 and ch1 enabled
 
         TEST(bank.bank.instruments.allocate() == 1);
-        bank.bank.instruments.entries[1].layer_count                                           = 1;
+        bank.bank.instruments.entries[1].layer_count = 1;
+        set_default_dispersion_sections(bank.bank.instruments.entries[1]);
         bank.bank.instruments.entries[1].layers[0].targets[Synth::mod_volume].envelope_desc_id = 1; // shares env 1
         TEST(bank.bank.instruments.allocate() == 2);
         bank.bank.instruments.entries[2].layer_count = 1;
+        set_default_dispersion_sections(bank.bank.instruments.entries[2]);
         TEST(bank.bank.envelopes.allocate() == 1);
         bank.bank.envelopes.entries[1].num_points         = 2;
         bank.bank.envelopes.entries[1].points[1].position = 200;
@@ -26319,13 +27303,15 @@ int main()
         make_valid_bank(bank.bank); // instr 0 on ch0
         TEST(bank.bank.instruments.allocate() == 1);
         bank.bank.instruments.entries[1].layer_count = 1;
-        bank.bank.channel_zones[1][0]                = { 1, 1 }; // ch1 -> instr 1
+        set_default_dispersion_sections(bank.bank.instruments.entries[1]);
+        bank.bank.channel_zones[1][0] = { 1, 1 }; // ch1 -> instr 1
         TEST(bank.bank.instruments.allocate() == 2);
-        bank.bank.instruments.entries[2].layer_count = 1;         // orphaned
-        bank.bank.channel_enabled[0]                 = 0;         // instr 0 loses its last live reference
-        bank.bank.channel_zones[2][0]                = { 5, 7 };  // ch2 disabled: dangling reference
-        bank.bank.channel_zones[2][1]                = { 9, 0 };  // reference to the instrument about to be removed
-        bank.bank.channel_zones[2][2]                = { 13, 1 }; // reference to a survivor (compacts 1 -> 0)
+        bank.bank.instruments.entries[2].layer_count = 1; // orphaned
+        set_default_dispersion_sections(bank.bank.instruments.entries[2]);
+        bank.bank.channel_enabled[0]  = 0;         // instr 0 loses its last live reference
+        bank.bank.channel_zones[2][0] = { 5, 7 };  // ch2 disabled: dangling reference
+        bank.bank.channel_zones[2][1] = { 9, 0 };  // reference to the instrument about to be removed
+        bank.bank.channel_zones[2][2] = { 13, 1 }; // reference to a survivor (compacts 1 -> 0)
         Synth::reclaim_unused_slots(&bank);
 
         TEST(bank.bank.instruments.num_allocated == 1);
@@ -27538,10 +28524,12 @@ int main()
         // Fill the queue (capacity 2).
         for (uint32_t k = 0; k < Synth::bank_queue_capacity; k++) {
             bank.instruments.entries[0].layer_count = k + 1;
+            set_default_dispersion_sections(bank.instruments.entries[0]);
             TEST(Synth::push_bank_update(&queue, bank));
         }
         // Third push fails at tail=2, head=0.
         bank.instruments.entries[0].layer_count = 99;
+        set_default_dispersion_sections(bank.instruments.entries[0]);
         TEST(! Synth::push_bank_update(&queue, bank));
 
         // Consume one: the third push now succeeds (wraparound: slot 0 reused).
@@ -27855,7 +28843,8 @@ int main()
         bank.bank.lfos.entries[1].wave      = Synth::WaveType::sawtooth_wave;
         bank.bank.lfos.entries[1].period_ms = 80;
         TEST(bank.bank.instruments.allocate() == 1);
-        bank.bank.instruments.entries[1].layer_count                                           = 1;
+        bank.bank.instruments.entries[1].layer_count = 1;
+        set_default_dispersion_sections(bank.bank.instruments.entries[1]);
         bank.bank.instruments.entries[1].layers[0].fir_slope_percent                           = 100;
         bank.bank.instruments.entries[1].layers[0].targets[Synth::mod_volume].envelope_desc_id = 2;
         bank.bank.instruments.entries[1].layers[0].targets[Synth::mod_pitch].lfo_desc_id       = 2;
@@ -27969,10 +28958,12 @@ int main()
         memset(static_cast<void*>(&src), 0, sizeof(src));
         src.bank.instruments.allocate();
         src.bank.instruments.entries[0].layer_count = 1;
+        set_default_dispersion_sections(src.bank.instruments.entries[0]);
         memcpy(src.instrument_names[0], "Chained", 8);
-        src.bank.instruments.entries[0].layers[0].fir_slope_percent = 100;
-        src.bank.channel_zones[0][0].start_note                     = 1;
-        src.bank.channel_zones[0][0].instrument                     = 0;
+        src.bank.instruments.entries[0].layers[0].fir_slope_percent          = 100;
+        src.bank.instruments.entries[0].layers[0].string_dispersion_sections = 4.0f;
+        src.bank.channel_zones[0][0].start_note                              = 1;
+        src.bank.channel_zones[0][0].instrument                              = 0;
         Sculptor::set_identity_osc_sources(&src, 0, 0);
         src.bank.channel_enabled[0] = 1;
         TEST(src.bank.lfos.allocate() == 0);
@@ -28078,6 +29069,7 @@ int main()
         // Every record instrument must be referenced by a zone.
         src.bank.instruments.allocate();
         src.bank.instruments.entries[1].layer_count = 1;
+        set_default_dispersion_sections(src.bank.instruments.entries[1]);
         attempt_load(false);
         remove(path);
     }
@@ -28091,10 +29083,12 @@ int main()
         memset(static_cast<void*>(&src), 0, sizeof(src));
         src.bank.instruments.allocate();
         src.bank.instruments.entries[0].layer_count = 1;
+        set_default_dispersion_sections(src.bank.instruments.entries[0]);
         memcpy(src.instrument_names[0], "Loaded", 7);
-        src.bank.instruments.entries[0].layers[0].fir_slope_percent = 100;
-        src.bank.channel_zones[0][0].start_note                     = 1;
-        src.bank.channel_zones[0][0].instrument                     = 0;
+        src.bank.instruments.entries[0].layers[0].fir_slope_percent          = 100;
+        src.bank.instruments.entries[0].layers[0].string_dispersion_sections = 4.0f;
+        src.bank.channel_zones[0][0].start_note                              = 1;
+        src.bank.channel_zones[0][0].instrument                              = 0;
         Sculptor::set_identity_osc_sources(&src, 0, 0);
         src.bank.channel_enabled[0] = 1;
         TEST(Synth::validate_instrument_bank(&src.bank));
@@ -28149,7 +29143,8 @@ int main()
         env.points[0].value           = 0xFFFF;
         src.bank.envelopes.entries[0] = env;
         src.bank.instruments.allocate();
-        src.bank.instruments.entries[0].layer_count                                           = 1;
+        src.bank.instruments.entries[0].layer_count = 1;
+        set_default_dispersion_sections(src.bank.instruments.entries[0]);
         src.bank.instruments.entries[0].layers[0].fir_slope_percent                           = 100;
         src.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].envelope_desc_id = 1;
         src.bank.channel_zones[0][0].start_note                                               = 1;
@@ -28897,6 +29892,7 @@ int main()
             TEST(routed.bank.instruments.allocate() == 0);
             Synth::Instrument& routed_instr = routed.bank.instruments.entries[0];
             routed_instr.layer_count        = 3;
+            set_default_dispersion_sections(routed_instr);
             for (uint32_t layer = 0; layer < 3; layer++) {
                 routed_instr.layers[layer].osc_type[0]       = Synth::WaveType::sine_wave;
                 routed_instr.layers[layer].fir_slope_percent = 100;
@@ -29478,6 +30474,7 @@ int main()
             const uint32_t     slot  = bank.bank.instruments.allocate();
             Synth::Instrument& instr = bank.bank.instruments.entries[slot];
             instr.layer_count        = Synth::max_layers;
+            set_default_dispersion_sections(instr);
             for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
                 Synth::Oscillator& osc = instr.layers[layer];
                 osc.osc_type[0]        = Synth::WaveType::sine_wave;
@@ -29697,10 +30694,11 @@ int main()
         Synth::InstrumentBank&                       bank         = *bank_storage;
         Synth::Instrument                            instrument   = {};
         instrument.layer_count                                    = 1;
-        instrument.layers[0].osc_type[0]                          = Synth::WaveType::sine_wave;
-        const std::unique_ptr<Sculptor::Graph> graph_storage      = std::make_unique<Sculptor::Graph>();
-        Sculptor::Graph&                       graph              = *graph_storage;
-        Sculptor::OscGraphMapping              mapping            = {};
+        set_default_dispersion_sections(instrument);
+        instrument.layers[0].osc_type[0]                     = Synth::WaveType::sine_wave;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
         check_osc_graph_mapping(graph, mapping, 1, 0, 0);
         TEST(graph.connection_count() == 1);
@@ -29716,9 +30714,9 @@ int main()
         TEST(strncmp(graph.node(mapping.osc_nodes[0]).slots.entries[1].list_options[1],
                      "sawtooth",
                      sizeof(graph.node(mapping.osc_nodes[0]).slots.entries[1].list_options[0])) == 0);
-        TEST(strncmp(graph.node(mapping.osc_nodes[0]).slots.entries[30].list_options[2],
+        TEST(strncmp(graph.node(mapping.osc_nodes[0]).slots.entries[32].list_options[2],
                      "sawtooth",
-                     sizeof(graph.node(mapping.osc_nodes[0]).slots.entries[30].list_options[0])) == 0);
+                     sizeof(graph.node(mapping.osc_nodes[0]).slots.entries[32].list_options[0])) == 0);
         Sculptor::PropertyValue saw;
         saw.list_index = 1;
         graph.set_slot_value(mapping.osc_nodes[0], 1, saw); // "sawtooth"
@@ -29738,11 +30736,12 @@ int main()
         Synth::InstrumentBank&                       bank_image         = *bank_image_storage;
         Synth::Instrument                            good               = {};
         good.layer_count                                                = 1;
-        good.layers[0].targets[Synth::mod_volume].num_inputs            = 1;
-        good.layers[0].targets[Synth::mod_volume].inputs[0]             = { Synth::ModSource::velocity,
-                                                                            Synth::SourceOp::multiply,
-                                                                            0,
-                                                                            0.5f };
+        set_default_dispersion_sections(good);
+        good.layers[0].targets[Synth::mod_volume].num_inputs = 1;
+        good.layers[0].targets[Synth::mod_volume].inputs[0]  = { Synth::ModSource::velocity,
+                                                                 Synth::SourceOp::multiply,
+                                                                 0,
+                                                                 0.5f };
 
         const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
         Sculptor::Graph&                       graph         = *graph_storage;
@@ -29772,8 +30771,9 @@ int main()
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         bank.bank.channel_enabled[0] = 1;
         bank.bank.instruments.allocate();
-        Synth::Instrument& instrument    = bank.bank.instruments.entries[0];
-        instrument.layer_count           = 1;
+        Synth::Instrument& instrument = bank.bank.instruments.entries[0];
+        instrument.layer_count        = 1;
+        set_default_dispersion_sections(instrument);
         instrument.layers[0].osc_type[0] = Synth::WaveType::sine_wave;
         // Envelope id 1 is bound to the instrument; id 2 is referenced only by
         // a detached record.
@@ -29886,6 +30886,7 @@ int main()
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         instrument             = {};
         instrument.layer_count = layer_count;
+        set_default_dispersion_sections(instrument);
         for (uint32_t layer = 0; layer < layer_count; ++layer) {
             instrument.layers[layer].osc_type[0] = Synth::WaveType::sine_wave;
         }
@@ -29952,7 +30953,8 @@ int main()
         TEST(converted.points[2].value == 0x8000);
         TEST(Sculptor::env_volume_shape_ok(bank.envelopes.entries[env_slot]));
 
-        instrument.layer_count                                           = 1;
+        instrument.layer_count = 1;
+        set_default_dispersion_sections(instrument);
         instrument.layers[0].osc_type[0]                                 = Synth::WaveType::sine_wave;
         instrument.layers[0].targets[Synth::mod_volume].envelope_desc_id = static_cast<uint16_t>(env_slot + 1);
         const std::unique_ptr<Sculptor::Graph> graph_storage             = std::make_unique<Sculptor::Graph>();
@@ -29977,7 +30979,8 @@ int main()
         TEST(pitch_env_slot == 0);
         pitch_bank.envelopes.entries[pitch_env_slot] = bipolar;
         TEST(! Sculptor::env_volume_shape_ok(pitch_bank.envelopes.entries[pitch_env_slot]));
-        pitch_instrument.layer_count           = 1;
+        pitch_instrument.layer_count = 1;
+        set_default_dispersion_sections(pitch_instrument);
         pitch_instrument.layers[0].osc_type[0] = Synth::WaveType::sine_wave;
         pitch_instrument.layers[0].targets[Synth::mod_pitch].envelope_desc_id =
             static_cast<uint16_t>(pitch_env_slot + 1);
@@ -30313,10 +31316,11 @@ int main()
         TEST(bank.bank.instruments.allocate() == 1);
         bank.bank.instruments.entries[1]             = Synth::Instrument{};
         bank.bank.instruments.entries[1].layer_count = 2;
-        bank.bank.channel_zones[1][0].start_note     = 1;
-        bank.bank.channel_zones[1][0].instrument     = 1;
-        bank.graph_osc_source[1][0][0]               = 1;
-        bank.graph_osc_source[1][0][1]               = 2;
+        set_default_dispersion_sections(bank.bank.instruments.entries[1]);
+        bank.bank.channel_zones[1][0].start_note = 1;
+        bank.bank.channel_zones[1][0].instrument = 1;
+        bank.graph_osc_source[1][0][0]           = 1;
+        bank.graph_osc_source[1][0][1]           = 2;
 
         const std::unique_ptr<FixedArray<char, 256 * 1024>> doc_storage =
             std::make_unique<FixedArray<char, 256 * 1024>>();
@@ -32354,8 +33358,9 @@ int main()
 
         // The validator still refuses the stale state when it arrives by any
         // other route (a hand-authored bank), and the encoder refuses to emit it.
-        stale_instr                                                          = {};
-        stale_instr.layer_count                                              = 1;
+        stale_instr             = {};
+        stale_instr.layer_count = 1;
+        set_default_dispersion_sections(stale_instr);
         stale_instr.layers[0].targets[Synth::mod_volume].num_inputs          = 1;
         stale_instr.layers[0].targets[Synth::mod_volume].inputs[0].source    = Synth::ModSource::velocity;
         stale_instr.layers[0].targets[Synth::mod_volume].inputs[0].cc_number = 17;
@@ -33348,7 +34353,8 @@ int main()
             memset(static_cast<void*>(&bank_decoded), 0, sizeof(bank_decoded));
             TEST(Synth::decode_editor_bank_json(payload, slope_length, &bank_decoded));
             TEST(bank_decoded.bank.instruments.entries[0].layers[0].fir_slope_percent == 37);
-            slope_source.bank.instruments.entries[0].layers[0].fir_slope_percent = 100;
+            slope_source.bank.instruments.entries[0].layers[0].fir_slope_percent          = 100;
+            slope_source.bank.instruments.entries[0].layers[0].string_dispersion_sections = 4.0f;
             const uint32_t default_slope_length =
                 Synth::encode_editor_bank_json(&slope_source, payload, sizeof(payload));
             TEST(default_slope_length > 0);
@@ -33805,7 +34811,8 @@ int main()
                 Synth::InstrumentEditorBank& default_source = *default_source_storage;
                 build_named_fm_fixture(&default_source);
                 Sculptor::set_identity_osc_sources(&default_source, 0, 0);
-                default_source.bank.instruments.entries[0].layers[0].fir_slope_percent = 100;
+                default_source.bank.instruments.entries[0].layers[0].fir_slope_percent          = 100;
+                default_source.bank.instruments.entries[0].layers[0].string_dispersion_sections = 4.0f;
                 TEST(Sculptor::encode_editor_instrument_json(default_source,
                                                              0,
                                                              0,
@@ -34036,6 +35043,7 @@ int main()
             Synth::Instrument doc_instr = {};
             memset(static_cast<void*>(&doc_instr), 0, sizeof(doc_instr));
             doc_instr.layer_count = 3;
+            set_default_dispersion_sections(doc_instr);
             for (uint32_t layer = 0; layer < 3; layer++) {
                 doc_instr.layers[layer].osc_type[0]       = Synth::WaveType::sine_wave;
                 doc_instr.layers[layer].fir_slope_percent = 100;
@@ -35184,7 +36192,9 @@ int main()
             nm_dec_envs[1] = nm_envs[2];
 
             nm_src.layer_count = 3;
+            set_default_dispersion_sections(nm_src);
             nm_dec.layer_count = 3;
+            set_default_dispersion_sections(nm_dec);
             for (uint32_t layer = 0; layer < 3; layer++) {
                 nm_src.layers[layer].osc_type[0]                                 = Synth::WaveType::sine_wave;
                 nm_src.layers[layer].targets[Synth::mod_volume].envelope_desc_id = static_cast<uint16_t>(layer + 1);
@@ -35264,7 +36274,9 @@ int main()
             Synth::Instrument na_src = {};
             Synth::Instrument na_dec = {};
             na_src.layer_count       = 2;
-            na_dec.layer_count       = 2;
+            set_default_dispersion_sections(na_src);
+            na_dec.layer_count = 2;
+            set_default_dispersion_sections(na_dec);
             for (uint32_t layer = 0; layer < 2; layer++) {
                 na_src.layers[layer].osc_type[0] = Synth::WaveType::sine_wave;
                 na_dec.layers[layer].osc_type[0] = Synth::WaveType::sine_wave;
@@ -36312,9 +37324,10 @@ int main()
             TEST(md_bank.graph_layout[md_bank.graph_layout_count - 1].name[0] == 0);
             TEST(! Sculptor::validate_editor_metadata(md_bank));
 
-            Synth::Instrument md_bare     = {};
-            md_bare                       = {};
-            md_bare.layer_count           = 1;
+            Synth::Instrument md_bare = {};
+            md_bare                   = {};
+            md_bare.layer_count       = 1;
+            set_default_dispersion_sections(md_bare);
             md_bare.layers[0].osc_type[0] = Synth::WaveType::sine_wave;
             md_bare.layers[0].osc_type[1] = Synth::WaveType::sine_wave;
             md_bare.layers[0].mod_ratio   = 1.0f;
@@ -36348,9 +37361,10 @@ int main()
             // A descriptorless instrument pasted over the sole zone of a channel is
             // valid with no descriptor at all, and the uniquely rooted destination
             // slot is reused in place.
-            Synth::Instrument pl_bare                                = {};
-            pl_bare                                                  = {};
-            pl_bare.layer_count                                      = 1;
+            Synth::Instrument pl_bare = {};
+            pl_bare                   = {};
+            pl_bare.layer_count       = 1;
+            set_default_dispersion_sections(pl_bare);
             pl_bare.layers[0].osc_type[0]                            = Synth::WaveType::sine_wave;
             pl_bare.layers[0].osc_type[1]                            = Synth::WaveType::sine_wave;
             pl_bare.layers[0].osc_mode                               = Synth::osc_mode_blend;
@@ -36442,7 +37456,8 @@ int main()
             memset(static_cast<void*>(&fp_bank), 0, sizeof(fp_bank));
             for (uint32_t i = 0; i < Synth::max_instruments; i++) {
                 TEST(fp_bank.bank.instruments.allocate() == i);
-                fp_bank.bank.instruments.entries[i].layer_count           = 1;
+                fp_bank.bank.instruments.entries[i].layer_count = 1;
+                set_default_dispersion_sections(fp_bank.bank.instruments.entries[i]);
                 fp_bank.bank.instruments.entries[i].layers[0].osc_type[0] = Synth::WaveType::sine_wave;
                 fp_bank.bank.instruments.entries[i].layers[0].mod_ratio   = 1.0f;
             }
@@ -36451,9 +37466,10 @@ int main()
             fp_bank.bank.channel_zones[0][0].instrument = 7;
             TEST(Synth::validate_instrument_bank(&fp_bank.bank));
 
-            Synth::Instrument fp_bare     = {};
-            fp_bare                       = {};
-            fp_bare.layer_count           = 1;
+            Synth::Instrument fp_bare = {};
+            fp_bare                   = {};
+            fp_bare.layer_count       = 1;
+            set_default_dispersion_sections(fp_bare);
             fp_bare.layers[0].osc_type[0] = Synth::WaveType::noise_wave;
             fp_bare.layers[0].osc_type[1] = Synth::WaveType::noise_wave;
             fp_bare.layers[0].mod_ratio   = 1.0f;
@@ -36523,10 +37539,12 @@ int main()
             memset(static_cast<void*>(&sh_bank), 0, sizeof(sh_bank));
             TEST(sh_bank.bank.instruments.allocate() == 0);
             TEST(sh_bank.bank.instruments.allocate() == 1);
-            sh_bank.bank.instruments.entries[0].layer_count           = 1;
+            sh_bank.bank.instruments.entries[0].layer_count = 1;
+            set_default_dispersion_sections(sh_bank.bank.instruments.entries[0]);
             sh_bank.bank.instruments.entries[0].layers[0].osc_type[0] = Synth::WaveType::sine_wave;
             sh_bank.bank.instruments.entries[0].layers[0].mod_ratio   = 1.0f;
             sh_bank.bank.instruments.entries[1].layer_count           = 1;
+            set_default_dispersion_sections(sh_bank.bank.instruments.entries[1]);
             sh_bank.bank.instruments.entries[1].layers[0].osc_type[0] = Synth::WaveType::sawtooth_wave;
             sh_bank.bank.instruments.entries[1].layers[0].mod_ratio   = 1.0f;
             sh_bank.bank.channel_enabled[0]                           = 1;
@@ -36538,9 +37556,10 @@ int main()
             TEST(Synth::validate_instrument_bank(&sh_bank.bank));
             const Synth::Instrument sh_old = sh_bank.bank.instruments.entries[0];
 
-            Synth::Instrument sh_bare     = {};
-            sh_bare                       = {};
-            sh_bare.layer_count           = 1;
+            Synth::Instrument sh_bare = {};
+            sh_bare                   = {};
+            sh_bare.layer_count       = 1;
+            set_default_dispersion_sections(sh_bare);
             sh_bare.layers[0].osc_type[0] = Synth::WaveType::noise_wave;
             sh_bare.layers[0].osc_type[1] = Synth::WaveType::noise_wave;
             sh_bare.layers[0].mod_ratio   = 1.0f;
@@ -36581,9 +37600,10 @@ int main()
                 Synth::Instrument            vr_instr = {};
                 build_clipboard_zone_fixture(&vr_bank, &vr_instr);
 
-                Synth::Instrument vr_bare     = {};
-                vr_bare                       = {};
-                vr_bare.layer_count           = 1;
+                Synth::Instrument vr_bare = {};
+                vr_bare                   = {};
+                vr_bare.layer_count       = 1;
+                set_default_dispersion_sections(vr_bare);
                 vr_bare.layers[0].osc_type[0] = Synth::WaveType::noise_wave;
                 vr_bare.layers[0].mod_ratio   = 1.0f;
                 TEST(validate_standalone_model(vr_bare, nullptr, 0, nullptr, 0));
@@ -36709,11 +37729,13 @@ int main()
             memset(static_cast<void*>(&dc_bank), 0, sizeof(dc_bank));
             TEST(dc_bank.bank.instruments.allocate() == 0);
             TEST(dc_bank.bank.instruments.allocate() == 1);
-            dc_bank.bank.instruments.entries[0].layer_count           = 1;
+            dc_bank.bank.instruments.entries[0].layer_count = 1;
+            set_default_dispersion_sections(dc_bank.bank.instruments.entries[0]);
             dc_bank.bank.instruments.entries[0].layers[0].osc_type[0] = Synth::WaveType::sawtooth_wave;
             dc_bank.bank.instruments.entries[0].layers[0].mod_ratio   = 3.0f;
             dc_bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].base_value = 0.25f;
             dc_bank.bank.instruments.entries[1].layer_count                                     = 1;
+            set_default_dispersion_sections(dc_bank.bank.instruments.entries[1]);
             dc_bank.bank.instruments.entries[1].layers[0].osc_type[0] = Synth::WaveType::pulse_wave;
             dc_bank.bank.instruments.entries[1].layers[0].mod_ratio   = 1.0f;
             dc_bank.bank.channel_zones[0][0].start_note               = 1;
@@ -36749,9 +37771,10 @@ int main()
             const uint32_t          dc_other_records = Sculptor::count_detached_records(dc_bank, 0, 1);
             const uint32_t          dc_record_count  = dc_bank.graph_layout_count;
 
-            Synth::Instrument dc_bare                               = {};
-            dc_bare                                                 = {};
-            dc_bare.layer_count                                     = 1;
+            Synth::Instrument dc_bare = {};
+            dc_bare                   = {};
+            dc_bare.layer_count       = 1;
+            set_default_dispersion_sections(dc_bare);
             dc_bare.layers[0].osc_type[0]                           = Synth::WaveType::noise_wave;
             dc_bare.layers[0].osc_type[1]                           = Synth::WaveType::noise_wave;
             dc_bare.layers[0].mod_ratio                             = 1.0f;
@@ -36995,6 +38018,7 @@ int main()
 
         Synth::Instrument& instrument = bank.bank.instruments.entries[0];
         instrument.layer_count        = 4;
+        set_default_dispersion_sections(instrument);
         for (uint32_t layer = 1; layer < 4; ++layer) {
             instrument.layers[layer].osc_type[0]                            = Synth::WaveType::sine_wave;
             instrument.layers[layer].osc_type[1]                            = Synth::WaveType::no_wave;
