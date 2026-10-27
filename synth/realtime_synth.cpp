@@ -222,11 +222,14 @@ enum OscParamRole : uint32_t {
     osc_string_release_damping_dest,
     osc_string_release_damping_env,
     osc_string_release_damping_lfo,
+    osc_string_dispersion_dest,
+    osc_string_dispersion_env,
+    osc_string_dispersion_lfo,
     // clang-format on
     num_osc_roles
 };
 
-static_assert(num_osc_roles == 84);
+static_assert(num_osc_roles == 87);
 
 constexpr uint32_t channel_block_base = 1;
 constexpr uint32_t voice_block_base   = channel_block_base + Synth::max_channels * num_channel_roles;
@@ -291,6 +294,7 @@ constexpr ModTargetNode mod_target_nodes[] = {
     { mod_fir_band3_slope, osc_fir_band3_slope_dest },
     { mod_string_damping, osc_string_damping_dest },
     { mod_string_release_damping, osc_string_release_damping_dest },
+    { mod_string_dispersion, osc_string_dispersion_dest },
 };
 static_assert(sizeof(mod_target_nodes) / sizeof(mod_target_nodes[0]) == Synth::num_mod_targets,
               "mod target table must cover every ModTarget");
@@ -377,12 +381,10 @@ struct ShaderParams {
         uint32_t note_seed;                  // Per-note constant: the note-on noise counter, never advanced
         float    pad_tilt[2];                // Pad spectral tilt; harmonic exponent is 1 + clamp(tilt, -1, 1).
         uint32_t string_state_offs;          // String state region in floats: header, then ring
-        float    string_pick;                // String pick position 0..1, used by the note-on excitation
         float    string_damping;             // String damping 0..1, higher = shorter decay
-        float    string_release_damping;     // String release damping 0..1
+        float    string_release_damping;     // Effective release damping 0.025..1.667: 0.05 / T60 in s, curved from the knob
         float    string_brightness;          // String pluck brightness 0..1, used by the note-on excitation
         float    string_dispersion;          // String dispersion 0..1, 0 = off
-        float    string_dispersion_sections; // String dispersion allpass section count 1..6
     };
 
     // synth_chan_combine shader (binding 0); the master-mix pass reuses the
@@ -418,7 +420,7 @@ struct ShaderParams {
         uint32_t in_sound_offs;
     };
 
-    static_assert(sizeof(Oscillator) == 96);
+    static_assert(sizeof(Oscillator) == 88);
 
     static constexpr uint32_t max_param_range = sizeof(Oscillator) * 256;
 };
@@ -594,12 +596,10 @@ struct RunningOscillator {
     float    fir_slope;                  // FIR window slope percent, from the slope target's dest node
     float    duty[2];                    // Duty cycle for sawtooth and pulse oscillator (0..1)
     float    pad_tilt[2];                // Pad spectral tilt; harmonic exponent is 1 + clamp(tilt, -1, 1).
-    float    string_pick;                // String pick position, copied from the layer at note-on
     float    string_damping;             // String damping 0..1, resolved each step
     float    string_release_damping;     // String release damping 0..1, resolved each step
     float    string_brightness;          // String pluck brightness 0..1, copied from the layer at note-on
-    float    string_dispersion;          // String dispersion 0..1, copied from the layer at note-on
-    float    string_dispersion_sections; // String dispersion section count 1..6, copied at note-on
+    float    string_dispersion;          // String dispersion 0..1, resolved each step
     uint32_t string_state_offs;          // String state region offset in bytes, fixed per slot
     float    osc_mix;                    // Mix between osc_type[0] and osc_type[1] (0..1)
     float    fm_index;                   // FM modulation depth
@@ -1524,10 +1524,7 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         osc.osc_type[1]                = layer.osc_type[1];
         osc.osc_mode                   = layer.osc_mode;
         osc.mod_ratio                  = layer.mod_ratio;
-        osc.string_pick                = layer.string_pick;
         osc.string_brightness          = layer.string_brightness;
-        osc.string_dispersion          = layer.string_dispersion;
-        osc.string_dispersion_sections = layer.string_dispersion_sections;
         osc.octave_offset              = layer.octave_offset;
         osc.fir_type                   = layer.fir_type;
         osc.fir_band_count = layer.fir_type == Synth::fir_bandpass ? (layer.fir_band_count < 1   ? 1
@@ -2137,6 +2134,7 @@ static void update_modulation()
         osc.string_damping = unit_range_clamp(parameters[osc_param(osc_idx, osc_string_damping_dest)].value);
         osc.string_release_damping =
             unit_range_clamp(parameters[osc_param(osc_idx, osc_string_release_damping_dest)].value);
+        osc.string_dispersion = unit_range_clamp(parameters[osc_param(osc_idx, osc_string_dispersion_dest)].value);
         osc.osc_mix  = parameters[osc_param(osc_idx, osc_mix_dest)].value;
         osc.fm_index = parameters[osc_param(osc_idx, osc_fm_index_dest)].value;
         // The ratio clamps like the static row: legacy 0 ratios play at the
@@ -2605,12 +2603,12 @@ static void render_audio_step()
         param.pad_tilt[0]                = oscillator.pad_tilt[0];
         param.pad_tilt[1]                = oscillator.pad_tilt[1];
         param.string_state_offs          = oscillator.string_state_offs / 4;
-        param.string_pick                = oscillator.string_pick;
         param.string_damping             = oscillator.string_damping;
-        param.string_release_damping     = oscillator.string_release_damping;
+        // The summed (dest + envelope + LFO) value is clamped to [0, 1] first, then curved once here
+        // so every modulation input gets the same response.
+        param.string_release_damping = Synth::string_release_damping_curve(oscillator.string_release_damping);
         param.string_brightness          = oscillator.string_brightness;
         param.string_dispersion          = oscillator.string_dispersion;
-        param.string_dispersion_sections = oscillator.string_dispersion_sections;
 
         // Wrap the phases so float precision does not degrade on long notes.
         oscillator.phase += phase_step;

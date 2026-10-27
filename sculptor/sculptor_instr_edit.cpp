@@ -250,9 +250,9 @@ static_assert(sizeof(Synth::BankUpdateQueue) <= 2 * sizeof(Synth::InstrumentBank
 Synth::InstrumentEditorBank candidate;
 
 // One clipboard document: copy encodes into it, paste decodes out of it.
-// 192 KiB matches the unit-suite staging capacity: a fully-wired 4-band
+// 256 KiB matches the unit-suite staging capacity: a fully-wired 4-band
 // multi-band document no longer fits 128 KiB.
-static char                         zone_clipboard_text[192 * 1024];
+static char                         zone_clipboard_text[256 * 1024];
 static Synth::EffectsDocument       effects_clipboard_document;
 static Synth::Instrument            clipboard_decoded_instrument;
 static uint8_t                      clipboard_decoded_osc_source[Synth::max_layers];

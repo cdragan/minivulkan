@@ -294,16 +294,13 @@ static bool validate_oscillator_body(const Synth::Oscillator& osc)
             return false;
         }
     }
-    // Pick position is a plain scalar in [0,1]; the comparison also refuses NaN.
-    if (! (osc.string_pick >= 0.0f && osc.string_pick <= 1.0f)) {
-        return false;
-    }
     // Pluck brightness is a plain scalar in [0,1] as well.
     if (! (osc.string_brightness >= 0.0f && osc.string_brightness <= 1.0f)) {
         return false;
     }
-    // Dispersion is a plain scalar in [0,1] too.
-    if (! (osc.string_dispersion >= 0.0f && osc.string_dispersion <= 1.0f)) {
+    // The dispersion target base is in [0,1] too.
+    const float dispersion_base = osc.targets[Synth::mod_string_dispersion].base_value;
+    if (! (dispersion_base >= 0.0f && dispersion_base <= 1.0f)) {
         return false;
     }
     // The section count is an integer value in [1,6] whatever the dispersion, so the codec contract holds for every

@@ -28,16 +28,15 @@ using Sculptor::source_op_names;
 using Sculptor::with_tooltip;
 
 using Sculptor::connection_into;
+using Sculptor::decode_osc_input;
 using Sculptor::Graph;
 using Sculptor::osc_band_block_level;
 using Sculptor::osc_band_block_stride;
 using Sculptor::osc_band_first_slot;
 using Sculptor::osc_band_header_slot;
 using Sculptor::osc_brightness_slot;
-using Sculptor::osc_dispersion_sections_slot;
-using Sculptor::osc_dispersion_slot;
-using Sculptor::osc_pick_slot;
 using Sculptor::osc_slot_count;
+using Sculptor::osc_string_extras_first_slot;
 using Sculptor::osc_target_block_base;
 using Sculptor::osc_target_block_field;
 using Sculptor::osc_target_block_stride;
@@ -110,7 +109,7 @@ char                        clipboard_destination_name[Synth::max_name_len];
 static_assert(static_cast<uint32_t>(Synth::mod_panning) == 2);
 static_assert(static_cast<uint32_t>(Synth::mod_duty0) == 3);
 static_assert(static_cast<uint32_t>(Synth::mod_fm_index) == 6);
-static_assert(Synth::num_mod_targets == 28);
+static_assert(Synth::num_mod_targets == 29);
 static_assert(static_cast<uint32_t>(Synth::mod_fm_ratio) == 8);
 static_assert(static_cast<uint32_t>(Synth::mod_pad_tilt0) == 9);
 static_assert(Synth::max_mod_inputs == 2);
@@ -145,8 +144,9 @@ const LabelTooltip target_descs[Synth::num_mod_targets] = {
     { "Spread", "Band width around its center (in semitones)" },
     { "Gain", "Band's output amplitude" },
     { "FIR Slope", "Filter edge sharpness" },
-    { "Damping", "How fast the string vibration decays while the key is held" },
+    { "Sustain Damping", "How fast the string vibration decays and darkens while the key is held" },
     { "Release Damping", "Extra string damping applied while the key is released" },
+    { "String Dispersion", "Stiff-string inharmonicity: raises the upper partials, strongest on low notes (0 = off)" },
 };
 const char* const wave_names[7]     = { "off", "sine", "sawtooth", "pulse", "noise", "pad", "string" };
 const char* const osc_mode_names[4] = { "blend", "frequency modulation", "hard sync", "ring modulation" };
@@ -172,49 +172,47 @@ const LabelTooltip fir_spread_descs[Synth::num_filter_types] = { { "Filter Off",
 // 3..14 duty a's 12-slot modulation block
 // 15 pad tone a (per-layer value, [-1, +1])
 // 16..27 pad tone a's 12-slot modulation block
-// 28 pick position (per oscillator, plain scalar 0..1; nested under waveform a)
-// 29 pluck brightness (per oscillator, plain scalar 0..1, 1 = unfiltered; nested under waveform a)
-// 30 string dispersion (per oscillator, plain scalar 0..1, 0 = off; nested under waveform a)
-// 31 dispersion sections (per oscillator, integer 1..6; nested under waveform a)
-// Damping and Release damping have no rows of their own: with waveform a ==
-// string, the duty a row (2) projects as Damping (target 26) and the pad tone
-// a row (15) as Release damping (target 27), each with its block.
-
-// 32 waveform b (list)
-// 33 duty b (per-layer value, [0, 1])
-// 34..45 duty b's 12-slot modulation block
-// 46 pad tone b (per-layer value, [-1, +1])
-// 47..58 pad tone b's 12-slot modulation block
-// 59 mix mode (list)
-// 60 waveform mix (per-layer value, [0, 1])
-// 61..72 waveform mix's 12-slot modulation block
-// 73 fm depth (per-layer value)
-// 74..85 fm depth's 12-slot modulation block
-// 86 fm ratio (per-layer base value)
-// 87..98 fm ratio's 12-slot modulation block
-// 99 volume (per-layer base value)
-// 100..111 volume's 12-slot modulation block
-// 112 pan (per-layer base value)
-// 113..124 pan's 12-slot modulation block
-// 125 pitch (per-layer base value)
-// 126..137 pitch's 12-slot modulation block
-// 138 octave offset (per oscillator, [-12, +12] whole octaves)
-// 139 filter type (per oscillator, list)
-// 140.. one uniform block per existing band, starting at
-// osc_band_first_slot (140) with a 55-slot stride (osc_band_block_stride):
+// 28 release damping (per-layer value, [0, 1]; string wave only; nested under waveform a)
+// 29..40 release damping's 12-slot modulation block
+// 41 pluck brightness (per oscillator, plain scalar 0..1, 1 = unfiltered; string wave only; nested under waveform a)
+// String Dispersion and Sustain Damping have no rows of their own: with waveform a ==
+// string, the duty a row (2) projects as String Dispersion (target 28) and the pad tone
+// a row (15) as Sustain Damping (target 26), each with its block.
+// 42 waveform b (list)
+// 43 duty b (per-layer value, [0, 1])
+// 44..55 duty b's 12-slot modulation block
+// 56 pad tone b (per-layer value, [-1, +1])
+// 57..68 pad tone b's 12-slot modulation block
+// 69 mix mode (list)
+// 70 waveform mix (per-layer value, [0, 1])
+// 71..82 waveform mix's 12-slot modulation block
+// 83 fm depth (per-layer value)
+// 84..95 fm depth's 12-slot modulation block
+// 96 fm ratio (per-layer base value)
+// 97..108 fm ratio's 12-slot modulation block
+// 109 volume (per-layer base value)
+// 110..121 volume's 12-slot modulation block
+// 122 pan (per-layer base value)
+// 123..134 pan's 12-slot modulation block
+// 135 pitch (per-layer base value)
+// 136..147 pitch's 12-slot modulation block
+// 148 octave offset (per oscillator, [-12, +12] whole octaves)
+// 149 filter type (per oscillator, list)
+// 150.. one uniform block per existing band, starting at
+// osc_band_first_slot (150) with a 55-slot stride (osc_band_block_stride):
 // the "Band N" header label, the band's [-] click slot, the band's [+]
 // click slot, then the band's four parameter rows, each followed by its
 // 12-slot modulation block (a 13-slot stride, in osc_target_row_slot
 // order). Only the stored band count's blocks are projected; band 0's
-// rows sit at 143/156/169/182 and bands 1..3 shift by 3 slots per
-// earlier band (198/211/224/237, 253/266/279/292, 308/321/334/347).
+// rows sit at 153/166/179/192 and bands 1..3 shift by 3 slots per
+// earlier band (208/221/234/247, 263/276/289/302, 318/331/344/357).
 constexpr uint32_t osc_waveform_a_prop    = 1;
-constexpr uint32_t osc_waveform_b_prop    = 32;
-constexpr uint32_t osc_mode_prop          = 59;
-constexpr uint32_t osc_fm_ratio_prop      = 86;
-constexpr uint32_t osc_octave_offset_prop = 138;
-constexpr uint32_t osc_fir_slope_prop     = 182;
-constexpr uint32_t osc_fir_type_prop      = 139;
+constexpr uint32_t osc_waveform_b_prop    = 42;
+constexpr uint32_t osc_mode_prop          = 69;
+constexpr uint32_t osc_fm_ratio_prop      = 96;
+constexpr uint32_t osc_octave_offset_prop = 148;
+constexpr uint32_t osc_fir_slope_prop     = 192;
+constexpr uint32_t osc_fir_type_prop      = 149;
 // Header labels of the band blocks, indexed by band.
 const char* const band_header_names[Sculptor::osc_band_max_bands] = { "Band 1", "Band 2", "Band 3", "Band 4" };
 // Per-target presentation views: the single source of truth for value
@@ -250,6 +248,7 @@ constexpr Sculptor::OscTargetView osc_target_views[Synth::num_mod_targets] = {
     { 1.0f, 100.0f, 1.0f, false },                                       // band 3 slope (percent)
     { 0.0f, 1.0f, 1.0f, false },                                         // string damping
     { 0.0f, 1.0f, 1.0f, false },                                         // string release damping
+    { 0.0f, 1.0f, 1.0f, false },                                         // string dispersion
 };
 
 // Low-pass and high-pass cutoff slider.  The editor writes a zero cutoff (edge off)
@@ -285,7 +284,7 @@ constexpr uint32_t canonical_node_count = Synth::graph_canonical_node_count;
 // a sawtooth, pulse or pad wave on their side; waveform b, mix mode and
 // fm ratio, plus the duty b, waveform mix and fm depth rows, need
 // waveform b; the pad tone rows and their blocks need the pad waveform;
-// the pick, brightness, dispersion, damping and release damping rows and their blocks need the
+// the brightness, dispersion, damping and release damping rows and their blocks need the
 // string waveform (it grays no mode row);
 // the cutoff row, its block and the fir slope need a filter type other
 // than off).
@@ -308,20 +307,19 @@ bool Sculptor::oscillator_slot_waveform_mode_disabled(const Sculptor::Node& node
     // Waveform a's list starts at sine, so pad sits one below the stored value.
     const uint32_t wave_a = node.slots.entries[osc_waveform_a_prop].value.list_index;
     if (wave_a != static_cast<uint32_t>(Synth::WaveType::string_wave) - 1u &&
-        (slot_idx == osc_pick_slot || slot_idx == osc_brightness_slot || slot_idx == osc_dispersion_slot ||
-         slot_idx == osc_dispersion_sections_slot)) {
-        return true; // pick position, pluck brightness and dispersion only apply to the string waveform
+        slot_idx >= osc_string_extras_first_slot && slot_idx <= osc_brightness_slot) {
+        return true; // release damping and pluck brightness only apply to the string waveform
     }
     if (wave_a != static_cast<uint32_t>(Synth::WaveType::pad_wave) - 1u &&
         wave_a != static_cast<uint32_t>(Synth::WaveType::string_wave) - 1u && slot_idx >= tone0 &&
         slot_idx <= tone0 + osc_target_block_stride) {
-        return true; // pad tone a and its block only apply to the pad waveform (release damping under string)
+        return true; // pad tone a and its block only apply to the pad waveform (sustain damping under string)
     }
     if (slot_idx >= duty0 && slot_idx <= duty0 + osc_target_block_stride &&
         (wave_a == static_cast<uint32_t>(Synth::WaveType::sine_wave) - 1u ||
          wave_a == static_cast<uint32_t>(Synth::WaveType::noise_wave) - 1u)) {
-        return true; // duty a shapes sawtooth and pulse and scales pad wander (damping under string); sine and
-                     // noise ignore it
+        return true; // duty a shapes sawtooth and pulse and scales pad wander (string dispersion under string); sine
+                     // and noise ignore it
     }
     if (slot_idx >= duty1 && slot_idx <= duty1 + osc_target_block_stride &&
         (wave_b == static_cast<uint32_t>(Synth::WaveType::sine_wave) ||
@@ -463,6 +461,20 @@ static Sculptor::Slot osc_view_connectable_slot(const char*       name,
     return slot;
 }
 
+// The duty row of a pad wave sets its spectral wander depth rather than a pulse width.
+static Sculptor::Slot osc_duty_row_slot(const char*      name,
+                                        float            display_value,
+                                        Synth::ModTarget target,
+                                        Synth::WaveType  wave)
+{
+    Sculptor::Slot slot = osc_view_connectable_slot(name, display_value, target, true);
+    if (wave == Synth::WaveType::pad_wave) {
+        snprintf(slot.name, sizeof(slot.name), "%s", "Pad Wander");
+        slot.tooltip = "Spectral wander depth of the pad: how far each harmonic drifts (about 2 percent at maximum)";
+    }
+    return slot;
+}
+
 // Band block grammar: one renderer line per band packs the band header
 // label and its two click slots, as a child row of the Filter Type row
 // (the legacy Cutoff row's depth), so the band tree reads one level
@@ -493,15 +505,15 @@ static uint32_t osc_band_model_count(const Synth::Oscillator& osc)
 }
 
 // The ModTarget the shared duty a / pad tone a row carries: under the
-// string wave the same slot and block hold Damping / Release damping.
-// Other targets pass through.
+// string wave the same slot and block hold String Dispersion / Sustain
+// Damping.  Other targets pass through.
 static Synth::ModTarget osc_row_target_for_wave(bool string_wave, Synth::ModTarget target)
 {
     if (string_wave && target == Synth::mod_duty0) {
-        return Synth::mod_string_damping;
+        return Synth::mod_string_dispersion;
     }
     if (string_wave && target == Synth::mod_pad_tilt0) {
-        return Synth::mod_string_release_damping;
+        return Synth::mod_string_damping;
     }
     return target;
 }
@@ -512,9 +524,10 @@ static Synth::ModTarget osc_row_target_for_wave(bool string_wave, Synth::ModTarg
 // (like a band beyond the count) and keeps its stored value.
 static bool osc_target_owns_row(bool string_wave, uint32_t target)
 {
-    const bool damping = target == Synth::mod_string_damping || target == Synth::mod_string_release_damping;
-    const bool shared  = target == Synth::mod_duty0 || target == Synth::mod_pad_tilt0;
-    return string_wave ? ! shared : ! damping;
+    const bool string_only = target == Synth::mod_string_dispersion || target == Synth::mod_string_damping ||
+                             target == Synth::mod_string_release_damping;
+    const bool shared      = target == Synth::mod_duty0 || target == Synth::mod_pad_tilt0;
+    return string_wave ? ! shared : ! string_only;
 }
 
 static bool osc_target_projected(const Synth::Oscillator& osc, uint32_t target)
@@ -522,13 +535,20 @@ static bool osc_target_projected(const Synth::Oscillator& osc, uint32_t target)
     return osc_target_owns_row(osc.osc_type[0] == Synth::WaveType::string_wave, target);
 }
 
+// True when the node's projected Waveform A slot selects the string wave
+// (the list starts at sine, so string sits one below the stored value).
+static bool osc_node_wave_a_is_string(const Sculptor::Node& node)
+{
+    return node.slots.num_allocated > osc_waveform_a_prop &&
+           node.slots.entries[osc_waveform_a_prop].value.list_index ==
+               static_cast<uint32_t>(Synth::WaveType::string_wave) - 1u;
+}
+
 // True when ModTarget `target` owns its row on `node` under the node's
 // current wave a (osc_target_projected, read from the projected slots).
 bool Sculptor::osc_node_target_row_active(const Sculptor::Node& node, uint32_t target)
 {
-    const bool string_wave = node.slots.entries[osc_waveform_a_prop].value.list_index ==
-                             static_cast<uint32_t>(Synth::WaveType::string_wave) - 1u;
-    return osc_target_owns_row(string_wave, target);
+    return osc_target_owns_row(osc_node_wave_a_is_string(node), target);
 }
 
 // True when the slot is one of the band header rows' [-]/[+] click slots
@@ -676,27 +696,35 @@ static uint32_t osc_target_free_input(const Sculptor::Graph& graph, uint32_t nod
 // Decodes an oscillator-node input endpoint: `target` receives the
 // ModTarget index, `family` the row family, `dot` the specific input dot
 // (pool_no_slot for the base value row, the standing drop target), and
-// `base_row` reports the base row.  Returns false for endpoints that are
-// not target-block inputs.
+// `base_row` reports the base row.  The shared duty a / pad tone a rows
+// and their blocks decode to the target the node's wave a projects there
+// (String Dispersion / Sustain Damping under the string wave).  Returns
+// false for endpoints that are not target-block inputs.
 static NodeRole node_role(const Sculptor::OscGraphMapping& mapping, uint32_t node_idx);
 
-static bool decode_osc_input(const Sculptor::OscGraphMapping& mapping,
-                             Sculptor::EndPoint               point,
-                             bool*                            base_row,
-                             uint32_t*                        target,
-                             uint32_t*                        family,
-                             uint32_t*                        dot)
+bool Sculptor::decode_osc_input(const Sculptor::OscGraphMapping& mapping,
+                                const Sculptor::Graph&           graph,
+                                Sculptor::EndPoint               point,
+                                bool*                            base_row,
+                                uint32_t*                        target,
+                                uint32_t*                        family,
+                                uint32_t*                        dot)
 {
     if (node_role(mapping, point.node_idx) != role_osc) {
         return false;
     }
+
+    // A node freed by a deletion still has its queued wire-deletion events
+    // decoded; it has no live wave, so those decode with default semantics.
+    const bool string_wave =
+        graph.node_occupied(point.node_idx) && osc_node_wave_a_is_string(graph.node(point.node_idx));
 
     *base_row                = false;
     *dot                     = pool_no_slot;
     const int32_t row_target = osc_row_target_index(point.slot_idx);
     if (row_target >= 0) {
         *base_row = true;
-        *target   = static_cast<uint32_t>(row_target);
+        *target   = osc_row_target_for_wave(string_wave, static_cast<Synth::ModTarget>(row_target));
         *family   = family_src; // decided by the wire's output end
         return true;
     }
@@ -707,7 +735,7 @@ static bool decode_osc_input(const Sculptor::OscGraphMapping& mapping,
         return false;
     }
 
-    *target = block_target;
+    *target = osc_row_target_for_wave(string_wave, static_cast<Synth::ModTarget>(block_target));
     if (block_field == 0) {
         *family = family_env;
         *dot    = osc_target_env_dot(*target);
@@ -928,8 +956,8 @@ static void project_osc_node(Sculptor::Graph*           graph,
                       6,
                       osc.osc_type[0] == Synth::WaveType::no_wave ? 0 : static_cast<uint32_t>(osc.osc_type[0]) - 1),
             "Primary oscillator wave shape"));
-    // With the string wave the duty a row projects as Damping (target 26) and
-    // the pad tone a row as Release damping (target 27).
+    // With the string wave the duty a row projects as String Dispersion (target 28) and
+    // the pad tone a row as Sustain Damping (target 26).
     const bool             string_wave     = osc.osc_type[0] == Synth::WaveType::string_wave;
     const Synth::ModTarget duty_row_target = osc_row_target_for_wave(string_wave, Synth::mod_duty0);
     const Synth::ModTarget tone_row_target = osc_row_target_for_wave(string_wave, Synth::mod_pad_tilt0);
@@ -938,10 +966,10 @@ static void project_osc_node(Sculptor::Graph*           graph,
     // (display-unit fields carry the raw values; only the base rows are
     // scaled).
     graph->add_slot(node,
-                    osc_view_connectable_slot(target_descs[duty_row_target].name,
-                                              osc.targets[duty_row_target].base_value,
-                                              duty_row_target,
-                                              true));
+                    osc_duty_row_slot(target_descs[duty_row_target].name,
+                                      osc.targets[duty_row_target].base_value,
+                                      duty_row_target,
+                                      osc.osc_type[0]));
     append_target_block(graph, node, duty_row_target, osc.targets[duty_row_target], 2);
     graph->add_slot(node,
                     osc_view_connectable_slot(target_descs[tone_row_target].name,
@@ -949,42 +977,33 @@ static void project_osc_node(Sculptor::Graph*           graph,
                                               tone_row_target,
                                               true));
     append_target_block(graph, node, tone_row_target, osc.targets[tone_row_target], 2);
-    // Pick position (a plain layer scalar, not modulatable) nests under
-    // Waveform A after the pad tone row's block.
-    Sculptor::Slot pick_slot =
-        with_tooltip(bounded_real_slot("Pick position", osc.string_pick, 0.0f, 1.0f),
-                     "Position along the string where the pluck happens; shapes the note-onset timbre");
-    pick_slot.child_row = true;
-    graph->add_slot(node, pick_slot);
-    // Pluck Brightness (a plain layer scalar like Pick position) follows it.
+
+    // Release Damping exists only under the string wave (hidden otherwise).  Pluck Brightness, a plain layer
+    // scalar without a block, follows it, both nested under Waveform A.
+    graph->add_slot(node,
+                    osc_view_connectable_slot(target_descs[Synth::mod_string_release_damping].name,
+                                              osc.targets[Synth::mod_string_release_damping].base_value,
+                                              Synth::mod_string_release_damping,
+                                              true));
+    append_target_block(graph,
+                        node,
+                        Synth::mod_string_release_damping,
+                        osc.targets[Synth::mod_string_release_damping],
+                        2);
     Sculptor::Slot brightness_slot =
         with_tooltip(bounded_real_slot("Pluck Brightness", osc.string_brightness, 0.0f, 1.0f),
                      "Brightness of the pluck; lower values low-pass the initial burst for a warmer, softer attack");
     brightness_slot.child_row = true;
     graph->add_slot(node, brightness_slot);
-    // String Dispersion and its section count (plain layer scalars) follow.
-    Sculptor::Slot dispersion_slot =
-        with_tooltip(bounded_real_slot("String Dispersion", osc.string_dispersion, 0.0f, 1.0f),
-                     "Stiff-string inharmonicity: raises the upper partials, strongest on low notes (0 = off)");
-    dispersion_slot.child_row = true;
-    graph->add_slot(node, dispersion_slot);
-    // A stepper (unbounded integer row): the renderer clamps typed or stepped values into [real_min, real_max].
-    Sculptor::Slot dispersion_sections_slot =
-        with_tooltip(int_slot("Dispersion Sections", static_cast<int32_t>(osc.string_dispersion_sections)),
-                     "Number of dispersion filter sections (1 to 6); more sections stretch the partials further");
-    dispersion_sections_slot.real_min  = 1.0f;
-    dispersion_sections_slot.real_max  = 6.0f;
-    dispersion_sections_slot.child_row = true;
-    graph->add_slot(node, dispersion_sections_slot);
 
     graph->add_slot(node,
                     with_tooltip(list_slot("Waveform B", wave_names, 6, static_cast<uint32_t>(osc.osc_type[1])),
                                  "Secondary oscillator wave shape"));
     graph->add_slot(node,
-                    osc_view_connectable_slot(target_descs[4].name,
-                                              osc.targets[Synth::mod_duty1].base_value,
-                                              Synth::mod_duty1,
-                                              true));
+                    osc_duty_row_slot(target_descs[4].name,
+                                      osc.targets[Synth::mod_duty1].base_value,
+                                      Synth::mod_duty1,
+                                      osc.osc_type[1]));
     append_target_block(graph, node, Synth::mod_duty1, osc.targets[Synth::mod_duty1], 2);
     graph->add_slot(node,
                     osc_view_connectable_slot(target_descs[10].name,
@@ -1471,6 +1490,14 @@ bool Sculptor::osc_node_slot_hidden(const Graph& graph, const uint32_t node_idx,
         }
     }
 
+    // Release Damping, its block and Pluck Brightness exist only under the
+    // string wave: other waves have no row for them.
+    const Sculptor::Node& node = graph.node(node_idx);
+    if (node.oscillator && slot_idx >= osc_string_extras_first_slot && slot_idx <= osc_brightness_slot &&
+        ! osc_node_wave_a_is_string(node)) {
+        return true;
+    }
+
     uint32_t target = 0;
     uint32_t field  = 0;
     if (! osc_target_block_field(slot_idx, &target, &field)) {
@@ -1586,8 +1613,11 @@ bool Sculptor::osc_change_restructures(const Sculptor::OscGraphMapping& mapping,
     if (change.kind != Sculptor::ChangeKind::value_changed || node_role(mapping, change.node_idx) != role_osc) {
         return false;
     }
-    if (change.slot_idx == osc_fir_type_prop || change.slot_idx == osc_waveform_a_prop) {
-        return true; // wave a retargets the shared duty/pad tone rows to damping and back
+    if (change.slot_idx == osc_fir_type_prop || change.slot_idx == osc_waveform_a_prop ||
+        change.slot_idx == osc_waveform_b_prop) {
+        // wave a retargets the shared duty/pad tone rows to dispersion/sustain damping and back; wave b
+        // renames the duty b row (Pad Wander under the pad wave)
+        return true;
     }
     // A band [-]/[+] click rewrites the stored bands (insert after band N
     // as a copy, or remove band N with later bands shifting up), so the
@@ -1961,15 +1991,8 @@ static bool read_oscillator_layer(const Sculptor::Graph&           graph,
     if (! read_list_prop(slots[osc_fir_type_prop], &index)) {
         return false;
     }
-    osc.fir_type                      = static_cast<Synth::FilterType>(index);
-    osc.string_pick                   = slots[osc_pick_slot].value.real;
-    osc.string_brightness             = slots[osc_brightness_slot].value.real;
-    const int32_t dispersion_sections = slots[osc_dispersion_sections_slot].value.integer;
-    if (dispersion_sections < 1 || dispersion_sections > 6) {
-        return false;
-    }
-    osc.string_dispersion          = slots[osc_dispersion_slot].value.real;
-    osc.string_dispersion_sections = static_cast<float>(dispersion_sections);
+    osc.fir_type          = static_cast<Synth::FilterType>(index);
+    osc.string_brightness = slots[osc_brightness_slot].value.real;
 
     // The projected band blocks encode the count: one uniform block per
     // existing band after Filter Type.
@@ -2014,6 +2037,13 @@ static bool read_oscillator_layer(const Sculptor::Graph&           graph,
         }
         if (target == Synth::mod_fir_spread) {
             gen.base_value = fir_spread_bank_value(osc.fir_type, gen.base_value);
+        }
+        // The bank and the codec hold all three string targets in 0..1.  Sustain Damping shares the
+        // Pad Tone row (-1..1), so the Waveform A edit that makes the layer string can read a negative
+        // value there: clamp so it cannot compile into an unsavable bank.
+        if (target == Synth::mod_string_damping || target == Synth::mod_string_release_damping ||
+            target == Synth::mod_string_dispersion) {
+            gen.base_value = gen.base_value < 0.0f ? 0.0f : gen.base_value > 1.0f ? 1.0f : gen.base_value;
         }
         // A connection still ending on the base target row is a
         // validator/apply invariant violation: the apply path relocates
@@ -2132,6 +2162,8 @@ bool Sculptor::compile_graph_to_instrument(const Graph&             graph,
             return false;
         }
         if (previous != nullptr) {
+            // The dispersion section count has no editor row: it is inert and kept as stored.
+            out->layers[layer].string_dispersion_sections = previous->layers[layer].string_dispersion_sections;
             // Bands beyond the projected count have no graph rows: their
             // bindings stay as stored (the band edits zero them on
             // removal), so a re-projection round trip is bit-identical.
@@ -2299,7 +2331,7 @@ bool Sculptor::osc_graph_validate(void* user_data, Graph& graph, EndPoint output
             uint32_t target   = 0;
             uint32_t family   = 0;
             uint32_t dot      = pool_no_slot;
-            if (! decode_osc_input(*mapping, input, &base_row, &target, &family, &dot)) {
+            if (! decode_osc_input(*mapping, graph, input, &base_row, &target, &family, &dot)) {
                 return false;
             }
             if (! base_row && family != family_env) {
@@ -2339,7 +2371,7 @@ bool Sculptor::osc_graph_validate(void* user_data, Graph& graph, EndPoint output
             uint32_t target   = 0;
             uint32_t family   = 0;
             uint32_t dot      = pool_no_slot;
-            if (! decode_osc_input(*mapping, input, &base_row, &target, &family, &dot)) {
+            if (! decode_osc_input(*mapping, graph, input, &base_row, &target, &family, &dot)) {
                 return false;
             }
             if (! base_row && family != family_lfo) {
@@ -2375,7 +2407,7 @@ bool Sculptor::osc_graph_validate(void* user_data, Graph& graph, EndPoint output
             uint32_t target   = 0;
             uint32_t family   = 0;
             uint32_t dot      = pool_no_slot;
-            if (! decode_osc_input(*mapping, input, &base_row, &target, &family, &dot)) {
+            if (! decode_osc_input(*mapping, graph, input, &base_row, &target, &family, &dot)) {
                 return false;
             }
             if (! base_row && family != family_src) {
@@ -3141,7 +3173,7 @@ static bool relocate_base_row_wire(Sculptor::Graph*                 graph,
     uint32_t                    target     = 0;
     uint32_t                    family     = 0;
     uint32_t                    dot        = Sculptor::pool_no_slot;
-    if (! decode_osc_input(*mapping, connection.input, &base_row, &target, &family, &dot) || ! base_row) {
+    if (! decode_osc_input(*mapping, *graph, connection.input, &base_row, &target, &family, &dot) || ! base_row) {
         return true;
     }
 
@@ -3204,6 +3236,7 @@ static bool apply_connection_change(Synth::InstrumentEditorBank* bank,
         uint32_t deleted_family = 0;
         uint32_t deleted_dot    = Sculptor::pool_no_slot;
         if (decode_osc_input(*mapping,
+                             *graph,
                              change.connection_input,
                              &deleted_row,
                              &deleted_target,
@@ -3238,8 +3271,8 @@ static bool apply_connection_change(Synth::InstrumentEditorBank* bank,
         uint32_t                    target     = 0;
         uint32_t                    family     = 0;
         uint32_t                    dot        = Sculptor::pool_no_slot;
-        if (decode_osc_input(*mapping, connection.input, &base_row, &target, &family, &dot) && family == family_env &&
-            target == static_cast<uint32_t>(Synth::mod_volume)) {
+        if (decode_osc_input(*mapping, *graph, connection.input, &base_row, &target, &family, &dot) &&
+            family == family_env && target == static_cast<uint32_t>(Synth::mod_volume)) {
             const int32_t inst = find_instance(*mapping, connection.output.node_idx);
             if (inst >= 0 && mapping->detached[inst].kind == 1 && mapping->detached[inst].desc_id != 0 &&
                 mapping->detached[inst].desc_id <= bank->bank.envelopes.num_allocated) {

@@ -318,6 +318,14 @@ uint32_t sustain_decay_ticks(float release_seconds);
 // total_ticks == 0 returns 1.0 (no decay).
 float sustain_decay_per_tick(uint32_t total_ticks);
 
+// Maps a summed string release damping value to the shader's release gain
+// parameter.  The input is clamped to [0, 1] (NaN maps to 0).  The release
+// T60 is 2.0 * (0.03 / 2.0)^x, so x = 0 rings out for about 2.0 s, x = 0.5 for
+// about 0.245 s and x = 1 chokes in about 0.03 s.  The result is 0.05 / T60,
+// from about 0.025 to 1.667; values above 1.0 are legal because the shader
+// uses it only as pow(10, -value * 3 * loop_length / (sample_rate * 0.05)).
+float string_release_damping_curve(float x);
+
 // Sustain-decay termination gate: true when the decay owns this
 // oscillator's termination and the envelope-completion fade must be
 // skipped (the completed dest level is still audible).  `decaying` is only

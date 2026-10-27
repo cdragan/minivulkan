@@ -502,6 +502,14 @@ float Synth::sustain_decay_per_tick(const uint32_t total_ticks)
     return total_ticks ? mstd::exp2(-10.0f / static_cast<float>(total_ticks)) : 1.0f;
 }
 
+float Synth::string_release_damping_curve(const float x)
+{
+    // 0.05 / (2.0 * exp2(x * log2(0.015))) = 0.025 * exp2(x * -log2(0.015)).
+    constexpr float neg_log2_t60_ratio = 6.0588937f;
+    const float clamped                = x >= 0.0f ? (x <= 1.0f ? x : 1.0f) : 0.0f;
+    return 0.025f * mstd::exp2(clamped * neg_log2_t60_ratio);
+}
+
 bool Synth::sustain_decay_owns_termination(const bool decaying, const float dest_value)
 {
     // The decay owns termination only while the completed dest level is still

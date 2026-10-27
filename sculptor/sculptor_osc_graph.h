@@ -91,33 +91,27 @@ static_assert(Synth::max_layers + 6 * Synth::max_layers * Synth::num_mod_targets
 // fields 6..8 the Source A row and fields 9..11 the Source B row (dot, op, amount each).  Row-group ids are per
 // (target, row): the LFO row groups 3*t + 1, the source rows 3*t + 2 and 3*t + 3, the envelope row 3*t + 4; the fixed
 // slots own their lines (group 0). Four value rows nest as children of a
-// parent row: duty and pad tone under their waveform rows, plus Pick position,
-// Pluck Brightness, String Dispersion, Dispersion Sections, Damping and Release Damping under waveform a, waveform mix
+// parent row: duty and pad tone under their waveform rows, plus
+// Pluck Brightness and Release Damping under waveform a, waveform mix
 // / fm depth / fm ratio under mix mode, octave offset under pitch, and the band header rows and the band parameter rows
 // under filter type. A nested row's whole modulation block shifts one tree level deeper.
-constexpr uint32_t osc_slot_count          = 37;
+constexpr uint32_t osc_slot_count          = 35;
 constexpr uint32_t osc_target_block_stride = 12;
 // One uniform block per existing band, directly after Filter Type (slot
-// 139; osc_slot_count is the legacy fixed-row additive constant, not the
+// 149; osc_slot_count is the legacy fixed-row additive constant, not the
 // fixed slot count): the "Band N" header label row, its [-] and [+] click
 // slots, then the band's four parameter rows each followed by a 12-slot
 // modulation block. Only the stored band count's blocks are projected, so
 // the projected slot count encodes the band count.
-constexpr uint32_t osc_band_first_slot = 140;
-// The Pick position row follows the pad tone a block, nested under Waveform A
-// like duty and pad tone, before Waveform B.  Damping and Release Damping
-// reuse the Duty A and Pad Tone A rows (slots 2 and 15, with their blocks)
-// when wave A is the string wave; values are stored per slot, so switching
-// wave A to string shows the old duty / pad tone value as the damping.
-constexpr uint32_t osc_pick_slot = 28;
-// The Pluck Brightness row directly follows the Pick position row and nests
-// the same way; it is a plain layer scalar in [0, 1] (1 = unfiltered burst).
-constexpr uint32_t osc_brightness_slot = 29;
-// The String Dispersion and Dispersion Sections rows directly follow Pluck Brightness and nest the
-// same way.  Dispersion is a plain layer scalar in [0, 1] (0 = off); the section count is an integer
-// stepper 1..6, ignored while dispersion is 0.  Neither row is connectible.
-constexpr uint32_t osc_dispersion_slot          = 30;
-constexpr uint32_t osc_dispersion_sections_slot = 31;
+constexpr uint32_t osc_band_first_slot = 150;
+// Under the string wave the two shared rows are reinterpreted: the duty a row (slot 2 and its
+// block) carries String Dispersion and the pad tone a row (slot 15 and its block) carries
+// Sustain Damping.  Release Damping owns slot 28 with its block (29..40) and Pluck Brightness, a
+// plain layer scalar in [0, 1] (1 = unfiltered burst) without a block, owns slot 41, directly
+// before Waveform B.  Both are nested under Waveform A.  The string-only slots 28..41 are
+// allocated for every wave and hidden unless wave A is the string wave.
+constexpr uint32_t osc_string_extras_first_slot = 28;
+constexpr uint32_t osc_brightness_slot          = 41;
 constexpr uint32_t osc_band_max_bands           = 4;
 constexpr uint32_t osc_band_block_stride        = 3u + 4u * (osc_target_block_stride + 1u);
 
@@ -143,34 +137,35 @@ constexpr uint8_t osc_band_block_level = 3;
 // properties, and the rows after an earlier target's block shift down
 // by that block.  Indexed by ModTarget.
 constexpr uint32_t osc_target_row_slot[Synth::num_mod_targets] = {
-    99,  // volume
-    125, // pitch
-    112, // pan
+    109, // volume
+    135, // pitch
+    122, // pan
     2,   // duty a
-    33,  // duty b
-    60,  // waveform mix
-    73,  // fm depth
-    156, // fir pitch spread (band 0 Spread row)
-    86,  // fm ratio
+    43,  // duty b
+    70,  // waveform mix
+    83,  // fm depth
+    166, // fir pitch spread (band 0 Spread row)
+    96,  // fm ratio
     15,  // pad tone a
-    46,  // pad tone b
-    182, // fir slope
-    143, // fir band 0 offset
-    169, // fir band 0 gain
-    198, // fir band 1 offset
-    211, // fir band 1 spread
-    224, // fir band 1 gain
-    237, // fir band 1 slope
-    253, // fir band 2 offset
-    266, // fir band 2 spread
-    279, // fir band 2 gain
-    292, // fir band 2 slope
-    308, // fir band 3 offset
-    321, // fir band 3 spread
-    334, // fir band 3 gain
-    347, // fir band 3 slope
-    2,   // damping
-    15,  // release damping
+    56,  // pad tone b
+    192, // fir slope
+    153, // fir band 0 offset
+    179, // fir band 0 gain
+    208, // fir band 1 offset
+    221, // fir band 1 spread
+    234, // fir band 1 gain
+    247, // fir band 1 slope
+    263, // fir band 2 offset
+    276, // fir band 2 spread
+    289, // fir band 2 gain
+    302, // fir band 2 slope
+    318, // fir band 3 offset
+    331, // fir band 3 spread
+    344, // fir band 3 gain
+    357, // fir band 3 slope
+    15,  // damping (shares the pad tone a row)
+    28,  // release damping
+    2,   // dispersion (shares the duty a row)
 };
 
 // First slot of target `target`'s modulation block on an oscillator
@@ -217,13 +212,13 @@ constexpr uint32_t osc_target_src_dot(uint32_t target, uint32_t input)
 static_assert(osc_target_row_slot[Synth::mod_fir_band3_slope] + osc_target_block_stride <= max_node_slots);
 static_assert(osc_target_row_slot[Synth::mod_fir_band3_offset] + osc_target_block_stride <= max_node_slots);
 static_assert(osc_band_header_slot(osc_band_max_bands - 1u) + osc_band_block_stride <= max_node_slots);
-static_assert(osc_target_row_slot[Synth::mod_string_damping] == osc_target_row_slot[Synth::mod_duty0]);
-static_assert(osc_target_row_slot[Synth::mod_string_release_damping] == osc_target_row_slot[Synth::mod_pad_tilt0]);
-static_assert(osc_pick_slot == osc_target_row_slot[Synth::mod_pad_tilt0] + osc_target_block_stride + 1u);
-static_assert(osc_brightness_slot == osc_pick_slot + 1u);
-static_assert(osc_dispersion_slot == osc_brightness_slot + 1u);
-static_assert(osc_dispersion_sections_slot == osc_dispersion_slot + 1u);
-static_assert(osc_dispersion_sections_slot + 1u < osc_target_row_slot[Synth::mod_duty1]);
+static_assert(osc_target_row_slot[Synth::mod_string_dispersion] == osc_target_row_slot[Synth::mod_duty0]);
+static_assert(osc_target_row_slot[Synth::mod_string_damping] == osc_target_row_slot[Synth::mod_pad_tilt0]);
+static_assert(osc_target_row_slot[Synth::mod_string_release_damping] == osc_string_extras_first_slot);
+static_assert(osc_string_extras_first_slot == osc_target_row_slot[Synth::mod_pad_tilt0] + osc_target_block_stride + 1u);
+static_assert(osc_brightness_slot ==
+              osc_target_row_slot[Synth::mod_string_release_damping] + osc_target_block_stride + 1u);
+static_assert(osc_brightness_slot + 1u < osc_target_row_slot[Synth::mod_duty1]);
 static_assert(osc_band_header_slot(osc_band_max_bands - 1u) + osc_band_block_stride == max_node_slots);
 static_assert(osc_target_row_slot[Synth::mod_pad_tilt1] + osc_target_block_stride <
               osc_target_row_slot[Synth::mod_osc_mix]);
@@ -552,9 +547,24 @@ uint32_t osc_target_row(uint32_t target);
 // false when the slot is one of the fixed slots (a property or a target
 // value row) or past the last block.
 bool osc_target_block_field(uint32_t slot_idx, uint32_t* target, uint32_t* field);
+// Decodes an oscillator-node input endpoint (target, row family and dot) as
+// the graph validator and apply paths see it; the shared duty a / pad tone a
+// rows and blocks decode to the target the node's wave a projects there
+// (String Dispersion / Sustain Damping under the string wave). A node the
+// graph no longer holds (a deletion event's freed endpoint) decodes with the
+// default Duty A / Pad Tone A meaning. False for non-oscillator or non-target
+// endpoints.
+bool decode_osc_input(const OscGraphMapping& mapping,
+                      const Graph&           graph,
+                      EndPoint               point,
+                      bool*                  base_row,
+                      uint32_t*              target,
+                      uint32_t*              family,
+                      uint32_t*              dot);
 // False for a ModTarget whose row is shared and currently carries another
-// target on this oscillator node (duty a / pad tone a under the string wave,
-// Damping / Release damping otherwise).
+// target on this oscillator node (duty a / pad tone a give way to String
+// Dispersion / Sustain Damping under the string wave; Release Damping exists
+// only under the string wave).
 bool osc_node_target_row_active(const Node& node, uint32_t target);
 
 // Per-family modulator-row visibility for target `target`'s block on an

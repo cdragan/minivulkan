@@ -111,7 +111,7 @@ namespace {
 constexpr uint32_t max_portable_records =
     Synth::graph_canonical_node_count + 2u * Synth::max_layers * Synth::num_mod_targets;
 static_assert(max_portable_records == Synth::instrument_graph_layout_capacity);
-static_assert(max_portable_records == 401, "9 canonical + 196 envelopes + 196 LFOs");
+static_assert(max_portable_records == 415, "9 canonical + 203 envelopes + 203 LFOs");
 constexpr uint32_t clipboard_token_bound = 32768;
 constexpr uint32_t fake_region_base      = 8192;
 
@@ -120,7 +120,7 @@ constexpr uint32_t fake_region_base      = 8192;
 // bytes needs capacity >= L + 1. This mirrors the editor's staging buffer in
 // sculptor_instr_edit.cpp; a larger document must raise that buffer, never
 // truncate the document.
-constexpr uint32_t clipboard_capacity = 192 * 1024;
+constexpr uint32_t clipboard_capacity = 256 * 1024;
 
 // One instrument document with one saved position per node kind, assembled from
 // a fixed body and a caller-supplied record list, so a rejection test changes
@@ -167,45 +167,48 @@ constexpr uint32_t t7_rate_field      = 5;
 // The value row slot of each ModTarget on an oscillator node; its
 // 12-slot block starts directly after it.
 constexpr uint32_t t7_target_row_slots[Synth::num_mod_targets] = {
-    99,  // volume
-    125, // pitch
-    112, // pan
+    109, // volume
+    135, // pitch
+    122, // pan
     2,   // duty a
-    33,  // duty b
-    60,  // waveform mix
-    73,  // fm depth
-    156, // fir pitch spread
-    86,  // fm ratio
+    43,  // duty b
+    70,  // waveform mix
+    83,  // fm depth
+    166, // fir pitch spread
+    96,  // fm ratio
     15,  // pad tone a
-    46,  // pad tone b
-    182, // fir slope
-    143, // fir band 0 offset
-    169, // fir band 0 gain
-    198, // fir band 1 offset
-    211, // fir band 1 spread
-    224, // fir band 1 gain
-    237, // fir band 1 slope
-    253, // fir band 2 offset
-    266, // fir band 2 spread
-    279, // fir band 2 gain
-    292, // fir band 2 slope
-    308, // fir band 3 offset
-    321, // fir band 3 spread
-    334, // fir band 3 gain
-    347, // fir band 3 slope
-    2,   // damping
-    15,  // release damping
+    56,  // pad tone b
+    192, // fir slope
+    153, // fir band 0 offset
+    179, // fir band 0 gain
+    208, // fir band 1 offset
+    221, // fir band 1 spread
+    234, // fir band 1 gain
+    247, // fir band 1 slope
+    263, // fir band 2 offset
+    276, // fir band 2 spread
+    289, // fir band 2 gain
+    302, // fir band 2 slope
+    318, // fir band 3 offset
+    331, // fir band 3 spread
+    344, // fir band 3 gain
+    357, // fir band 3 slope
+    15,  // damping
+    28,  // release damping
+    2,   // dispersion
 };
 
 // True when target t has a projected row on this layer: the duty a / pad tone a
-// rows carry Damping / Release damping under the string wave, so the other
-// of each pair has no row (its binding is stored but not projected).
+// rows carry String Dispersion / Sustain Damping under the string wave, so the other
+// of each pair has no row (its binding is stored but not projected); the string
+// targets have no row under any other wave.
 static bool t7_target_has_row(const Synth::Oscillator& osc, uint32_t t)
 {
     const bool string_wave = osc.osc_type[0] == Synth::WaveType::string_wave;
-    const bool damping     = t == Synth::mod_string_damping || t == Synth::mod_string_release_damping;
-    const bool shared      = t == Synth::mod_duty0 || t == Synth::mod_pad_tilt0;
-    return string_wave ? ! shared : ! damping;
+    const bool string_only =
+        t == Synth::mod_string_damping || t == Synth::mod_string_release_damping || t == Synth::mod_string_dispersion;
+    const bool shared = t == Synth::mod_duty0 || t == Synth::mod_pad_tilt0;
+    return string_wave ? ! shared : ! string_only;
 }
 
 // Shared graph and mapping for the direct-row blocks; every block
@@ -633,8 +636,8 @@ static void build_osc_graph_max_fixture(Synth::InstrumentBank* bank,
         osc.osc_type[1]        = static_cast<Synth::WaveType>(1 + ((layer + 2) % 4));
         osc.osc_mode           = static_cast<Synth::OscMode>(layer % 3);
         osc.mod_ratio          = 1.0f + 0.25f * static_cast<float>(layer);
-        // Layer 2 carries a nonzero pick so the Pick position row round-trips.
-        osc.string_pick = layer == 2 ? 0.25f : 0.0f;
+        // Layer 2 carries a non-default brightness so the Pluck Brightness row round-trips.
+        osc.string_brightness = layer == 2 ? 0.25f : 1.0f;
         // Four bands: every band block projects and round-trips.
         osc.fir_band_count = 4;
         for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
@@ -696,7 +699,8 @@ static void build_osc_graph_max_fixture(Synth::InstrumentBank* bank,
             // zeroed here (the scalar / row carries the value).
             continue;
         }
-        if (t == Synth::mod_string_damping || t == Synth::mod_string_release_damping) {
+        if (t == Synth::mod_string_damping || t == Synth::mod_string_release_damping ||
+            t == Synth::mod_string_dispersion) {
             continue; // projected only under the string wave, which this fixture never uses
         }
         routing.base_value = -1.0f + 0.25f * static_cast<float>(t);
@@ -1333,7 +1337,8 @@ static uint32_t build_clipboard_max_fixture(Synth::InstrumentBank*        bank,
                              : (target == Synth::mod_fir_band1_spread || target == Synth::mod_fir_band2_spread ||
                                 target == Synth::mod_fir_band3_spread)
                                  ? 4.0f + static_cast<float>((target - Synth::mod_fir_band1_spread) / 4)
-                             : (target == Synth::mod_string_damping || target == Synth::mod_string_release_damping)
+                             : (target == Synth::mod_string_damping || target == Synth::mod_string_release_damping ||
+                                target == Synth::mod_string_dispersion)
                                  ? 0.5f
                                  : 2.0f + static_cast<float>(target);
         routing.num_inputs = 2;
@@ -3285,10 +3290,10 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
     const Sculptor::Node& sum = graph.node(mapping.output_node);
     TEST(sum.position.x == 600 && sum.position.y == -450);
     TEST(sum.content_width_override == 360 && sum.content_height_override == 270);
-    const uint32_t          wave_b_slot   = 32; // waveform b, layout contract
-    const uint32_t          mode_slot     = 59; // mix mode, layout contract
+    const uint32_t          wave_b_slot   = 42; // waveform b, layout contract
+    const uint32_t          mode_slot     = 69; // mix mode, layout contract
     const uint32_t          fm_depth_slot = Sculptor::osc_target_row(Synth::mod_fm_index);
-    const uint32_t          fm_ratio_slot = 86; // fm ratio, layout contract
+    const uint32_t          fm_ratio_slot = 96; // fm ratio, layout contract
     Sculptor::PropertyValue wave          = {};
     wave.list_index                       = 0;
     graph.set_slot_value(mapping.osc_nodes[0], wave_b_slot, wave);
@@ -3319,8 +3324,7 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
         const uint32_t tone1        = Sculptor::osc_target_row(Synth::mod_pad_tilt1);
         for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
             const bool gated =
-                row == Sculptor::osc_pick_slot || row == Sculptor::osc_brightness_slot ||
-                row == Sculptor::osc_dispersion_slot || row == Sculptor::osc_dispersion_sections_slot ||
+                (row >= Sculptor::osc_string_extras_first_slot && row <= Sculptor::osc_brightness_slot) ||
                 row == Sculptor::osc_target_row(Synth::mod_duty1) || row == mode_slot ||
                 row == Sculptor::osc_target_row(Synth::mod_osc_mix) || row == fm_depth_slot || row == fm_ratio_slot ||
                 (tone_a_gated && row >= tone0 && row <= tone0 + Sculptor::osc_target_block_stride) ||
@@ -3344,13 +3348,13 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
         const uint32_t mix_row    = Sculptor::osc_target_row(Synth::mod_osc_mix);
         const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
         for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
-            const bool gated = row == Sculptor::osc_pick_slot || row == Sculptor::osc_brightness_slot ||
-                               row == Sculptor::osc_dispersion_slot || row == Sculptor::osc_dispersion_sections_slot ||
-                               (row >= duty1_row && row <= duty1_row + Sculptor::osc_target_block_stride) ||
-                               (row >= tone0 && row <= tone0 + Sculptor::osc_target_block_stride) ||
-                               (row >= tone1 && row <= tone1 + Sculptor::osc_target_block_stride) || row == mix_row ||
-                               (row >= spread_row && row <= Sculptor::osc_target_row(Synth::mod_fir_slope) +
-                                                                Sculptor::osc_target_block_stride);
+            const bool gated =
+                (row >= Sculptor::osc_string_extras_first_slot && row <= Sculptor::osc_brightness_slot) ||
+                (row >= duty1_row && row <= duty1_row + Sculptor::osc_target_block_stride) ||
+                (row >= tone0 && row <= tone0 + Sculptor::osc_target_block_stride) ||
+                (row >= tone1 && row <= tone1 + Sculptor::osc_target_block_stride) || row == mix_row ||
+                (row >= spread_row &&
+                 row <= Sculptor::osc_target_row(Synth::mod_fir_slope) + Sculptor::osc_target_block_stride);
             TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), row) == gated);
         }
     }
@@ -3365,14 +3369,13 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
         const uint32_t tone_b_row = Sculptor::osc_target_row(Synth::mod_pad_tilt1);
         const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
         for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
-            const bool gated = row == Sculptor::osc_pick_slot || row == Sculptor::osc_brightness_slot ||
-                               row == Sculptor::osc_dispersion_slot || row == Sculptor::osc_dispersion_sections_slot ||
-                               (row >= tone_b_row && row <= tone_b_row + Sculptor::osc_target_block_stride) ||
-                               row == Sculptor::osc_target_row(Synth::mod_duty1) || row == mode_slot ||
-                               row == Sculptor::osc_target_row(Synth::mod_osc_mix) || row == fm_depth_slot ||
-                               row == fm_ratio_slot ||
-                               (row >= spread_row && row <= Sculptor::osc_target_row(Synth::mod_fir_slope) +
-                                                                Sculptor::osc_target_block_stride);
+            const bool gated =
+                (row >= Sculptor::osc_string_extras_first_slot && row <= Sculptor::osc_brightness_slot) ||
+                (row >= tone_b_row && row <= tone_b_row + Sculptor::osc_target_block_stride) ||
+                row == Sculptor::osc_target_row(Synth::mod_duty1) || row == mode_slot ||
+                row == Sculptor::osc_target_row(Synth::mod_osc_mix) || row == fm_depth_slot || row == fm_ratio_slot ||
+                (row >= spread_row &&
+                 row <= Sculptor::osc_target_row(Synth::mod_fir_slope) + Sculptor::osc_target_block_stride);
             TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), row) == gated);
         }
     }
@@ -3384,11 +3387,11 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
     {
         const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
         for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
-            const bool gated = row == Sculptor::osc_pick_slot || row == Sculptor::osc_brightness_slot ||
-                               row == Sculptor::osc_dispersion_slot || row == Sculptor::osc_dispersion_sections_slot ||
-                               (row >= spread_row && row <= Sculptor::osc_target_row(Synth::mod_fir_slope) +
-                                                                Sculptor::osc_target_block_stride) ||
-                               row == Sculptor::osc_target_row(Synth::mod_osc_mix);
+            const bool gated =
+                (row >= Sculptor::osc_string_extras_first_slot && row <= Sculptor::osc_brightness_slot) ||
+                (row >= spread_row &&
+                 row <= Sculptor::osc_target_row(Synth::mod_fir_slope) + Sculptor::osc_target_block_stride) ||
+                row == Sculptor::osc_target_row(Synth::mod_osc_mix);
             TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), row) == gated);
         }
     }
@@ -3401,17 +3404,17 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
         const uint32_t mix_row    = Sculptor::osc_target_row(Synth::mod_osc_mix);
         const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
         for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
-            const bool gated = row == Sculptor::osc_pick_slot || row == Sculptor::osc_brightness_slot ||
-                               row == Sculptor::osc_dispersion_slot || row == Sculptor::osc_dispersion_sections_slot ||
-                               (row >= duty0_row && row <= duty0_row + Sculptor::osc_target_block_stride) ||
-                               (row >= tone0 && row <= tone0 + Sculptor::osc_target_block_stride) || row == mix_row ||
-                               (row >= spread_row && row <= Sculptor::osc_target_row(Synth::mod_fir_slope) +
-                                                                Sculptor::osc_target_block_stride);
+            const bool gated =
+                (row >= Sculptor::osc_string_extras_first_slot && row <= Sculptor::osc_brightness_slot) ||
+                (row >= duty0_row && row <= duty0_row + Sculptor::osc_target_block_stride) ||
+                (row >= tone0 && row <= tone0 + Sculptor::osc_target_block_stride) || row == mix_row ||
+                (row >= spread_row &&
+                 row <= Sculptor::osc_target_row(Synth::mod_fir_slope) + Sculptor::osc_target_block_stride);
             TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), row) == gated);
         }
     }
-    // String wave a (list entry 5) reuses the duty a / pad tone a rows as Damping / Release
-    // damping, so both families and the pick row stay live.
+    // String wave a (list entry 5) reuses the duty a / pad tone a rows as String Dispersion /
+    // Sustain Damping, so both families stay live (Release Damping and Pluck Brightness follow).
     wave.list_index = 5;
     graph.set_slot_value(node_index, 1, wave);
     TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index),
@@ -3421,7 +3424,6 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
                                                                 Sculptor::osc_target_block_stride));
     TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index),
                                                             Sculptor::osc_target_row(Synth::mod_pad_tilt0)));
-    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), Sculptor::osc_pick_slot));
     TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), Sculptor::osc_brightness_slot));
     // Restore the contract state for the following widget tests.
     wave.list_index = 0;
@@ -4079,7 +4081,7 @@ static void check_zero_fm_clipboard_library_round_trips()
                     TEST(instr.layers[l].osc_mode == (active ? Synth::osc_mode_fm : Synth::osc_mode_blend));
                     const Sculptor::Node& node = graph.node(mapping.osc_nodes[l]);
                     TEST(node.slots.entries[Sculptor::osc_target_row(Synth::mod_fm_index)].value.real == depth);
-                    TEST(node.slots.entries[86].value.real == ratio); // fm ratio, layout contract
+                    TEST(node.slots.entries[96].value.real == ratio); // fm ratio, layout contract
                     TEST(fm_widget_enabled(graph, mapping.osc_nodes[l]) == (active != 0));
                 }
             }
@@ -4424,10 +4426,10 @@ static void check_decoded_fm_lfo_binding_survives_compile()
     TEST(compiled.lfo_depth == 0.5f);
 }
 
-// D11/TRAP: a string layer with a nonzero pick and non-default routing on
+// D11/TRAP: a string layer with a non-default brightness and routing on
 // targets 26/27 at band count 1 round-trips encode -> decode -> project ->
 // compile, and the decoded compile equals the direct compile of the source.
-static void check_string_pick_trap_decode_compile()
+static void check_string_brightness_trap_decode_compile()
 {
     if (Synth::num_mod_targets < 28) {
         return;
@@ -4439,7 +4441,7 @@ static void check_string_pick_trap_decode_compile()
     Synth::Oscillator& layer = instrument.layers[0];
     layer.osc_type[0]        = Synth::WaveType::string_wave;
     layer.fir_band_count     = 1;
-    layer.string_pick        = 0.25f;
+    layer.string_brightness  = 0.25f;
     for (uint32_t t = Synth::mod_string_damping; t <= Synth::mod_string_release_damping; ++t) {
         layer.targets[t].base_value     = 0.5f;
         layer.targets[t].envelope_depth = 1.0f; // the decoded default
@@ -4456,7 +4458,7 @@ static void check_string_pick_trap_decode_compile()
     TEST(Sculptor::project_editor_to_graph(bank, direct_graph.get(), &direct_mapping, 0, 0));
     Synth::Instrument direct = {};
     TEST(Sculptor::compile_graph_to_instrument(*direct_graph, direct_mapping, &direct));
-    TEST(direct.layers[0].string_pick == 0.25f);
+    TEST(direct.layers[0].string_brightness == 0.25f);
 
     // Encode, decode, then compile the decoded bank.
     const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
@@ -4471,7 +4473,7 @@ static void check_string_pick_trap_decode_compile()
     TEST(Synth::decode_editor_bank_json(payload, length, &decoded));
     const Synth::Oscillator& dec =
         decoded.bank.instruments.entries[decoded.bank.channel_zones[0][0].instrument].layers[0];
-    TEST(dec.string_pick == 0.25f);
+    TEST(dec.string_brightness == 0.25f);
     for (uint32_t t = Synth::mod_string_damping; t <= Synth::mod_string_release_damping; ++t) {
         TEST(dec.targets[t].base_value == 0.5f);
         TEST(dec.targets[t].lfo_desc_id == 1);
@@ -4482,7 +4484,7 @@ static void check_string_pick_trap_decode_compile()
     TEST(Sculptor::project_editor_to_graph(decoded, decoded_graph.get(), &decoded_mapping, 0, 0));
     Synth::Instrument recompiled = {};
     TEST(Sculptor::compile_graph_to_instrument(*decoded_graph, decoded_mapping, &recompiled));
-    TEST(recompiled.layers[0].string_pick == 0.25f);
+    TEST(recompiled.layers[0].string_brightness == 0.25f);
     TEST(memcmp(&recompiled.layers[0], &direct.layers[0], sizeof(Synth::Oscillator)) == 0);
 }
 
@@ -11914,14 +11916,14 @@ static void child_row_projection_regressions()
         for (uint32_t t = 3; t < Synth::num_mod_targets; ++t) {
             child_row_expected = child_row_expected || s == Sculptor::osc_target_row(t);
         }
-        // Pitch offset, octave offset, pick, the band header rows, the band
+        // Pitch offset, octave offset, brightness, the dispersion row and its block, the band header rows, the band
         // parameter rows and their blocks (everything in a band block but
         // the two click slots) and the fir slope row nest under their
         // parents.
         const bool band_header = s >= Sculptor::osc_band_first_slot &&
                                  (s - Sculptor::osc_band_first_slot) % Sculptor::osc_band_block_stride == 0u;
-        child_row_expected     = child_row_expected || band_header || s == 28 || s == 29 || s == 30 || s == 31 ||
-                                 s == 138 || s == 182 ||
+        child_row_expected     = child_row_expected || band_header || s == 28 || s == 29 || (s >= 30 && s <= 41) ||
+                                 s == 148 || s == 192 ||
                                  (s >= Sculptor::osc_band_first_slot + 3u &&
                                   s < Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride);
         TEST(osc.slots.entries[s].child_row == child_row_expected);
@@ -12252,10 +12254,10 @@ static void osc_direct_modulator_regressions()
             // the widened slot count.  Wave B starts off and the mode starts
             // on blend, so the duty b / mix mode / waveform mix / fm depth / fm
             // ratio rows plus both pad tone families are disabled and nothing else is.
-            const uint32_t wave_b_slot    = 32; // waveform b, layout contract
-            const uint32_t mode_slot      = 59; // mix mode, layout contract
+            const uint32_t wave_b_slot    = 42; // waveform b, layout contract
+            const uint32_t mode_slot      = 69; // mix mode, layout contract
             const uint32_t fm_depth_slot  = Sculptor::osc_target_row(Synth::mod_fm_index);
-            const uint32_t fm_ratio_slot  = 86; // fm ratio, layout contract
+            const uint32_t fm_ratio_slot  = 96; // fm ratio, layout contract
             const uint32_t gated_slots[4] = { Sculptor::osc_target_row(Synth::mod_duty1),
                                               mode_slot,
                                               fm_depth_slot,
@@ -14177,49 +14179,49 @@ static void osc_fir_slope_projection_regressions()
 
     // The blocks are appended: 35 fixed rows plus Filter Type and one
     // band block per existing band (the fixture keeps one), pinned against
-    // the literal 192.
+    // the literal 205.
     const uint32_t expected_slots =
         Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride * instrument.layers[0].fir_band_count;
     TEST(osc.slots.num_allocated == expected_slots);
-    TEST(expected_slots == 195);
+    TEST(expected_slots == 205);
 
-    // Slot 182 is the connectable FIR Slope row.
-    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_slope] == 182);
-    TEST(Sculptor::osc_target_row(Synth::mod_fir_slope) == 182);
+    // Slot 192 is the connectable FIR Slope row.
+    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_slope] == 192);
+    TEST(Sculptor::osc_target_row(Synth::mod_fir_slope) == 192);
     {
-        const Sculptor::Slot& row = osc.slots.entries[182];
+        const Sculptor::Slot& row = osc.slots.entries[192];
         TEST(row.connectable);
         TEST(row.drop_menu);
         TEST(strncmp(row.name, "FIR Slope", sizeof(row.name)) == 0);
         TEST(row.property_type == Sculptor::PropertyType::integer);
     }
-    // The block follows the row: the env dot at 181 and the source dots at
-    // 187/190, all twelve slots allocated.
-    TEST(Sculptor::osc_target_env_dot(Synth::mod_fir_slope) == 183);
-    TEST(Sculptor::osc_target_src_dot(Synth::mod_fir_slope, 0) == 189);
-    TEST(Sculptor::osc_target_src_dot(Synth::mod_fir_slope, 1) == 192);
+    // The block follows the row: the env dot at 193 and the source dots at
+    // 199/202, all twelve slots allocated.
+    TEST(Sculptor::osc_target_env_dot(Synth::mod_fir_slope) == 193);
+    TEST(Sculptor::osc_target_src_dot(Synth::mod_fir_slope, 0) == 199);
+    TEST(Sculptor::osc_target_src_dot(Synth::mod_fir_slope, 1) == 202);
     {
-        const Sculptor::Slot& env_dot = osc.slots.entries[183];
+        const Sculptor::Slot& env_dot = osc.slots.entries[193];
         TEST(env_dot.kind == Sculptor::SlotKind::input);
         TEST(strncmp(env_dot.name, "Envelope", sizeof(env_dot.name)) == 0);
-        const Sculptor::Slot& src_a = osc.slots.entries[189];
+        const Sculptor::Slot& src_a = osc.slots.entries[199];
         TEST(src_a.kind == Sculptor::SlotKind::input);
         TEST(strncmp(src_a.name, "Source A Op", sizeof(src_a.name)) == 0);
-        const Sculptor::Slot& src_b = osc.slots.entries[192];
+        const Sculptor::Slot& src_b = osc.slots.entries[202];
         TEST(src_b.kind == Sculptor::SlotKind::input);
         TEST(strncmp(src_b.name, "Source B Op", sizeof(src_b.name)) == 0);
     }
     // No existing row shifted.
-    TEST(Sculptor::osc_target_row_slot[Synth::mod_volume] == 99);
-    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_spread] == 156);
+    TEST(Sculptor::osc_target_row_slot[Synth::mod_volume] == 109);
+    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_spread] == 166);
     // Literal budget pins: a future drift cannot pass silently.
-    TEST(Sculptor::max_nodes == 402);
-    TEST(Sculptor::max_node_slots == 360);
+    TEST(Sculptor::max_nodes == 416);
+    TEST(Sculptor::max_node_slots == 370);
 
     // Disabled state matches the filter-off predicate: the fir-off layer
-    // grays the whole 156..194 range; the band-pass layers keep every slot
+    // grays the whole 166..204 range; the band-pass layers keep every slot
     // of the range active.
-    for (uint32_t s = 156; s <= 194; s++) {
+    for (uint32_t s = 166; s <= 204; s++) {
         TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(mapping.osc_nodes[1]), s));
         TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, s));
         TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(mapping.osc_nodes[2]), s));
@@ -14228,9 +14230,9 @@ static void osc_fir_slope_projection_regressions()
     // Display: a routed base wins over the scalar; a wired base of zero
     // clamps to 1 at the display boundary (the integer percent domain); a
     // zeroed binding shows the scalar, even with the filter off.
-    TEST(osc.slots.entries[182].value.integer == 64);
-    TEST(graph.node(mapping.osc_nodes[2]).slots.entries[182].value.integer == 1);
-    TEST(graph.node(mapping.osc_nodes[1]).slots.entries[182].value.integer == 37);
+    TEST(osc.slots.entries[192].value.integer == 64);
+    TEST(graph.node(mapping.osc_nodes[2]).slots.entries[192].value.integer == 1);
+    TEST(graph.node(mapping.osc_nodes[1]).slots.entries[192].value.integer == 37);
 
     // An envelope wired into the slope block's env dot compiles onto the
     // slope binding; the wired row is the binding's base, so the routed
@@ -14271,9 +14273,9 @@ static void osc_fir_slope_projection_regressions()
                                 Synth::max_layers * Synth::num_mod_targets,
                                 4);
         TEST(max_mapping.detached_count == 2 * Synth::max_layers * Synth::num_mod_targets);
-        TEST(max_mapping.detached_count == 392);
+        TEST(max_mapping.detached_count == 406);
         TEST(max_mapping.detached_count <= Sculptor::max_osc_instances);
-        TEST(max_graph.connection_count() == 1127);
+        TEST(max_graph.connection_count() == 1141);
         TEST(max_graph.connection_count() <= Sculptor::max_connections);
     }
 }
@@ -14879,7 +14881,7 @@ static void check_osc_pitch_gating()
         TEST(find_graph_slot(graph, mapping.osc_nodes[0], "Pitch", &pitch_slot));
         TEST(find_graph_slot(graph, mapping.osc_nodes[0], "Octave Offset", &octave_slot));
         TEST(pitch_slot == Sculptor::osc_target_row(Synth::mod_pitch));
-        TEST(octave_slot == 138);
+        TEST(octave_slot == 148);
         const Sculptor::Slot& pitch_row = graph.node(mapping.osc_nodes[0]).slots.entries[pitch_slot];
         TEST(pitch_row.property_type == Sculptor::PropertyType::real);
         TEST(! pitch_row.real_bounded); // a bare input box, not a slider
@@ -14895,7 +14897,7 @@ static void check_osc_pitch_gating()
         const Sculptor::OscTargetView spread_view = Sculptor::osc_target_view(Synth::mod_fir_spread);
         TEST(spread_view.min_value == 0.0f && spread_view.max_value == 36.0f);
         TEST(spread_view.bank_scale == 1.0f && ! spread_view.logarithmic);
-        TEST(Sculptor::osc_target_row(Synth::mod_fir_spread) == 156);
+        TEST(Sculptor::osc_target_row(Synth::mod_fir_spread) == 166);
 
         // Round-trip: an octave edit applies through the value_changed path,
         // lands in the bank and reprojection shows it again.
@@ -14970,7 +14972,7 @@ static void check_osc_pitch_gating()
         graph.take_changes(discarded, Sculptor::max_pending_changes);
         uint32_t slope_slot = Sculptor::pool_no_slot;
         TEST(find_graph_slot(graph, mapping.osc_nodes[0], "FIR Slope", &slope_slot));
-        TEST(slope_slot == 182);
+        TEST(slope_slot == 192);
         const Sculptor::Slot& slope_row = graph.node(mapping.osc_nodes[0]).slots.entries[slope_slot];
         TEST(slope_row.property_type == Sculptor::PropertyType::integer);
         TEST(slope_row.int_bounded);
@@ -16146,7 +16148,7 @@ struct m2_has_band_seam<GraphT,
 
 constexpr bool m2_band_seam_present = m2_has_band_seam<Sculptor::Graph>::value;
 
-constexpr bool m2_band_rows_present = Synth::num_mod_targets == 28;
+constexpr bool m2_band_rows_present = Synth::num_mod_targets == 29;
 
 // The band parameter target indices: band 0 reuses the legacy spread (7) and
 // slope (11) targets; the 14 appended targets follow at 12..25 in the order
@@ -16444,8 +16446,8 @@ static const char* const band_header_names_m2[4] = { "Band 1", "Band 2", "Band 3
 // Low-pass keeps the cutoff and FIR Slope labels.
 static void m2_band_layout_regressions()
 {
-    TEST(Synth::num_mod_targets == 28);
-    TEST(Synth::instrument_graph_layout_capacity == 401);
+    TEST(Synth::num_mod_targets == 29);
+    TEST(Synth::instrument_graph_layout_capacity == 415);
     TEST(Synth::fir_coeff_entry_words == 18);
 
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
@@ -16461,10 +16463,10 @@ static void m2_band_layout_regressions()
         return;
     }
     const Sculptor::Node& osc = graph.node(mapping.osc_nodes[0]);
-    // One band block: 140 + 55 slots.
+    // One band block: 150 + 55 slots.
     TEST(osc.slots.num_allocated == Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride);
     TEST(find_nth_osc_slot(osc, "Band 1", 0) == Sculptor::osc_band_header_slot(0));
-    TEST(find_nth_osc_slot(osc, "Filter Type", 0) == 139);
+    TEST(find_nth_osc_slot(osc, "Filter Type", 0) == 149);
     const uint32_t        header_slot = Sculptor::osc_band_header_slot(0);
     const Sculptor::Slot& header      = osc.slots.entries[header_slot];
     TEST(strncmp(header.name, "Band 1", sizeof(header.name)) == 0);
@@ -16479,17 +16481,17 @@ static void m2_band_layout_regressions()
     TEST(! minus.child_row && minus.child_level == 0);
     TEST(! plus.child_row && plus.child_level == 0);
 
-    // Four bands: band 0's rows sit at 143/156/169/182 and
+    // Four bands: band 0's rows sit at 153/166/179/192 and
     // bands 1..3 shift by 3 slots per earlier band.
     static const struct {
         uint32_t    slot;
         const char* name;
         uint32_t    target;
     } band_rows[16] = {
-        { 143, "Offset", 12 }, { 156, "Spread", 7 },  { 169, "Gain", 13 }, { 182, "FIR Slope", 11 },
-        { 198, "Offset", 14 }, { 211, "Spread", 15 }, { 224, "Gain", 16 }, { 237, "FIR Slope", 17 },
-        { 253, "Offset", 18 }, { 266, "Spread", 19 }, { 279, "Gain", 20 }, { 292, "FIR Slope", 21 },
-        { 308, "Offset", 22 }, { 321, "Spread", 23 }, { 334, "Gain", 24 }, { 347, "FIR Slope", 25 },
+        { 153, "Offset", 12 }, { 166, "Spread", 7 },  { 179, "Gain", 13 }, { 192, "FIR Slope", 11 },
+        { 208, "Offset", 14 }, { 221, "Spread", 15 }, { 234, "Gain", 16 }, { 247, "FIR Slope", 17 },
+        { 263, "Offset", 18 }, { 276, "Spread", 19 }, { 289, "Gain", 20 }, { 302, "FIR Slope", 21 },
+        { 318, "Offset", 22 }, { 331, "Spread", 23 }, { 344, "Gain", 24 }, { 357, "FIR Slope", 25 },
     };
 
     bank.bank.instruments.entries[0].layers[0].fir_band_count = 4;
@@ -16518,8 +16520,8 @@ static void m2_band_layout_regressions()
         const Sculptor::Node& lowpass_osc = graph.node(mapping.osc_nodes[0]);
         const uint32_t        cutoff_slot = find_nth_osc_slot(lowpass_osc, "Cutoff (Hz)", 0);
         const uint32_t        slope_slot  = find_nth_osc_slot(lowpass_osc, "FIR Slope", 0);
-        TEST(cutoff_slot == 156);
-        TEST(slope_slot == 182);
+        TEST(cutoff_slot == 166);
+        TEST(slope_slot == 192);
         // The legacy single-edge rows keep the fix-6 legacy depths: the
         // Cutoff and FIR Slope rows stay one level under Filter Type.
         TEST(lowpass_osc.slots.entries[cutoff_slot].child_row &&
@@ -16600,8 +16602,8 @@ static void m2_band_visibility_regressions()
     const Sculptor::Node& osc         = graph.node(mapping.osc_nodes[0]);
     const uint32_t        header_slot = find_nth_osc_slot(osc, "Band 1", 0);
     const uint32_t        filter_slot = find_nth_osc_slot(osc, "Filter Type", 0);
-    TEST(header_slot == Sculptor::osc_band_header_slot(0) && filter_slot == 139);
-    if (header_slot != Sculptor::osc_band_header_slot(0) || filter_slot != 139) {
+    TEST(header_slot == Sculptor::osc_band_header_slot(0) && filter_slot == 149);
+    if (header_slot != Sculptor::osc_band_header_slot(0) || filter_slot != 149) {
         return;
     }
     m2_band_visibility_body<m2_band_seam_present>(graph, mapping.osc_nodes[0], filter_slot);
@@ -16631,8 +16633,8 @@ static void m2_band_source_gray_regressions()
     const uint32_t velocity_slot = mapping.input_source_slots[static_cast<uint32_t>(Synth::ModSource::velocity) - 1];
     TEST(find_osc_graph_connection(graph, { osc_node, dot }) != Sculptor::pool_no_slot);
     const uint32_t filter_slot = find_nth_osc_slot(graph.node(osc_node), "Filter Type", 0);
-    TEST(filter_slot == 139);
-    if (filter_slot != 139) {
+    TEST(filter_slot == 149);
+    if (filter_slot != 149) {
         return;
     }
     // Filter to off through the apply path, then rebuild from the model.
@@ -16666,8 +16668,8 @@ static void m2_band_source_gray_regressions()
 
 static void m2_band_add_remove_regressions()
 {
-    TEST(Synth::num_mod_targets == 28);
-    if (Synth::num_mod_targets != 28) {
+    TEST(Synth::num_mod_targets == 29);
+    if (Synth::num_mod_targets != 29) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
@@ -16817,8 +16819,8 @@ static void m2_band_add_remove_regressions()
 // vacated band 3 block stops projecting.
 static void m2_band_remove_first_regressions()
 {
-    TEST(Synth::num_mod_targets == 28);
-    if (Synth::num_mod_targets != 28) {
+    TEST(Synth::num_mod_targets == 29);
+    if (Synth::num_mod_targets != 29) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
@@ -16918,8 +16920,8 @@ static void m2_band_remove_first_regressions()
 // band is a fresh copy of the surviving band rather than the removed state.
 static void m2_band_donation_regressions()
 {
-    TEST(Synth::num_mod_targets == 28);
-    if (Synth::num_mod_targets != 28) {
+    TEST(Synth::num_mod_targets == 29);
+    if (Synth::num_mod_targets != 29) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
@@ -16988,8 +16990,8 @@ static void m2_band_donation_regressions()
 // re-projection); the count change survives.
 static void m2_band_batch_boundary_regressions()
 {
-    TEST(Synth::num_mod_targets == 28);
-    if (Synth::num_mod_targets != 28) {
+    TEST(Synth::num_mod_targets == 29);
+    if (Synth::num_mod_targets != 29) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
@@ -17055,8 +17057,8 @@ static void m2_band_batch_boundary_regressions()
 // band, all [+] at four, both editable in between.
 static void m2_band_button_gray_regressions()
 {
-    TEST(Synth::num_mod_targets == 28);
-    if (Synth::num_mod_targets != 28) {
+    TEST(Synth::num_mod_targets == 29);
+    if (Synth::num_mod_targets != 29) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
@@ -17105,8 +17107,8 @@ static void m2_band_button_gray_regressions()
 // carry base and wiring per band.
 static void m2_per_band_modulation_regressions()
 {
-    TEST(Synth::num_mod_targets == 28);
-    if (Synth::num_mod_targets != 28) {
+    TEST(Synth::num_mod_targets == 29);
+    if (Synth::num_mod_targets != 29) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
@@ -19356,8 +19358,9 @@ static void m2_runtime_source_pins_regressions()
     if (runtime) {
         TEST(strstr(runtime, "band_count;") != nullptr);
         TEST(strstr(runtime, "bands[4]") != nullptr);
-        TEST(strstr(runtime, "static_assert(num_osc_roles == 84)") != nullptr);
+        TEST(strstr(runtime, "static_assert(num_osc_roles == 87)") != nullptr);
         TEST(strstr(runtime, "{ mod_fir_band0_offset, osc_fir_band0_offset_dest }") != nullptr);
+        TEST(strstr(runtime, "{ mod_string_dispersion, osc_string_dispersion_dest }") != nullptr);
         TEST(strstr(runtime, "osc_fir_band3_slope_dest, osc_fir_band3_slope_env, osc_fir_band3_slope_lfo") != nullptr);
         TEST(strstr(runtime, "fir_band_count") != nullptr);
         // Staging hygiene: the full entry is zero-initialized, inactive bands
@@ -19669,8 +19672,8 @@ static void m2_document_json_regressions()
 // on top of existing bank content without disturbing it.
 static void m2_bank_json_round_trip_regressions()
 {
-    TEST(Synth::num_mod_targets == 28);
-    if (Synth::num_mod_targets != 28) {
+    TEST(Synth::num_mod_targets == 29);
+    if (Synth::num_mod_targets != 29) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
@@ -19782,8 +19785,8 @@ static void m2_bank_json_round_trip_regressions()
 // splits carry the per-band generator bindings to the cloned zone.
 static void m2_library_zone_regressions()
 {
-    TEST(Synth::num_mod_targets == 28);
-    if (Synth::num_mod_targets != 28) {
+    TEST(Synth::num_mod_targets == 29);
+    if (Synth::num_mod_targets != 29) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
@@ -20096,8 +20099,8 @@ static void m2_fix2_wave_regressions()
                 return Sculptor::osc_node_slot_hidden(graph, osc_node, slot);
             };
             // Bandpass: band 1's whole block shows, header and buttons included.
-            TEST(! hidden(140) && ! hidden(141) && ! hidden(142));
-            TEST(! hidden(143) && ! hidden(156) && ! hidden(169) && ! hidden(182));
+            TEST(! hidden(150) && ! hidden(151) && ! hidden(152));
+            TEST(! hidden(153) && ! hidden(166) && ! hidden(179) && ! hidden(192));
             // The single-edge filter types keep the legacy cutoff and FIR
             // Slope rows visible while the band UI hides wholesale.
             for (uint32_t type = 0; type < Synth::num_filter_types; type++) {
@@ -20107,8 +20110,8 @@ static void m2_fix2_wave_regressions()
                 Sculptor::PropertyValue select_type = {};
                 select_type.list_index              = static_cast<uint8_t>(type);
                 graph.set_slot_value(osc_node, filter_slot, select_type);
-                TEST(! hidden(156) && ! hidden(182));
-                TEST(hidden(140) && hidden(141) && hidden(142) && hidden(143) && hidden(169));
+                TEST(! hidden(166) && ! hidden(192));
+                TEST(hidden(150) && hidden(151) && hidden(152) && hidden(153) && hidden(179));
             }
         }
     }
@@ -20525,7 +20528,7 @@ static void check_fir_spread_helpers()
                         "\"fir_band1_spread\", \"fir_band1_gain\", \"fir_band1_slope\", \"fir_band2_offset\", "
                         "\"fir_band2_spread\", \"fir_band2_gain\", \"fir_band2_slope\", \"fir_band3_offset\", "
                         "\"fir_band3_spread\", \"fir_band3_gain\", \"fir_band3_slope\", \"string_damping\", "
-                        "\"string_release_damping\"]") != nullptr);
+                        "\"string_release_damping\", \"string_dispersion\"]") != nullptr);
             TEST(strstr(schema_src, "lowpass_cutoff") == nullptr);
             TEST(strstr(schema_src, "highpass_cutoff") == nullptr);
             // Both generator-layout target enums admit the appended slope
@@ -21783,8 +21786,8 @@ static void osc_slot_disable_stamped_rules_regressions()
     const uint32_t tone1       = Sculptor::osc_target_row(Synth::mod_pad_tilt1);
     const uint32_t volume      = Sculptor::osc_target_row(Synth::mod_volume);
     const uint32_t wave_a_slot = 1;  // waveform a, layout contract
-    const uint32_t wave_b_slot = 32; // waveform b, layout contract
-    const uint32_t mode_slot   = 59; // mix mode, layout contract
+    const uint32_t wave_b_slot = 42; // waveform b, layout contract
+    const uint32_t mode_slot   = 69; // mix mode, layout contract
 
     Sculptor::PropertyValue wave = {};
     // Sine wave a (list 0; the wave a list starts at sine), waveform b
@@ -22402,30 +22405,31 @@ static void check_string_wave_validator()
     TEST(! Synth::validate_instrument_bank(&bank));
     string_make_bank(bank, Synth::WaveType::sine_wave, Synth::WaveType::string_wave);
     TEST(! Synth::validate_instrument_bank(&bank));
-    // Pick position must lie in [0,1]; the bound edges are accepted.
-    static const float pick_ok[] = { 0.0f, 0.5f, 1.0f };
-    for (const float pick : pick_ok) {
+    // Pluck brightness must lie in [0,1]; the bound edges are accepted.
+    static const float brightness_ok[] = { 0.0f, 0.5f, 1.0f };
+    for (const float brightness : brightness_ok) {
         string_make_bank(bank, Synth::WaveType::string_wave, Synth::WaveType::no_wave);
-        bank.instruments.entries[0].layers[0].string_pick = pick;
+        bank.instruments.entries[0].layers[0].string_brightness = brightness;
         TEST(Synth::validate_instrument_bank(&bank));
     }
-    static const float pick_bad[] = { -0.1f, 1.1f, NAN };
-    for (const float pick : pick_bad) {
+    static const float brightness_bad[] = { -0.1f, 1.1f, NAN };
+    for (const float brightness : brightness_bad) {
         string_make_bank(bank, Synth::WaveType::string_wave, Synth::WaveType::no_wave);
-        bank.instruments.entries[0].layers[0].string_pick = pick;
+        bank.instruments.entries[0].layers[0].string_brightness = brightness;
         TEST(! Synth::validate_instrument_bank(&bank));
     }
 }
 
-// Pick position, damping and release damping JSON bounds and defaults.  Pick is
-// a layer scalar in [0,1]; damping and release damping are 0..1 targets.
+// Legacy pick key, damping and release damping JSON bounds and defaults.  The removed pick key is fully inert:
+// any numeric value, in range or not, decodes and is ignored; damping and release damping are 0..1 targets.
 static void check_string_param_json_bounds()
 {
     const std::unique_ptr<ClipboardDecode> storage = std::make_unique<ClipboardDecode>();
     ClipboardDecode&                       decoded = *storage;
     char                                   doc[256];
 
-    static const char* const accepted[] = { "0", "0.5", "1" };
+    // The removed pick key is accepted whatever its value: in range, out of range or negative.
+    static const char* const accepted[] = { "0", "0.5", "1", "-0.1", "1.1", "2.0" };
     for (const char* value : accepted) {
         snprintf(doc,
                  sizeof(doc),
@@ -22433,14 +22437,28 @@ static void check_string_param_json_bounds()
                  value);
         TEST(string_clip_decode(doc, &decoded));
     }
-    // The 0.5 control decodes, so the refusals below come from the bound.
-    static const char* const refused[] = { "-0.1", "1.1", "NaN" };
-    for (const char* value : refused) {
-        snprintf(doc,
-                 sizeof(doc),
-                 "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\",\"string_pick\":%s}]}",
-                 value);
-        TEST(! string_clip_decode(doc, &decoded));
+
+    // A legacy bank that still carries string_pick loads to exactly the same instrument as the document without
+    // the key (the value is ignored, in range or not), so it renders identically.
+    {
+        const std::unique_ptr<ClipboardDecode> with_pick    = std::make_unique<ClipboardDecode>();
+        const std::unique_ptr<ClipboardDecode> without_pick = std::make_unique<ClipboardDecode>();
+        memset(without_pick.get(), 0, sizeof(ClipboardDecode));
+        TEST(string_clip_decode("{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\","
+                                "\"string_brightness\":0.5,\"string_dispersion\":0.25}]}",
+                                without_pick.get()));
+        static const char* const pick_values[] = { "0.75", "2.0", "-0.1" };
+        for (const char* value : pick_values) {
+            memset(with_pick.get(), 0, sizeof(ClipboardDecode));
+            snprintf(doc,
+                     sizeof(doc),
+                     "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\",\"string_pick\":%s,"
+                     "\"string_brightness\":0.5,\"string_dispersion\":0.25}]}",
+                     value);
+            TEST(string_clip_decode(doc, with_pick.get()));
+            TEST(memcmp(&with_pick->instr, &without_pick->instr, sizeof(with_pick->instr)) == 0);
+            TEST(with_pick->instr.layers[0].string_brightness == 0.5f);
+        }
     }
 
     // Damping and release damping targets: bases decode in range, refuse out of range.
@@ -22463,7 +22481,7 @@ static void check_string_param_json_bounds()
     }
 
     // Absent keys default to zero: a pad/string layer with no string keys
-    // decodes with zeroed pick, damping and release damping bindings.
+    // decodes with zeroed damping and release damping bindings.
     {
         static const char absent_doc[] = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\"}]}";
         TEST(string_clip_decode(absent_doc, &decoded));
@@ -22472,13 +22490,16 @@ static void check_string_param_json_bounds()
             TEST(bindings[26].base_value == 0.0f && bindings[26].num_inputs == 0);
             TEST(bindings[27].base_value == 0.0f && bindings[27].num_inputs == 0);
         }
-        TEST(Synth::num_mod_targets == 28);
+        TEST(Synth::num_mod_targets == 29);
     }
 }
 
-// Gating: string A (list index 5) grays no mode row and enables the pick row
-// and the duty a / pad tone a rows (relabelled Damping / Release damping);
-// every other wave A grays the pick row; the B list offers no string.
+// Gating: string A (list index 5) grays no mode row and shows the four string rows (String
+// Dispersion and Sustain Damping on the shared duty a / pad tone a rows, Release Damping with its
+// block, and Pluck Brightness); the duty / pad tone targets have no separate row under string. Every
+// other wave A grays the whole Release Damping / Pluck Brightness range 28..41 (and the shared rows per
+// their sawtooth / pulse / pad use, with the duty row relabelled Pad Wander under pad); the B list
+// offers no string.
 static void check_string_wave_gating()
 {
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
@@ -22500,16 +22521,16 @@ static void check_string_wave_gating()
         const Sculptor::Node& node = graph.node(node_index);
         TEST(node.slots.entries[1].num_list_options == 6);
         TEST(strcmp(node.slots.entries[1].list_options[5], "string") == 0);
-        TEST(node.slots.entries[32].num_list_options == 6);
-        for (uint32_t i = 0; i < node.slots.entries[32].num_list_options; ++i) {
-            TEST(strcmp(node.slots.entries[32].list_options[i], "string") != 0);
+        TEST(node.slots.entries[42].num_list_options == 6);
+        for (uint32_t i = 0; i < node.slots.entries[42].num_list_options; ++i) {
+            TEST(strcmp(node.slots.entries[42].list_options[i], "string") != 0);
         }
     }
 
-    constexpr uint32_t wave_a_slot = 1;
-    constexpr uint32_t wave_b_slot = 32;
-    constexpr uint32_t mode_slot   = 59;
-    constexpr uint32_t pick_slot   = 28;
+    constexpr uint32_t wave_a_slot     = 1;
+    constexpr uint32_t wave_b_slot     = 42;
+    constexpr uint32_t mode_slot       = 69;
+    constexpr uint32_t brightness_slot = Sculptor::osc_brightness_slot;
 
     Sculptor::PropertyValue value = {};
     value.list_index              = 1; // wave B sine so the mode rows are live
@@ -22518,7 +22539,7 @@ static void check_string_wave_gating()
     graph.set_slot_value(node_index, mode_slot, value);
 
     bool           mode_rows_saw[5] = {};
-    const uint32_t mode_rows[5]     = { mode_slot, 72, 85, 59, 32 };
+    const uint32_t mode_rows[5]     = { mode_slot, 82, 95, 69, 42 };
     value.list_index                = 1; // sawtooth: reference for the mode rows
     graph.set_slot_value(node_index, wave_a_slot, value);
     for (uint32_t r = 0; r < 5; ++r) {
@@ -22529,13 +22550,17 @@ static void check_string_wave_gating()
         value.list_index = static_cast<uint8_t>(list);
         graph.set_slot_value(node_index, wave_a_slot, value);
         const bool is_string = list == 5;
-        TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), pick_slot) == ! is_string);
-        // Rows 2..14 (Duty A, Damping under string) are gated for sine and noise;
-        // rows 15..27 (Pad Tone A, Release damping under string) for all but
+        TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), brightness_slot) == ! is_string);
+        // Rows 2..14 (Duty A, String Dispersion under string) are gated for sine and noise;
+        // rows 15..27 (Pad Tone A, Sustain Damping under string) for all but
         // pad and string.
         for (uint32_t row = 2; row <= 27; ++row) {
             const bool gated = row <= 14 ? (list == 0 || list == 3) : (list != 4 && list != 5);
             TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), row) == gated);
+        }
+        // Release Damping (28 with its block) and Pluck Brightness (41) exist only under string.
+        for (uint32_t row = Sculptor::osc_string_extras_first_slot; row <= Sculptor::osc_brightness_slot; ++row) {
+            TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), row) == ! is_string);
         }
         if (is_string) {
             // String A grays no mode row: the mode rows follow the saw reference.
@@ -22548,8 +22573,8 @@ static void check_string_wave_gating()
 }
 
 // Row reuse: under the string wave the Duty A / Pad Tone A rows (2 and 15) are
-// relabelled Damping / Release Damping, carry targets 26 / 27, and round-trip
-// through compile; other waves keep Duty A / Pad Tone A and drop the string
+// relabelled String Dispersion / Sustain Damping (targets 28 / 26); Release Damping
+// (target 27) owns row 28; all round-trip through compile; other waves keep Duty A / Pad Tone A and drop the string
 // bindings from the graph.
 static void check_string_row_reuse()
 {
@@ -22563,18 +22588,24 @@ static void check_string_row_reuse()
 
     instrument.layers[0].osc_type[0]                                           = Synth::WaveType::string_wave;
     instrument.layers[0].targets[Synth::mod_string_damping].base_value         = 0.3f;
+    instrument.layers[0].targets[Synth::mod_string_dispersion].base_value      = 0.45f;
     instrument.layers[0].targets[Synth::mod_string_release_damping].base_value = 0.6f;
     TEST(Sculptor::project_instrument_to_graph(instrument, bank.bank, &graph, &mapping));
     const Sculptor::Node& node = graph.node(mapping.osc_nodes[0]);
     TEST(node.slots.num_allocated ==
          Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride * instrument.layers[0].fir_band_count);
-    TEST(strcmp(node.slots.entries[2].name, "Damping") == 0 && approx(node.slots.entries[2].value.real, 0.3f, 1.0e-6f));
-    TEST(strcmp(node.slots.entries[15].name, "Release Damping") == 0 &&
-         approx(node.slots.entries[15].value.real, 0.6f, 1.0e-6f));
+    TEST(strcmp(node.slots.entries[2].name, "String Dispersion") == 0 &&
+         approx(node.slots.entries[2].value.real, 0.45f, 1.0e-6f));
+    TEST(strcmp(node.slots.entries[15].name, "Sustain Damping") == 0 &&
+         approx(node.slots.entries[15].value.real, 0.3f, 1.0e-6f));
+    TEST(strcmp(node.slots.entries[28].name, "Release Damping") == 0 &&
+         approx(node.slots.entries[28].value.real, 0.6f, 1.0e-6f));
+    TEST(strcmp(node.slots.entries[41].name, "Pluck Brightness") == 0);
     Synth::Instrument compiled = {};
     TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
     TEST(approx(compiled.layers[0].targets[Synth::mod_string_damping].base_value, 0.3f, 1.0e-6f));
     TEST(approx(compiled.layers[0].targets[Synth::mod_string_release_damping].base_value, 0.6f, 1.0e-6f));
+    TEST(approx(compiled.layers[0].targets[Synth::mod_string_dispersion].base_value, 0.45f, 1.0e-6f));
     TEST(compiled.layers[0].targets[Synth::mod_duty0].base_value == 0.0f);
 
     instrument.layers[0].osc_type[0]                          = Synth::WaveType::sawtooth_wave;
@@ -22593,11 +22624,283 @@ static void check_string_row_reuse()
     change.node_idx              = mapping.osc_nodes[0];
     change.slot_idx              = 1;
     TEST(Sculptor::osc_change_restructures(mapping, change));
+    change.slot_idx = 42; // wave b renames the duty b row (Pad Wander under pad)
+    TEST(Sculptor::osc_change_restructures(mapping, change));
+    change.slot_idx = 69; // mix mode
+    TEST(! Sculptor::osc_change_restructures(mapping, change));
 }
 
-// Source pins for the three runtime wiring seams (realtime_synth.cpp is not
-// linked into this unit): pick note-on copy, damping and release damping
-// destination reads, and the host specialization of rt_step_samples.
+// Pad Wander: the duty rows relabel under the pad wave (A and B) with a wander-depth tooltip;
+// sawtooth and pulse keep Duty A / Duty B; the string wave carries String Dispersion on the
+// duty a row.
+static void check_pad_wander_labels()
+{
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank         = *bank_storage;
+    Synth::Instrument                                  instrument   = {};
+    build_binding_fixture(&bank, &instrument);
+    const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph         = *graph_storage;
+    Sculptor::OscGraphMapping              mapping       = {};
+
+    const uint32_t duty_a = Sculptor::osc_target_row(Synth::mod_duty0);
+    const uint32_t duty_b = Sculptor::osc_target_row(Synth::mod_duty1);
+
+    const Synth::WaveType waves[4] = { Synth::WaveType::sawtooth_wave,
+                                       Synth::WaveType::pulse_wave,
+                                       Synth::WaveType::pad_wave,
+                                       Synth::WaveType::string_wave };
+    for (const Synth::WaveType wave_a : waves) {
+        for (const Synth::WaveType wave_b : waves) {
+            if (wave_b == Synth::WaveType::string_wave) {
+                continue; // the B list offers no string
+            }
+            instrument.layers[0].osc_type[0] = wave_a;
+            instrument.layers[0].osc_type[1] = wave_b;
+            TEST(Sculptor::project_instrument_to_graph(instrument, bank.bank, &graph, &mapping));
+            const Sculptor::Node& node = graph.node(mapping.osc_nodes[0]);
+
+            const Sculptor::Slot& slot_a = node.slots.entries[duty_a];
+            if (wave_a == Synth::WaveType::pad_wave) {
+                TEST(strcmp(slot_a.name, "Pad Wander") == 0);
+                TEST(slot_a.tooltip && strstr(slot_a.tooltip, "wander depth") != nullptr);
+            }
+            else if (wave_a == Synth::WaveType::string_wave) {
+                TEST(strcmp(slot_a.name, "String Dispersion") == 0);
+            }
+            else {
+                TEST(strcmp(slot_a.name, "Duty A") == 0);
+                TEST(slot_a.tooltip && strstr(slot_a.tooltip, "wander depth") == nullptr);
+            }
+
+            const Sculptor::Slot& slot_b = node.slots.entries[duty_b];
+            if (wave_b == Synth::WaveType::pad_wave) {
+                TEST(strcmp(slot_b.name, "Pad Wander") == 0);
+                TEST(slot_b.tooltip && strstr(slot_b.tooltip, "wander depth") != nullptr);
+            }
+            else {
+                TEST(strcmp(slot_b.name, "Duty B") == 0);
+                TEST(slot_b.tooltip && strstr(slot_b.tooltip, "wander depth") == nullptr);
+            }
+        }
+    }
+}
+
+// Release Damping (28 with its block) and Pluck Brightness (41) have no row unless wave a is
+// the string wave: the render visibility callback hides them, not only grays them.
+static void check_string_extras_hidden()
+{
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank         = *bank_storage;
+    Synth::Instrument                                  instrument   = {};
+    build_binding_fixture(&bank, &instrument);
+    const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph         = *graph_storage;
+    Sculptor::OscGraphMapping              mapping       = {};
+
+    const Synth::WaveType waves[6] = { Synth::WaveType::sine_wave,  Synth::WaveType::sawtooth_wave,
+                                       Synth::WaveType::pulse_wave, Synth::WaveType::noise_wave,
+                                       Synth::WaveType::pad_wave,   Synth::WaveType::string_wave };
+    for (const Synth::WaveType wave : waves) {
+        instrument.layers[0].osc_type[0] = wave;
+        TEST(Sculptor::project_instrument_to_graph(instrument, bank.bank, &graph, &mapping));
+        const uint32_t node_idx  = mapping.osc_nodes[0];
+        const bool     is_string = wave == Synth::WaveType::string_wave;
+        for (uint32_t slot = Sculptor::osc_string_extras_first_slot; slot <= Sculptor::osc_brightness_slot; ++slot) {
+            const bool target_row = slot == Sculptor::osc_string_extras_first_slot;
+            const bool plain_row  = slot == Sculptor::osc_brightness_slot;
+            if (! is_string) {
+                TEST(Sculptor::osc_node_slot_hidden(graph, node_idx, slot));
+            }
+            else if (target_row || plain_row) {
+                TEST(! Sculptor::osc_node_slot_hidden(graph, node_idx, slot));
+            }
+        }
+        // The rows before the extras and Waveform B after them stay shown (the shared duty a / pad tone a
+        // rows are never hidden; Waveform B is not a string row).
+        TEST(! Sculptor::osc_node_slot_hidden(graph, node_idx, 2));
+        TEST(! Sculptor::osc_node_slot_hidden(graph, node_idx, 15));
+        TEST(! Sculptor::osc_node_slot_hidden(graph, node_idx, 42));
+    }
+}
+
+// Decoder identity pin (decode_osc_input driven directly: no end-to-end path
+// observes the decoded ModTarget). A string-wave layer decodes its duty a /
+// pad tone a rows and blocks to String Dispersion / Sustain Damping; a
+// non-string layer decodes the same slots to Duty A / Pad Tone A. The
+// string layer carries wired dispersion routing.
+static void check_string_decoder_target_identity()
+{
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank         = *bank_storage;
+    Synth::Instrument                                  instrument   = {};
+    build_binding_fixture(&bank, &instrument);
+    const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph         = *graph_storage;
+    Sculptor::OscGraphMapping              mapping       = {};
+
+    instrument.layers[0].osc_type[0]                                            = Synth::WaveType::string_wave;
+    instrument.layers[0].targets[Synth::mod_string_dispersion].envelope_desc_id = 1;
+    instrument.layers[1].osc_type[0]                                            = Synth::WaveType::sawtooth_wave;
+    bank.bank.instruments.entries[0]                                            = instrument;
+    TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping, 0, 0));
+
+    const uint32_t string_node = mapping.osc_nodes[0];
+    const uint32_t plain_node  = mapping.osc_nodes[1];
+    TEST(
+        find_osc_graph_connection(graph, { string_node, Sculptor::osc_target_env_dot(Synth::mod_string_dispersion) }) !=
+        Sculptor::pool_no_slot);
+
+    const uint32_t shared_targets[2] = { Synth::mod_duty0, Synth::mod_pad_tilt0 };
+    const uint32_t string_targets[2] = { Synth::mod_string_dispersion, Synth::mod_string_damping };
+    for (uint32_t i = 0; i < 2; ++i) {
+        const uint32_t row   = Sculptor::osc_target_row(shared_targets[i]);
+        const uint32_t block = Sculptor::osc_target_env_dot(shared_targets[i]);
+        for (uint32_t layer = 0; layer < 2; ++layer) {
+            const uint32_t node     = layer == 0 ? string_node : plain_node;
+            const uint32_t expected = layer == 0 ? string_targets[i] : shared_targets[i];
+            bool           base_row = false;
+            uint32_t       target   = 0xFFFFu;
+            uint32_t       family   = 0xFFFFu;
+            uint32_t       dot      = 0xFFFFu;
+            // Base value row.
+            TEST(Sculptor::decode_osc_input(mapping, graph, { node, row }, &base_row, &target, &family, &dot));
+            TEST(base_row && target == expected && dot == Sculptor::pool_no_slot);
+            // Block envelope dot.
+            base_row = true;
+            TEST(Sculptor::decode_osc_input(mapping, graph, { node, block }, &base_row, &target, &family, &dot));
+            TEST(! base_row && target == expected && dot == block);
+        }
+    }
+}
+
+// Deleting an oscillator that has incoming modulation wires queues its
+// wire-deletion events against the already-freed node. The deletion decoder
+// must not read the freed node (it asserted/crashed) and decodes the freed
+// endpoint with the default Duty A semantics; the drained batch applies.
+static void check_osc_node_delete_with_wires_decodes()
+{
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank         = *bank_storage;
+    Synth::Instrument                                  instrument   = {};
+    build_binding_fixture(&bank, &instrument);
+    const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph         = *graph_storage;
+    Sculptor::OscGraphMapping              mapping       = {};
+
+    instrument.layers[0].osc_type[0]                                            = Synth::WaveType::string_wave;
+    instrument.layers[0].targets[Synth::mod_string_dispersion].envelope_desc_id = 1;
+    bank.bank.instruments.entries[0]                                            = instrument;
+    TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping, 0, 0));
+
+    Sculptor::GraphChange changes[Sculptor::max_pending_changes];
+    (void)graph.take_changes(changes, Sculptor::max_pending_changes); // drop the projection traffic
+
+    const uint32_t deleted = mapping.osc_nodes[0];
+    graph.delete_node(deleted);
+    TEST(! graph.node_occupied(deleted));
+    const uint32_t count = graph.take_changes(changes, Sculptor::max_pending_changes);
+
+    uint32_t wire_drops = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (changes[i].kind == Sculptor::ChangeKind::connection_deleted &&
+            changes[i].connection_input.node_idx == deleted) {
+            ++wire_drops;
+            bool     base_row = true;
+            uint32_t target   = 0xFFFFu;
+            uint32_t family   = 0xFFFFu;
+            uint32_t dot      = 0xFFFFu;
+            if (changes[i].connection_input.slot_idx == Sculptor::osc_target_env_dot(Synth::mod_duty0)) {
+                TEST(Sculptor::decode_osc_input(mapping,
+                                                graph,
+                                                changes[i].connection_input,
+                                                &base_row,
+                                                &target,
+                                                &family,
+                                                &dot));
+                TEST(! base_row && target == Synth::mod_duty0); // default semantics, not dispersion
+            }
+        }
+        TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[i], 0, 0));
+    }
+    TEST(wire_drops >= 2); // the dispersion envelope wire and the layer's other incoming wires
+}
+
+// Live Waveform A switch (any wave to any wave, shared and string-only rows routed, pad tone
+// negative): the committed bank must still save and reload.  Switching to string used to compile
+// the Pad Tone row's negative value into Sustain Damping (0..1 in the bank), so the auto-save's
+// reload check refused the bank (save returns EINVAL, which the editor reports as
+// "Synth: cannot write %s: %s" with strerror(EINVAL)).
+static void check_wave_switch_bank_saves()
+{
+    const char* const path = "synth_wave_switch_bank.tmp";
+
+    const uint32_t wave_a_slot = 1; // waveform a, layout contract
+
+    static const Synth::WaveType  waves[]   = { Synth::WaveType::sine_wave,  Synth::WaveType::sawtooth_wave,
+                                                Synth::WaveType::pulse_wave, Synth::WaveType::noise_wave,
+                                                Synth::WaveType::pad_wave,   Synth::WaveType::string_wave };
+    static const Synth::WaveType  waves_b[] = { Synth::WaveType::no_wave,
+                                                Synth::WaveType::sawtooth_wave,
+                                                Synth::WaveType::pad_wave };
+    static const Synth::ModTarget routed[]  = { Synth::mod_duty0,
+                                                Synth::mod_pad_tilt0,
+                                                Synth::mod_string_damping,
+                                                Synth::mod_string_release_damping,
+                                                Synth::mod_string_dispersion };
+    for (const Synth::WaveType start : waves) {
+        for (const Synth::WaveType end : waves) {
+            for (const Synth::WaveType wave_b : waves_b) {
+                for (const Synth::ModTarget target : routed) {
+                    for (const float base : { 0.4f, target == Synth::mod_pad_tilt0 ? -0.5f : 0.9f }) {
+                        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+                            std::make_unique<Synth::InstrumentEditorBank>();
+                        Synth::InstrumentEditorBank& bank       = *bank_storage;
+                        Synth::Instrument            instrument = {};
+                        build_binding_fixture(&bank, &instrument);
+
+                        instrument.layers[0].osc_type[0] = start;
+                        instrument.layers[0].osc_type[1] = wave_b;
+                        Synth::TargetBinding& binding    = instrument.layers[0].targets[target];
+                        binding.base_value               = base;
+                        binding.envelope_desc_id         = 1;
+                        binding.lfo_desc_id              = 1;
+                        binding.lfo_op                   = Synth::SourceOp::add;
+                        binding.lfo_depth                = 0.5f;
+                        binding.num_inputs               = 1;
+                        binding.inputs[0].source         = Synth::ModSource::velocity;
+                        binding.inputs[0].op             = Synth::SourceOp::add;
+                        binding.inputs[0].scale          = 0.5f;
+                        bank.bank.instruments.entries[0] = instrument;
+                        TEST(Synth::save_editor_bank_file(path, &bank) == 0);
+
+                        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+                        Sculptor::Graph&                       graph         = *graph_storage;
+                        Sculptor::OscGraphMapping              mapping       = {};
+                        TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping, 0, 0));
+                        Sculptor::GraphChange drained[Sculptor::max_pending_changes] = {};
+                        (void)graph.take_changes(drained, Sculptor::max_pending_changes);
+
+                        Sculptor::PropertyValue wave = {};
+                        wave.list_index              = static_cast<uint8_t>(static_cast<uint32_t>(end) - 1u);
+                        TEST(apply_m2_slot_edit(&bank, &graph, &mapping, mapping.osc_nodes[0], wave_a_slot, wave));
+                        TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
+                        TEST(Synth::save_editor_bank_file(path, &bank) == 0);
+
+                        const std::unique_ptr<Synth::InstrumentEditorBank> loaded_storage =
+                            std::make_unique<Synth::InstrumentEditorBank>();
+                        TEST(Synth::load_editor_bank_file(path, loaded_storage.get()) == Synth::BankFileStatus::ok);
+                        remove(path);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Source pins for the runtime wiring seams (realtime_synth.cpp is not linked
+// into this unit): damping, release damping and dispersion destination reads,
+// the release damping curve write, and the host specialization of rt_step_samples.
 static void check_string_runtime_source_pins()
 {
     const char* const runtime = load_source_file("synth/realtime_synth.cpp");
@@ -22606,7 +22909,7 @@ static void check_string_runtime_source_pins()
         return;
     }
     const char* const end = runtime + strlen(runtime);
-    TEST(find_in_range(runtime, end, "osc.string_pick = layer.string_pick;") != nullptr);
+    TEST(find_in_range(runtime, end, "string_pick") == nullptr);
     TEST(find_in_range(
              runtime,
              end,
@@ -22618,10 +22921,21 @@ static void check_string_runtime_source_pins()
             end,
             "osc.string_release_damping = unit_range_clamp(parameters[osc_param(osc_idx, osc_string_release_damping_dest)].value);") !=
         nullptr);
-    TEST(find_in_range(runtime, end, "param.string_pick = oscillator.string_pick;") != nullptr);
+    TEST(
+        find_in_range(
+            runtime,
+            end,
+            "osc.string_dispersion = unit_range_clamp(parameters[osc_param(osc_idx, osc_string_dispersion_dest)].value);") !=
+        nullptr);
+    TEST(find_in_range(runtime, end, "string_dispersion_sections") == nullptr);
     TEST(find_in_range(runtime, end, "param.string_damping = oscillator.string_damping;") != nullptr);
-    TEST(find_in_range(runtime, end, "param.string_release_damping = oscillator.string_release_damping;") != nullptr);
-    TEST(find_in_range(runtime, end, "static_assert(num_osc_roles == 84)") != nullptr);
+    TEST(
+        find_in_range(
+            runtime,
+            end,
+            "param.string_release_damping = Synth::string_release_damping_curve(oscillator.string_release_damping);") !=
+        nullptr);
+    TEST(find_in_range(runtime, end, "static_assert(num_osc_roles == 87)") != nullptr);
     TEST(find_in_range(runtime, end, "{ 0, 0, 4 }, { 1, 4, 4 }") != nullptr);
     TEST(find_in_range(runtime, end, "Synth::rt_step_samples, 0, num_fir_taps") != nullptr);
     const char* const config = load_source_file("synth/synth_config.h");
@@ -22667,14 +22981,13 @@ static void check_string_shader_source_pins()
     // OscillatorParams field order: the string fields follow pad_tilt.
     const char* const tilt = find_in_range(shader, end, "float pad_tilt[2];");
     const char* const offs = tilt ? find_in_range(tilt, end, "uint string_state_offs;") : nullptr;
-    const char* const pick = offs ? find_in_range(offs, end, "float string_pick;") : nullptr;
-    const char* const damp = pick ? find_in_range(pick, end, "float string_damping;") : nullptr;
+
+    const char* const damp = offs ? find_in_range(offs, end, "float string_damping;") : nullptr;
     const char* const rel  = damp ? find_in_range(damp, end, "float string_release_damping;") : nullptr;
     TEST(rel != nullptr);
-    TEST(find_in_range(shader, end, "const uint  src         = (i + delay_whole - pick_offset) % delay_whole;") !=
-         nullptr);
-    TEST(find_in_range(shader, end, "data[ring_offs + i]     = noise_here - noise_prior;") != nullptr);
-    TEST(find_in_range(shader, end, "sqrt(noise_energy / comb_energy)") != nullptr);
+    TEST(find_in_range(shader, end, "pick") == nullptr);
+    TEST(find_in_range(shader, end, "comb_gain") == nullptr);
+    TEST(find_in_range(shader, end, "string_dispersion_sections") == nullptr);
     TEST(find_in_range(shader, end, "Truncated (non-circular)") == nullptr);
 }
 
@@ -22909,9 +23222,9 @@ static void check_string_dispersion_codec()
     // Absent keys: defaults 0 and 4.
     static const char absent_doc[] = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\"}]}";
     TEST(string_clip_decode(absent_doc, &decoded));
-    TEST(decoded.instr.layers[0].string_dispersion == 0.0f);
+    TEST(decoded.instr.layers[0].targets[Synth::mod_string_dispersion].base_value == 0.0f);
     TEST(decoded.instr.layers[0].string_dispersion_sections == 4.0f);
-    TEST(Synth::Oscillator{}.string_dispersion == 0.0f);
+    TEST(Synth::Oscillator{}.targets[Synth::mod_string_dispersion].base_value == 0.0f);
     TEST(Synth::Oscillator{}.string_dispersion_sections == 4.0f);
 
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
@@ -22922,7 +23235,7 @@ static void check_string_dispersion_codec()
         "{\"instrument_editor_bank\":{\"instruments\":[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\","
         "\"routing\":{}}]}],\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}";
     TEST(Synth::decode_editor_bank_json(bank_absent, static_cast<uint32_t>(strlen(bank_absent)), &decoded_bank));
-    TEST(decoded_bank.bank.instruments.entries[0].layers[0].string_dispersion == 0.0f);
+    TEST(decoded_bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_string_dispersion].base_value == 0.0f);
     TEST(decoded_bank.bank.instruments.entries[0].layers[0].string_dispersion_sections == 4.0f);
 
     // Accepted values, through both decoders: dispersion bounds 0 and 1, sections bounds 1 and 6.
@@ -22932,14 +23245,15 @@ static void check_string_dispersion_codec()
     static const float       sect_ok_value[] = { 1.0f, 4.0f, 6.0f };
     for (uint32_t i = 0; i < 3; ++i) {
         TEST(string_clip_decode(string_disp_clip_doc(clip_buf, "string_dispersion", disp_ok[i]), &decoded));
-        TEST(decoded.instr.layers[0].string_dispersion == disp_ok_value[i]);
+        TEST(decoded.instr.layers[0].targets[Synth::mod_string_dispersion].base_value == disp_ok_value[i]);
         TEST(decoded.instr.layers[0].string_dispersion_sections == 4.0f);
         TEST(string_clip_decode(string_disp_clip_doc(clip_buf, "string_dispersion_sections", sect_ok[i]), &decoded));
         TEST(decoded.instr.layers[0].string_dispersion_sections == sect_ok_value[i]);
-        TEST(decoded.instr.layers[0].string_dispersion == 0.0f);
+        TEST(decoded.instr.layers[0].targets[Synth::mod_string_dispersion].base_value == 0.0f);
         const char* const bd = string_disp_bank_doc(bank_buf, "string_dispersion", disp_ok[i]);
         TEST(Synth::decode_editor_bank_json(bd, static_cast<uint32_t>(strlen(bd)), &decoded_bank));
-        TEST(decoded_bank.bank.instruments.entries[0].layers[0].string_dispersion == disp_ok_value[i]);
+        TEST(decoded_bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_string_dispersion].base_value ==
+             disp_ok_value[i]);
         const char* const bs = string_disp_bank_doc(bank_buf, "string_dispersion_sections", sect_ok[i]);
         TEST(Synth::decode_editor_bank_json(bs, static_cast<uint32_t>(strlen(bs)), &decoded_bank));
         TEST(decoded_bank.bank.instruments.entries[0].layers[0].string_dispersion_sections == sect_ok_value[i]);
@@ -22972,10 +23286,11 @@ static void check_string_dispersion_codec()
 
     // Negative zero spelling decodes as zero; the editor bank decoder canonicalizes it to positive zero.
     TEST(string_clip_decode(string_disp_clip_doc(clip_buf, "string_dispersion", "-0"), &decoded));
-    TEST(decoded.instr.layers[0].string_dispersion == 0.0f);
+    TEST(decoded.instr.layers[0].targets[Synth::mod_string_dispersion].base_value == 0.0f);
     const char* const bneg = string_disp_bank_doc(bank_buf, "string_dispersion", "-0.0");
     TEST(Synth::decode_editor_bank_json(bneg, static_cast<uint32_t>(strlen(bneg)), &decoded_bank));
-    TEST(! std::signbit(decoded_bank.bank.instruments.entries[0].layers[0].string_dispersion));
+    TEST(! std::signbit(
+        decoded_bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_string_dispersion].base_value));
 
     // Validator: unconditional contract, independent of the other field.
     const std::unique_ptr<Synth::InstrumentBank> vstorage       = std::make_unique<Synth::InstrumentBank>();
@@ -22987,23 +23302,23 @@ static void check_string_dispersion_codec()
     for (const float other : other_disp) {
         for (const float value : bad_sections) {
             string_make_bank(vbank, Synth::WaveType::string_wave, Synth::WaveType::no_wave);
-            vbank.instruments.entries[0].layers[0].string_dispersion          = other;
-            vbank.instruments.entries[0].layers[0].string_dispersion_sections = value;
+            vbank.instruments.entries[0].layers[0].targets[Synth::mod_string_dispersion].base_value = other;
+            vbank.instruments.entries[0].layers[0].string_dispersion_sections                       = value;
             TEST(! Synth::validate_instrument_bank(&vbank));
         }
     }
     for (const float other : other_sect) {
         for (const float value : bad_disp) {
             string_make_bank(vbank, Synth::WaveType::string_wave, Synth::WaveType::no_wave);
-            vbank.instruments.entries[0].layers[0].string_dispersion          = value;
-            vbank.instruments.entries[0].layers[0].string_dispersion_sections = other;
+            vbank.instruments.entries[0].layers[0].targets[Synth::mod_string_dispersion].base_value = value;
+            vbank.instruments.entries[0].layers[0].string_dispersion_sections                       = other;
             TEST(! Synth::validate_instrument_bank(&vbank));
         }
     }
     for (uint32_t i = 0; i < 3; ++i) {
         string_make_bank(vbank, Synth::WaveType::string_wave, Synth::WaveType::no_wave);
-        vbank.instruments.entries[0].layers[0].string_dispersion          = disp_ok_value[i];
-        vbank.instruments.entries[0].layers[0].string_dispersion_sections = sect_ok_value[i];
+        vbank.instruments.entries[0].layers[0].targets[Synth::mod_string_dispersion].base_value = disp_ok_value[i];
+        vbank.instruments.entries[0].layers[0].string_dispersion_sections                       = sect_ok_value[i];
         TEST(Synth::validate_instrument_bank(&vbank));
     }
 
@@ -23026,20 +23341,20 @@ static void check_string_dispersion_codec()
     TEST(length > 0);
     TEST(strstr(text, "string_dispersion") == nullptr);
     TEST(string_clip_decode(text, &decoded));
-    TEST(decoded.instr.layers[0].string_dispersion == 0.0f &&
+    TEST(decoded.instr.layers[0].targets[Synth::mod_string_dispersion].base_value == 0.0f &&
          decoded.instr.layers[0].string_dispersion_sections == 4.0f);
 
-    instr.layers[0].string_dispersion = -0.0f;
-    length                            = Synth::encode_instrument_json(text, sizeof(text), &instr, &ebank.bank);
+    instr.layers[0].targets[Synth::mod_string_dispersion].base_value = -0.0f;
+    length = Synth::encode_instrument_json(text, sizeof(text), &instr, &ebank.bank);
     TEST(length > 0 && strstr(text, "string_dispersion") == nullptr);
 
-    instr.layers[0].string_dispersion = 0.375f;
-    length                            = Synth::encode_instrument_json(text, sizeof(text), &instr, &ebank.bank);
+    instr.layers[0].targets[Synth::mod_string_dispersion].base_value = 0.375f;
+    length = Synth::encode_instrument_json(text, sizeof(text), &instr, &ebank.bank);
     TEST(length > 0);
     TEST(strstr(text, "\"string_dispersion\":0.375") != nullptr);
     TEST(strstr(text, "string_dispersion_sections") == nullptr);
     TEST(string_clip_decode(text, &decoded));
-    TEST(decoded.instr.layers[0].string_dispersion == 0.375f &&
+    TEST(decoded.instr.layers[0].targets[Synth::mod_string_dispersion].base_value == 0.375f &&
          decoded.instr.layers[0].string_dispersion_sections == 4.0f);
 
     instr.layers[0].string_dispersion_sections = 2.0f;
@@ -23047,19 +23362,19 @@ static void check_string_dispersion_codec()
     TEST(length > 0);
     TEST(strstr(text, "\"string_dispersion_sections\":2") != nullptr);
     TEST(string_clip_decode(text, &decoded));
-    TEST(decoded.instr.layers[0].string_dispersion == 0.375f &&
+    TEST(decoded.instr.layers[0].targets[Synth::mod_string_dispersion].base_value == 0.375f &&
          decoded.instr.layers[0].string_dispersion_sections == 2.0f);
 
     static const float unencodable[] = { 0.0f, 7.0f, 2.5f, NAN };
     for (const float value : unencodable) {
-        instr.layers[0].string_dispersion          = 0.0f;
-        instr.layers[0].string_dispersion_sections = value;
+        instr.layers[0].targets[Synth::mod_string_dispersion].base_value = 0.0f;
+        instr.layers[0].string_dispersion_sections                       = value;
         length = Synth::encode_instrument_json(text, sizeof(text), &instr, &ebank.bank);
         TEST(length == 0 || strstr(text, "string_dispersion_sections") == nullptr);
     }
-    instr.layers[0].string_dispersion_sections = 4.0f;
-    instr.layers[0].string_dispersion          = NAN;
-    length                                     = Synth::encode_instrument_json(text, sizeof(text), &instr, &ebank.bank);
+    instr.layers[0].string_dispersion_sections                       = 4.0f;
+    instr.layers[0].targets[Synth::mod_string_dispersion].base_value = NAN;
+    length = Synth::encode_instrument_json(text, sizeof(text), &instr, &ebank.bank);
     TEST(length == 0 || strstr(text, "string_dispersion") == nullptr);
 
     // Editor bank round trip, then graph projection and compile keep both values.
@@ -23067,10 +23382,10 @@ static void check_string_dispersion_codec()
     Synth::InstrumentEditorBank&                       src         = *src_storage;
     Synth::Instrument                                  fixture     = {};
     build_binding_fixture(&src, &fixture);
-    src.bank.instruments.entries[0].layers[0].osc_type[0]                = Synth::WaveType::string_wave;
-    src.bank.instruments.entries[0].layers[0].fir_band_count             = 1;
-    src.bank.instruments.entries[0].layers[0].string_dispersion          = 0.625f;
-    src.bank.instruments.entries[0].layers[0].string_dispersion_sections = 3.0f;
+    src.bank.instruments.entries[0].layers[0].osc_type[0]    = Synth::WaveType::string_wave;
+    src.bank.instruments.entries[0].layers[0].fir_band_count = 1;
+    src.bank.instruments.entries[0].layers[0].targets[Synth::mod_string_dispersion].base_value = 0.625f;
+    src.bank.instruments.entries[0].layers[0].string_dispersion_sections                       = 3.0f;
     TEST(Synth::validate_instrument_bank(&src.bank));
     const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
         std::make_unique<FixedArray<char, Synth::library_payload_max>>();
@@ -23084,19 +23399,21 @@ static void check_string_dispersion_codec()
     memset(static_cast<void*>(&dst), 0, sizeof(dst));
     TEST(Synth::decode_editor_bank_json(payload, payload_length, &dst));
     const Synth::Oscillator& dec = dst.bank.instruments.entries[dst.bank.channel_zones[0][0].instrument].layers[0];
-    TEST(dec.string_dispersion == 0.625f && dec.string_dispersion_sections == 3.0f);
+    TEST(dec.targets[Synth::mod_string_dispersion].base_value == 0.625f && dec.string_dispersion_sections == 3.0f);
 
     // Negative zero in an editor bank encodes without the key and decodes as positive zero; defaults omit both keys.
-    src.bank.instruments.entries[0].layers[0].string_dispersion          = -0.0f;
-    src.bank.instruments.entries[0].layers[0].string_dispersion_sections = 4.0f;
+    src.bank.instruments.entries[0].layers[0].targets[Synth::mod_string_dispersion].base_value = -0.0f;
+    src.bank.instruments.entries[0].layers[0].string_dispersion_sections                       = 4.0f;
     const uint32_t plain_length = Synth::encode_editor_bank_json(&src, payload, sizeof(payload));
     TEST(plain_length > 0 && strstr(payload, "string_dispersion") == nullptr);
     memset(static_cast<void*>(&dst), 0, sizeof(dst));
     TEST(Synth::decode_editor_bank_json(payload, plain_length, &dst));
-    TEST(! std::signbit(
-        dst.bank.instruments.entries[dst.bank.channel_zones[0][0].instrument].layers[0].string_dispersion));
-    src.bank.instruments.entries[0].layers[0].string_dispersion          = 0.625f;
-    src.bank.instruments.entries[0].layers[0].string_dispersion_sections = 3.0f;
+    TEST(! std::signbit(dst.bank.instruments.entries[dst.bank.channel_zones[0][0].instrument]
+                            .layers[0]
+                            .targets[Synth::mod_string_dispersion]
+                            .base_value));
+    src.bank.instruments.entries[0].layers[0].targets[Synth::mod_string_dispersion].base_value = 0.625f;
+    src.bank.instruments.entries[0].layers[0].string_dispersion_sections                       = 3.0f;
     const uint32_t full_length = Synth::encode_editor_bank_json(&src, payload, sizeof(payload));
     memset(static_cast<void*>(&dst), 0, sizeof(dst));
     TEST(Synth::decode_editor_bank_json(payload, full_length, &dst));
@@ -23106,12 +23423,11 @@ static void check_string_dispersion_codec()
     Sculptor::OscGraphMapping              mapping       = {};
     TEST(Sculptor::project_editor_to_graph(dst, &graph, &mapping, 0, 0));
     const Sculptor::Node& node = graph.node(mapping.osc_nodes[0]);
-    TEST(node.slots.entries[Sculptor::osc_dispersion_slot].value.real == 0.625f);
-    TEST(node.slots.entries[Sculptor::osc_dispersion_sections_slot].value.integer == 3);
+    TEST(node.slots.entries[Sculptor::osc_target_row_slot[Synth::mod_string_dispersion]].value.real == 0.625f);
     Synth::Instrument compiled = {};
     TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
-    TEST(compiled.layers[0].string_dispersion == 0.625f);
-    TEST(compiled.layers[0].string_dispersion_sections == 3.0f);
+    TEST(compiled.layers[0].targets[Synth::mod_string_dispersion].base_value == 0.625f);
+    TEST(compiled.layers[0].string_dispersion_sections == 4.0f);
 }
 
 static void string_wave_m2_regressions()
@@ -23123,6 +23439,11 @@ static void string_wave_m2_regressions()
     check_string_dispersion_codec();
     check_string_wave_gating();
     check_string_row_reuse();
+    check_pad_wander_labels();
+    check_string_extras_hidden();
+    check_string_decoder_target_identity();
+    check_osc_node_delete_with_wires_decodes();
+    check_wave_switch_bank_saves();
     check_string_runtime_source_pins();
     check_string_shader_source_pins();
     check_string_trap_regressions();
@@ -23161,18 +23482,16 @@ static float string_disp_phase_delay(float coeff, float omega)
 }
 
 // Test-only mutation selector for check_string_mirror_dispersion: 0 = the real mirror, 1 = a_disp sign flip,
-// 2 = retune term omitted, 3 = corrupted TDF-II state update, 4 = wrong state word read, 5 = f0 compensation dropped,
-// 6 = section count normalisation dropped.
+// 2 = retune term omitted, 3 = corrupted TDF-II state update, 4 = retired (a shared state word is a no-op with one
+// section), 5 = f0 compensation dropped, 6 = divides by the stored section count instead of the constant 1.
 static int string_disp_mutation = 0;
+// Test-only stand-in for the stored (inert) section count, read only by mutation 6.
+static float string_test_stored_sections = 1.0f;
 
 // Dispersion strength, mirroring string_dispersion_strength in synth_oscillator.comp.glsl.
 static constexpr float string_dispersion_strength = 0.05863f;
 
-static StringScalars string_mirror_scalars(float f0,
-                                           float damping,
-                                           float release_damping,
-                                           float dispersion = 0.0f,
-                                           float sections   = 4.0f)
+static StringScalars string_mirror_scalars(float f0, float damping, float release_damping, float dispersion = 0.0f)
 {
     StringScalars s = {};
     s.silent        = ! (f0 >= 22.0f);
@@ -23180,7 +23499,6 @@ static StringScalars string_mirror_scalars(float f0,
         return s;
     }
     damping           = string_unit_clamp(damping);
-    release_damping   = string_unit_clamp(release_damping);
     float len         = string_fs / f0;
     len               = len < 3.0f ? 3.0f : len;
     s.c               = 0.10f + 0.30f * damping;
@@ -23192,23 +23510,18 @@ static StringScalars string_mirror_scalars(float f0,
     s.g               = g < 0.9999f ? g : 0.9999f;
     float disp_delay  = 0.0f;
     if (dispersion > 0.0f) {
-        const float    omega_q = string_disp_mutation == 5 ? 6.2831853f * 220.0f / string_fs : omega;
-        const float    rounded = floorf(sections + 0.5f);
-        const uint32_t requested =
-            static_cast<uint32_t>(fminf(fmaxf(rounded, 1.0f), static_cast<float>(string_max_sections)));
-        for (uint32_t count = requested; count > 0; --count) {
-            const float count_f = string_disp_mutation == 6 ? 1.0f : static_cast<float>(count);
-            const float disp_q  = string_dispersion_strength * dispersion / (count_f * (omega_q * omega_q * omega_q));
-            const float disp_r  = string_disp_ratio(disp_q);
-            const float count_a = (1.0f - disp_r) / (1.0f + disp_r);
-            const float coeff   = string_disp_mutation == 1 ? -count_a : count_a;
-            const float count_delay = static_cast<float>(count) * string_disp_phase_delay(coeff, omega);
-            if (len - tau - count_delay >= 3.0f) {
-                s.disp_a       = coeff;
-                s.num_sections = count;
-                disp_delay     = count_delay;
-                break;
-            }
+        const float omega_q = string_disp_mutation == 5 ? 6.2831853f * 220.0f / string_fs : omega;
+        // The section count is frozen at one.  Mutation 6 divides by the stored count instead.
+        const float section_count = string_disp_mutation == 6 ? string_test_stored_sections : 1.0f;
+        const float disp_q = string_dispersion_strength * dispersion / (section_count * (omega_q * omega_q * omega_q));
+        const float disp_r = string_disp_ratio(disp_q);
+        const float section_a     = (1.0f - disp_r) / (1.0f + disp_r);
+        const float coeff         = string_disp_mutation == 1 ? -section_a : section_a;
+        const float section_delay = string_disp_phase_delay(coeff, omega);
+        if (len - tau - section_delay >= 3.0f) {
+            s.disp_a       = coeff;
+            s.num_sections = 1;
+            disp_delay     = section_delay;
         }
     }
     s.disp_delay      = string_disp_mutation == 2 ? 0.0f : disp_delay;
@@ -23220,43 +23533,22 @@ static StringScalars string_mirror_scalars(float f0,
     return s;
 }
 
-// Note-on init: noise, optional circular pick comb, mean pass, RMS match, then the optional
+// Note-on init: noise, mean pass, then the optional
 // circular one-pole tone stage (brightness < 1; 1 keeps the legacy excitation bit-identical).
 static void string_mirror_init(StringMirror* m,
                                float         f0,
                                float         damping,
-                               float         pick,
                                uint32_t      seed,
                                float         brightness = 1.0f,
-                               float         dispersion = 0.0f,
-                               float         sections   = 4.0f)
+                               float         dispersion = 0.0f)
 {
-    const StringScalars s = string_mirror_scalars(f0, damping, 0.0f, dispersion, sections);
+    const StringScalars s = string_mirror_scalars(f0, damping, 0.0f, dispersion);
     if (s.silent) {
         return;
     }
-    const uint32_t n   = s.n;
-    uint32_t       off = static_cast<uint32_t>(floorf(pick * static_cast<float>(n) + 0.5f));
-    off                = (pick > 0.0f && off < 1) ? 1 : off;
-    off                = off < n - 1 ? off : n - 1;
-    float noise_energy = 0.0f;
-    if (off > 0) {
-        for (uint32_t lane = 0; lane < 256; ++lane) {
-            float lane_energy = 0.0f;
-            for (uint32_t i = lane; i < n; i += 256) {
-                const uint32_t src        = (i + n - off) % n;
-                const float    noise_here = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
-                const float noise_prior   = static_cast<float>(string_pcg_hash(seed + src) & 0xFFFFu) / 32767.5f - 1.0f;
-                m->ring[i]                = noise_here - noise_prior;
-                lane_energy += noise_here * noise_here;
-            }
-            noise_energy += lane_energy;
-        }
-    }
-    else {
-        for (uint32_t i = 0; i < n; ++i) {
-            m->ring[i] = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
-        }
+    const uint32_t n = s.n;
+    for (uint32_t i = 0; i < n; ++i) {
+        m->ring[i] = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
     }
     float sum = 0.0f;
     for (uint32_t k = 0; k < n; ++k) {
@@ -23265,16 +23557,6 @@ static void string_mirror_init(StringMirror* m,
     const float mean = sum / static_cast<float>(n);
     for (uint32_t k = 0; k < n; ++k) {
         m->ring[k] -= mean;
-    }
-    if (off > 0) {
-        float comb_energy = 0.0f;
-        for (uint32_t k = 0; k < n; ++k) {
-            comb_energy += m->ring[k] * m->ring[k];
-        }
-        const float comb_gain = comb_energy > 0.0f ? sqrtf(noise_energy / comb_energy) : 1.0f;
-        for (uint32_t k = 0; k < n; ++k) {
-            m->ring[k] *= comb_gain;
-        }
     }
     if (brightness < 1.0f) {
         // Same math as the shader: a zero-state lap gives the tail, which fixes the periodic
@@ -23322,10 +23604,9 @@ static void string_mirror_step(StringMirror* m,
                                bool          release,
                                float*        out,
                                uint32_t      count,
-                               float         dispersion = 0.0f,
-                               float         sections   = 4.0f)
+                               float         dispersion = 0.0f)
 {
-    const StringScalars s = string_mirror_scalars(f0, damping, release_damping, dispersion, sections);
+    const StringScalars s = string_mirror_scalars(f0, damping, release_damping, dispersion);
     if (s.silent) {
         for (uint32_t i = 0; i < count; ++i) {
             out[i] = 0.0f;
@@ -23343,7 +23624,7 @@ static void string_mirror_step(StringMirror* m,
         const float u       = s.a * t + m->t1 - s.a * m->u1;
         float       cascade = u;
         for (uint32_t k = 0; k < s.num_sections; ++k) {
-            const float section_out = s.disp_a * cascade + m->ds[string_disp_mutation == 4 ? 0 : k];
+            const float section_out = s.disp_a * cascade + m->ds[k];
             m->ds[k] = string_disp_mutation == 3 ? cascade + s.disp_a * section_out : cascade - s.disp_a * section_out;
             cascade  = section_out;
         }
@@ -23362,14 +23643,13 @@ static void string_mirror_play(StringMirror* m,
                                float         f0,
                                float         damping,
                                float         release_damping,
-                               float         pick,
                                bool          release,
                                uint32_t      seed,
                                float*        out,
                                uint32_t      count)
 {
     if (! string_mirror_scalars(f0, damping, release_damping).silent && ! (m->tagged && m->tag == seed)) {
-        string_mirror_init(m, f0, damping, pick, seed);
+        string_mirror_init(m, f0, damping, seed);
     }
     string_mirror_step(m, f0, damping, release_damping, release, out, count);
 }
@@ -23445,7 +23725,7 @@ static StringMirror       string_test_mirror;
 static void string_test_render(float f0, float damping, uint32_t seed)
 {
     memset(&string_test_mirror, 0, sizeof(string_test_mirror));
-    string_mirror_init(&string_test_mirror, f0, damping, 0.0f, seed);
+    string_mirror_init(&string_test_mirror, f0, damping, seed);
     string_mirror_run(&string_test_mirror, f0, damping, string_test_samples, string_test_out);
 }
 
@@ -23488,9 +23768,9 @@ static void check_string_mirror_recurrence()
         TEST(m.ring[0] == ring0[0]); // untouched slots keep their value
     }
 
-    // Init: ring slots 0..N-1 sum to ~0, state is reset, p = 0 skips the comb.
+    // Init: ring slots 0..N-1 sum to ~0, state is reset.
     memset(&string_test_mirror, 0, sizeof(string_test_mirror));
-    string_mirror_init(&string_test_mirror, 220.0f, 0.5f, 0.0f, 99);
+    string_mirror_init(&string_test_mirror, 220.0f, 0.5f, 99);
     const uint32_t n   = string_mirror_scalars(220.0f, 0.5f, 0.0f).n;
     double         sum = 0.0;
     for (uint32_t i = 0; i < n; ++i) {
@@ -23600,7 +23880,7 @@ static void check_string_mirror_floor()
         for (uint32_t k = 0; k < 256; ++k) {
             out[k] = 1.0f;
         }
-        string_mirror_init(&m, silent_freqs[i], 0.5f, 0.0f, 3);
+        string_mirror_init(&m, silent_freqs[i], 0.5f, 3);
         string_mirror_step(&m, silent_freqs[i], 0.5f, 0.0f, false, out, 256);
         TEST(m.wr == 5 && m.ring[0] == 1.0f);
         for (uint32_t k = 0; k < 256; ++k) {
@@ -23646,7 +23926,7 @@ static void string_release_render(float    f0,
                                   uint32_t total_blocks)
 {
     memset(&string_test_mirror, 0, sizeof(string_test_mirror));
-    string_mirror_init(&string_test_mirror, f0, damping, 0.0f, seed);
+    string_mirror_init(&string_test_mirror, f0, damping, seed);
     for (uint32_t b = 0; b < total_blocks; ++b) {
         string_mirror_step(&string_test_mirror,
                            f0,
@@ -23675,13 +23955,20 @@ static float string_max_step(const float* x, uint32_t from, uint32_t to)
 static void check_string_mirror_release_click_free()
 {
     constexpr uint32_t release_block = 32;
+    constexpr uint32_t boundary      = release_block * 256;
+
+    // 1.0 is T60 = 50 ms; 1.6667 is the curved maximum (T60 = 30 ms), which the shader takes unclamped.
+    static const float release_values[] = { 1.0f, 1.6667f };
+    for (const float release_damping : release_values) {
+        string_release_render(110.0f, 0.5f, release_damping, 99, release_block, 80);
+        const float before = string_max_step(string_test_out, boundary - 2048, boundary);
+        const float across = string_max_step(string_test_out, boundary - 2048, boundary + 2048);
+        TEST(before > 0.0f);
+        TEST(across <= before * 1.01f);
+    }
+
+    // Fundamental level 25 ms after the release and 50 ms later: -60 dB +- 3 at q = 1.
     string_release_render(110.0f, 0.5f, 1.0f, 99, release_block, 80);
-    const uint32_t boundary = release_block * 256;
-    const float    before   = string_max_step(string_test_out, boundary - 2048, boundary);
-    const float    across   = string_max_step(string_test_out, boundary - 2048, boundary + 2048);
-    TEST(before > 0.0f);
-    TEST(across <= before * 1.01f);
-    // Fundamental level 25 ms after the release and 50 ms later: -60 dB +- 3.
     const uint32_t start   = boundary + 1100;
     const double   a1      = string_amp_at(string_test_out, start, 1024, 110.0);
     const double   a2      = string_amp_at(string_test_out, start + 2205, 1024, 110.0);
@@ -23737,7 +24024,7 @@ static void check_string_mirror_release_lifetime()
     // Pedal-up: a held pedal keeps release false; the first block after it
     // flips engages the damping at once (e is pulled toward gr within 6 ms).
     memset(&string_test_mirror, 0, sizeof(string_test_mirror));
-    string_mirror_init(&string_test_mirror, 110.0f, 0.5f, 0.0f, 99);
+    string_mirror_init(&string_test_mirror, 110.0f, 0.5f, 99);
     for (uint32_t b = 0; b < 32; ++b) {
         string_mirror_step(&string_test_mirror, 110.0f, 0.5f, 1.0f, false, string_test_out + b * 256, 256);
     }
@@ -23759,18 +24046,17 @@ static void check_string_mirror_sustain_holds()
     TEST(a2 > 0.3 * a1);
 }
 
-// Pick comb.  Reference excitation: the same noise as string_mirror_init,
-// out-of-place circular comb ref[i] = x[i] - x[(i - off) mod n], then the mean pass.
-// Note: a real retrigger receives a NEW seed (realtime_synth.cpp note-on), so
-// every comparison below seeds the mirror explicitly.
-static void string_pick_reference(float* ref, uint32_t n, uint32_t seed, uint32_t off, bool comb)
+static bool string_rings_equal(const float* a, const float* b, uint32_t n)
 {
-    float x[string_ring_size];
+    return memcmp(a, b, n * sizeof(float)) == 0;
+}
+
+// Pluck brightness tone stage.  Frozen legacy reference for brightness 1: the pre-tone-stage excitation, the
+// seeded noise burst followed by the mean pass.
+static void string_legacy_excitation_reference(float* ref, uint32_t n, uint32_t seed)
+{
     for (uint32_t i = 0; i < n; ++i) {
-        x[i] = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
-    }
-    for (uint32_t i = 0; i < n; ++i) {
-        ref[i] = comb && off > 0 ? x[i] - x[i >= off ? i - off : i + n - off] : x[i];
+        ref[i] = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
     }
     float sum = 0.0f;
     for (uint32_t k = 0; k < n; ++k) {
@@ -23779,133 +24065,6 @@ static void string_pick_reference(float* ref, uint32_t n, uint32_t seed, uint32_
     const float mean = sum / static_cast<float>(n);
     for (uint32_t k = 0; k < n; ++k) {
         ref[k] -= mean;
-    }
-}
-
-// Reference RMS match for pick > 0: scales ref so its energy equals the raw noise energy (double math).
-static void string_pick_scale_to_noise(float* ref, uint32_t n, uint32_t seed)
-{
-    double noise_energy = 0.0;
-    double ref_energy   = 0.0;
-    for (uint32_t i = 0; i < n; ++i) {
-        const float x = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
-        noise_energy += static_cast<double>(x) * static_cast<double>(x);
-        ref_energy += static_cast<double>(ref[i]) * static_cast<double>(ref[i]);
-    }
-    const float gain = ref_energy > 0.0 ? static_cast<float>(sqrt(noise_energy / ref_energy)) : 1.0f;
-    for (uint32_t k = 0; k < n; ++k) {
-        ref[k] *= gain;
-    }
-}
-
-static bool string_rings_equal(const float* a, const float* b, uint32_t n)
-{
-    return memcmp(a, b, n * sizeof(float)) == 0;
-}
-
-static bool string_rings_close(const float* a, const float* b, uint32_t n)
-{
-    for (uint32_t i = 0; i < n; ++i) {
-        if (! approx(a[i], b[i], 1e-5f)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-static void check_string_mirror_pick_comb()
-{
-    static StringMirror m;
-    static StringMirror other;
-    static float        ref[string_ring_size];
-    // f0 = 441 Hz: L = 100, even N.  f0 = 400 Hz: L = 110.25, odd N.
-    const float freqs[2] = { 441.0f, 400.0f };
-    for (uint32_t fi = 0; fi < 2; ++fi) {
-        const float    f0 = freqs[fi];
-        const uint32_t n  = string_mirror_scalars(f0, 0.5f, 0.0f).n;
-        TEST(n >= 3);
-        // p = 0: bit-identical to a no-comb run.
-        memset(&m, 0, sizeof(m));
-        string_mirror_init(&m, f0, 0.5f, 0.0f, 55);
-        string_pick_reference(ref, n, 55, 0, false);
-        TEST(string_rings_equal(m.ring, ref, n));
-        // p = 0.5: matches the out-of-place circular + RMS-scaled reference.
-        // Odd N rounds half up: off = floor(0.5 * N + 0.5).
-        uint32_t off = static_cast<uint32_t>(floorf(0.5f * static_cast<float>(n) + 0.5f));
-        off          = off < n - 1 ? off : n - 1;
-        TEST(off == (n + 1) / 2);
-        memset(&m, 0, sizeof(m));
-        string_mirror_init(&m, f0, 0.5f, 0.5f, 55);
-        string_pick_reference(ref, n, 55, off, true);
-        string_pick_scale_to_noise(ref, n, 55);
-        TEST(string_rings_close(m.ring, ref, n));
-        // The circular comb is zero-sum and the mean pass cleans up float
-        // rounding residue (while remaining required for p = 0).
-        double sum = 0.0;
-        for (uint32_t k = 0; k < n; ++k) {
-            sum += static_cast<double>(m.ring[k]);
-        }
-        TEST(fabs(sum / n) < 1e-6);
-        // Comb differs from the no-comb ring.
-        string_pick_reference(ref, n, 55, 0, false);
-        TEST(! string_rings_equal(m.ring, ref, n));
-        // Same seed deterministic, different seed differs.
-        memset(&other, 0, sizeof(other));
-        string_mirror_init(&other, f0, 0.5f, 0.5f, 55);
-        TEST(string_rings_equal(m.ring, other.ring, n));
-        string_mirror_init(&other, f0, 0.5f, 0.5f, 56);
-        TEST(! string_rings_equal(m.ring, other.ring, n));
-    }
-    // D11: zero mean at p = 0.3.  Not bit-exact: the float32 mean subtraction
-    // leaves rounding residue (about N * 6e-8 in the sum), so the double-summed
-    // mean must be within 1e-6, the same bound as the p = 0.5 and p = 1 checks.
-    {
-        const uint32_t n30 = string_mirror_scalars(441.0f, 0.5f, 0.0f).n;
-        memset(&m, 0, sizeof(m));
-        string_mirror_init(&m, 441.0f, 0.5f, 0.3f, 17);
-        double sum30 = 0.0;
-        for (uint32_t k = 0; k < n30; ++k) {
-            sum30 += static_cast<double>(m.ring[k]);
-        }
-        TEST(fabs(sum30 / n30) < 1e-6);
-    }
-    // p = 1 clamps off to N - 1: finite and zero mean.
-    const uint32_t n = string_mirror_scalars(441.0f, 0.5f, 0.0f).n;
-    memset(&m, 0, sizeof(m));
-    string_mirror_init(&m, 441.0f, 0.5f, 1.0f, 9);
-    double sum = 0.0;
-    for (uint32_t k = 0; k < n; ++k) {
-        TEST(std::isfinite(m.ring[k]));
-        sum += static_cast<double>(m.ring[k]);
-    }
-    TEST(fabs(sum / n) < 1e-6);
-}
-
-// Pluck brightness tone stage. Frozen legacy reference for brightness 1: the pre-tone-stage
-// excitation, i.e. string_pick_reference (comb and mean passes) followed by the float RMS
-// match the mirror applies for pick > 0, with the shader's 256-lane noise energy order.
-static void string_legacy_excitation_reference(float* ref, uint32_t n, uint32_t seed, uint32_t off)
-{
-    string_pick_reference(ref, n, seed, off, true);
-    if (off == 0) {
-        return;
-    }
-    float noise_energy = 0.0f;
-    for (uint32_t lane = 0; lane < 256; ++lane) {
-        float lane_energy = 0.0f;
-        for (uint32_t i = lane; i < n; i += 256) {
-            const float noise_here = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
-            lane_energy += noise_here * noise_here;
-        }
-        noise_energy += lane_energy;
-    }
-    float comb_energy = 0.0f;
-    for (uint32_t k = 0; k < n; ++k) {
-        comb_energy += ref[k] * ref[k];
-    }
-    const float comb_gain = comb_energy > 0.0f ? sqrtf(noise_energy / comb_energy) : 1.0f;
-    for (uint32_t k = 0; k < n; ++k) {
-        ref[k] *= comb_gain;
     }
 }
 
@@ -23978,37 +24137,25 @@ static void check_string_mirror_brightness()
     static StringMirror base;
     static float        ref[string_ring_size];
 
-    // (a) Brightness 1 (explicit and defaulted) is bit-identical to the frozen legacy excitation,
-    // with the pick comb disabled and enabled. At damping 0.5: 441 Hz gives N = 98 and 400 Hz
-    // gives N = 108 (both even); 420 Hz gives N = 103 (odd).
+    // (a) Brightness 1 (explicit and defaulted) is bit-identical to the frozen legacy excitation.  At damping 0.5:
+    // 441 Hz gives N = 98 and 400 Hz gives N = 108 (both even); 420 Hz gives N = 103 (odd).
     const float legacy_freqs[3] = { 441.0f, 400.0f, 420.0f };
     for (const float f0 : legacy_freqs) {
         const uint32_t n = string_mirror_scalars(f0, 0.5f, 0.0f).n;
         TEST(n >= 3);
         TEST((n % 2u) == (f0 == 420.0f ? 1u : 0u));
-        uint32_t off = static_cast<uint32_t>(floorf(0.5f * static_cast<float>(n) + 0.5f));
-        off          = off < n - 1 ? off : n - 1;
 
         memset(&m, 0, sizeof(m));
-        string_mirror_init(&m, f0, 0.5f, 0.0f, 55, 1.0f);
-        string_legacy_excitation_reference(ref, n, 55, 0);
+        string_mirror_init(&m, f0, 0.5f, 55, 1.0f);
+        string_legacy_excitation_reference(ref, n, 55);
         TEST(string_rings_equal(m.ring, ref, n));
 
         memset(&m, 0, sizeof(m));
-        string_mirror_init(&m, f0, 0.5f, 0.0f, 55);
-        TEST(string_rings_equal(m.ring, ref, n));
-
-        memset(&m, 0, sizeof(m));
-        string_mirror_init(&m, f0, 0.5f, 0.5f, 55, 1.0f);
-        string_legacy_excitation_reference(ref, n, 55, off);
-        TEST(string_rings_equal(m.ring, ref, n));
-
-        memset(&m, 0, sizeof(m));
-        string_mirror_init(&m, f0, 0.5f, 0.5f, 55);
+        string_mirror_init(&m, f0, 0.5f, 55);
         TEST(string_rings_equal(m.ring, ref, n));
 
         // The tone stage is active just below 1.
-        string_mirror_init(&m, f0, 0.5f, 0.5f, 55, 0.99f);
+        string_mirror_init(&m, f0, 0.5f, 55, 0.99f);
         TEST(! string_rings_equal(m.ring, ref, n));
     }
 
@@ -24017,24 +24164,22 @@ static void check_string_mirror_brightness()
     // (N = 3, 2, 1 at damping 0.5); 0 means unchecked.
     struct ToneCase {
         float    f0;
-        float    pick;
         uint32_t expected_n;
     };
 
     static const ToneCase cases[] = {
-        { 441.0f, 0.0f, 0 }, { 441.0f, 0.5f, 0 },  { 400.0f, 0.0f, 0 },   { 400.0f, 0.3f, 0 },   { 110.0f, 0.0f, 0 },
-        { 110.0f, 0.5f, 0 }, { 8820.0f, 0.0f, 3 }, { 11025.0f, 0.0f, 2 }, { 20000.0f, 0.0f, 1 },
+        { 441.0f, 0 }, { 400.0f, 0 }, { 110.0f, 0 }, { 8820.0f, 3 }, { 11025.0f, 2 }, { 20000.0f, 1 },
     };
     static const float levels[] = { 0.75f, 0.5f, 0.25f, 0.0f };
     for (const ToneCase& c : cases) {
         const uint32_t n = string_mirror_scalars(c.f0, 0.5f, 0.0f).n;
         TEST(c.expected_n == 0 || n == c.expected_n);
         memset(&base, 0, sizeof(base));
-        string_mirror_init(&base, c.f0, 0.5f, c.pick, 71, 1.0f);
+        string_mirror_init(&base, c.f0, 0.5f, 71, 1.0f);
         const double energy_in = string_ring_energy(base.ring, n);
         for (const float level : levels) {
             memset(&m, 0, sizeof(m));
-            string_mirror_init(&m, c.f0, 0.5f, c.pick, 71, level);
+            string_mirror_init(&m, c.f0, 0.5f, 71, level);
             for (uint32_t k = 0; k < n; ++k) {
                 TEST(std::isfinite(m.ring[k]));
             }
@@ -24071,10 +24216,10 @@ static void check_string_mirror_brightness()
     // Shortest loops: one sample has nothing to filter and stays zero; two samples keep their
     // alternating shape.
     memset(&m, 0, sizeof(m));
-    string_mirror_init(&m, 20000.0f, 0.5f, 0.0f, 71, 0.25f);
+    string_mirror_init(&m, 20000.0f, 0.5f, 71, 0.25f);
     TEST(string_mirror_scalars(20000.0f, 0.5f, 0.0f).n == 1 && m.ring[0] == 0.0f);
     memset(&m, 0, sizeof(m));
-    string_mirror_init(&m, 11025.0f, 0.5f, 0.0f, 71, 0.25f);
+    string_mirror_init(&m, 11025.0f, 0.5f, 71, 0.25f);
     TEST(approx(m.ring[0], -m.ring[1], 1e-5f) && m.ring[0] != 0.0f);
 
     // High-frequency attenuation on a long loop (N is about 400): roughness is near-white at
@@ -24084,7 +24229,7 @@ static void check_string_mirror_brightness()
     double             white     = 0.0;
     for (uint32_t i = 0; i < 5; ++i) {
         memset(&m, 0, sizeof(m));
-        string_mirror_init(&m, 110.0f, 0.5f, 0.0f, 71, ordered[i]);
+        string_mirror_init(&m, 110.0f, 0.5f, 71, ordered[i]);
         const uint32_t n         = string_mirror_scalars(110.0f, 0.5f, 0.0f).n;
         const double   roughness = string_ring_roughness(m.ring, n);
         if (i == 0) {
@@ -24148,7 +24293,7 @@ static void check_string_mirror_fm_ring_read()
     // with it, so q2 = q1 + 256 for a fixed warped phase.
     static StringMirror m;
     memset(&m, 0, sizeof(m));
-    string_mirror_init(&m, 329.63f, 0.5f, 0.0f, 21);
+    string_mirror_init(&m, 329.63f, 0.5f, 21);
     float out[256];
     string_mirror_step(&m, 329.63f, 0.5f, 0.0f, false, out, 256);
     const uint32_t wr1 = m.wr;
@@ -24222,6 +24367,8 @@ static void check_string_mirror_ring_read_edges()
 // the 8.4e-5 position-rounding bound (float rounding of the read position, ~2^-13 slot, times source slope).
 // That is 1.1e-5 of peak amplitude, i.e. ULP-scale of the position arithmetic, not of the sample values
 // (reported to the parent: slightly above the 1e-5 relative target); evidence class accepted by user ruling 6.
+// Re-measured after OscillatorParams shrank to 88 bytes (pick and sections removed): this test feeds its own simulated
+// rings, so the bound is unchanged at max |new - legacy| = 1.94e-5 against the 8.4e-5 position-rounding bound.
 static float string_ring_read_sized(const float* ring, uint32_t size, uint32_t wr, float len, float phase)
 {
     const float f  = (phase - floorf(phase)) * len;
@@ -24286,7 +24433,7 @@ static void check_string_mirror_nan_guard()
     const float         poison[3] = { 1e30f, INFINITY, NAN };
     for (uint32_t i = 0; i < 3; ++i) {
         memset(&m, 0, sizeof(m));
-        string_mirror_init(&m, 441.0f, 0.5f, 0.0f, 14);
+        string_mirror_init(&m, 441.0f, 0.5f, 14);
         const uint32_t n     = string_mirror_scalars(441.0f, 0.5f, 0.0f).n;
         m.ring[m.wr - n + 5] = poison[i];
         float out[512];
@@ -24300,7 +24447,7 @@ static void check_string_mirror_nan_guard()
     }
     // Poisoned filter state is flushed the same way.
     memset(&m, 0, sizeof(m));
-    string_mirror_init(&m, 441.0f, 0.5f, 0.0f, 14);
+    string_mirror_init(&m, 441.0f, 0.5f, 14);
     m.t1 = 1e30f;
     m.u1 = NAN;
     float out[256];
@@ -24313,14 +24460,13 @@ static void check_string_mirror_nan_guard()
 // Slot-grammar literal pins for the string rows and the shifted band blocks.
 static void check_string_slot_grammar_pins()
 {
-    TEST(Sculptor::osc_band_first_slot == 140);
-    TEST(Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride == 195);
-    TEST(Sculptor::osc_band_header_slot(3) + Sculptor::osc_band_block_stride == 360);
-    TEST(Sculptor::max_node_slots == 360);
-    TEST(Sculptor::osc_pick_slot == 28);
-    TEST(Sculptor::osc_brightness_slot == 29);
-    TEST(Sculptor::osc_dispersion_slot == 30);
-    TEST(Sculptor::osc_dispersion_sections_slot == 31);
+    TEST(Sculptor::osc_band_first_slot == 150);
+    TEST(Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride == 205);
+    TEST(Sculptor::osc_band_header_slot(3) + Sculptor::osc_band_block_stride == 370);
+    TEST(Sculptor::max_node_slots == 370);
+    TEST(Sculptor::osc_string_extras_first_slot == 28);
+    TEST(Sculptor::osc_brightness_slot == 41);
+    TEST(Sculptor::osc_target_row_slot[Synth::mod_string_dispersion] == 2);
     const char* const osc_h    = load_source_file("sculptor/sculptor_osc_graph.h");
     const char* const osc_cpp  = load_source_file("sculptor/sculptor_osc_graph.cpp");
     const char* const graph_h  = load_source_file("sculptor/sculptor_graph.h");
@@ -24331,28 +24477,29 @@ static void check_string_slot_grammar_pins()
     if (! (osc_h && osc_cpp && graph_h && json_cpp && instr_h && runtime)) {
         return;
     }
-    // Pick row 28 and brightness row 29; damping and release damping reuse the
-    // duty a / pad tone a rows (2 and 15); first band slot 140; dispersion rows 30 and 31.
-    TEST(find_in_range(osc_h, osc_h + strlen(osc_h), "osc_pick_slot = 28") != nullptr);
-    TEST(find_in_range(osc_h, osc_h + strlen(osc_h), "osc_band_first_slot = 140") != nullptr);
-    TEST(Sculptor::osc_target_row_slot[Synth::mod_string_damping] == 2);
-    TEST(Sculptor::osc_target_row_slot[Synth::mod_string_release_damping] == 15);
-    TEST(find_in_range(graph_h, graph_h + strlen(graph_h), "max_node_slots = 360") != nullptr);
+    // Release damping row 28 (block 29..40) and brightness row 41; dispersion and sustain damping reuse the
+    // duty a / pad tone a rows (2 and 15); first band slot 150.
+    TEST(find_in_range(osc_h, osc_h + strlen(osc_h), "osc_brightness_slot = 41") != nullptr);
+    TEST(find_in_range(osc_h, osc_h + strlen(osc_h), "osc_band_first_slot = 150") != nullptr);
+    TEST(Sculptor::osc_target_row_slot[Synth::mod_string_damping] == 15);
+    TEST(Sculptor::osc_target_row_slot[Synth::mod_string_release_damping] == 28);
+    TEST(find_in_range(graph_h, graph_h + strlen(graph_h), "max_node_slots = 370") != nullptr);
     TEST(find_in_range(instr_h, instr_h + strlen(instr_h), "mod_string_damping") != nullptr);
     TEST(find_in_range(instr_h, instr_h + strlen(instr_h), "mod_string_release_damping") != nullptr);
-    TEST(find_in_range(osc_cpp, osc_cpp + strlen(osc_cpp), "static_assert(Synth::num_mod_targets == 28)") != nullptr);
+    TEST(find_in_range(osc_cpp, osc_cpp + strlen(osc_cpp), "static_assert(Synth::num_mod_targets == 29)") != nullptr);
     TEST(find_in_range(osc_cpp, osc_cpp + strlen(osc_cpp), "\"Release Damping\"") != nullptr);
     TEST(find_in_range(json_cpp, json_cpp + strlen(json_cpp), "\"string_damping\"") != nullptr);
     TEST(find_in_range(json_cpp, json_cpp + strlen(json_cpp), "\"string_release_damping\"") != nullptr);
     TEST(find_in_range(json_cpp, json_cpp + strlen(json_cpp), "\"string_pick\"") != nullptr);
     TEST(find_in_range(json_cpp, json_cpp + strlen(json_cpp), "\"string_brightness\"") != nullptr);
-    TEST(find_in_range(runtime, runtime + strlen(runtime), "static_assert(num_osc_roles == 84)") != nullptr);
-    TEST(find_in_range(runtime, runtime + strlen(runtime), "static_assert(sizeof(Oscillator) == 96)") != nullptr);
+    TEST(find_in_range(runtime, runtime + strlen(runtime), "static_assert(num_osc_roles == 87)") != nullptr);
+    TEST(find_in_range(runtime, runtime + strlen(runtime), "static_assert(sizeof(Oscillator) == 88)") != nullptr);
 }
 
-// Overdriven damping destinations clamp to [0, 1] at the host read, so the
-// scalar block never sees c >= 0.4 / negative release damping.  Finite bounded output
-// over several seconds for both overdriven polarities and NaN.
+// Overdriven damping destinations clamp to [0, 1] at the host read, and the release
+// damping then goes through the curve (which clamps again), so the scalar block never sees
+// c >= 0.4 or a release damping outside 0.025..1.667.  Finite bounded output over several
+// seconds for both overdriven polarities and NaN.
 static void check_string_mirror_damping_clamp()
 {
     static StringMirror m;
@@ -24360,8 +24507,9 @@ static void check_string_mirror_damping_clamp()
     for (uint32_t di = 0; di < 4; ++di) {
         const float         clamped = drive[di] > 0.5f ? 1.0f : 0.0f;
         const float         expect  = drive[di] != drive[di] ? 0.0f : clamped;
-        const StringScalars over    = string_mirror_scalars(220.0f, drive[di], drive[di]);
-        const StringScalars ref     = string_mirror_scalars(220.0f, expect, expect);
+        const StringScalars over =
+            string_mirror_scalars(220.0f, drive[di], Synth::string_release_damping_curve(drive[di]));
+        const StringScalars ref = string_mirror_scalars(220.0f, expect, Synth::string_release_damping_curve(expect));
         TEST(over.n == ref.n && over.c == ref.c && over.g == ref.g && over.gr == ref.gr && over.a == ref.a);
         TEST(over.gr > 0.0f && over.gr <= 1.0f);
 
@@ -24369,14 +24517,21 @@ static void check_string_mirror_damping_clamp()
         static float out[256];
         for (uint32_t step = 0; step < 4 * 44100 / 256; ++step) {
             const bool release = step > 2 * 44100 / 256;
-            string_mirror_play(&m, 220.0f, drive[di], drive[di], 0.0f, release, 31, out, 256);
+            string_mirror_play(&m,
+                               220.0f,
+                               drive[di],
+                               Synth::string_release_damping_curve(drive[di]),
+                               release,
+                               31,
+                               out,
+                               256);
             for (uint32_t k = 0; k < 256; ++k) {
                 TEST(std::isfinite(out[k]) && fabsf(out[k]) < 8.0f);
             }
         }
     }
-    // Negative release damping alone must not amplify: gr == 1 like release damping 0.
-    TEST(string_mirror_scalars(220.0f, 0.5f, -2.0f).gr == string_mirror_scalars(220.0f, 0.5f, 0.0f).gr);
+    // Negative release damping alone must not amplify: the curve maps it to the 0 knob, so gr stays <= 1.
+    TEST(string_mirror_scalars(220.0f, 0.5f, Synth::string_release_damping_curve(-2.0f)).gr <= 1.0f);
     TEST(string_mirror_scalars(220.0f, 0.5f, 0.0f).gr == 1.0f);
 }
 
@@ -24397,15 +24552,15 @@ static void check_string_mirror_silent_onset_init()
     m.wr = 123;
     m.t1 = 1.0f;
     for (uint32_t step = 0; step < 3; ++step) {
-        string_mirror_play(&m, 10.0f, 0.5f, 0.0f, 0.0f, false, 77, out, 256);
+        string_mirror_play(&m, 10.0f, 0.5f, 0.0f, false, 77, out, 256);
         for (uint32_t k = 0; k < 256; ++k) {
             TEST(out[k] == 0.0f);
         }
     }
     TEST(! m.tagged);
-    string_mirror_play(&m, 441.0f, 0.5f, 0.0f, 0.0f, false, 77, out, 256);
+    string_mirror_play(&m, 441.0f, 0.5f, 0.0f, false, 77, out, 256);
     memset(&fresh, 0, sizeof(fresh));
-    string_mirror_init(&fresh, 441.0f, 0.5f, 0.0f, 77);
+    string_mirror_init(&fresh, 441.0f, 0.5f, 77);
     string_mirror_step(&fresh, 441.0f, 0.5f, 0.0f, false, want, 256);
     TEST(memcmp(out, want, sizeof(out)) == 0);
     TEST(out[1] != 0.0f);
@@ -24413,196 +24568,17 @@ static void check_string_mirror_silent_onset_init()
     // Reused slot: note A plays and is released, then note B starts silent, then pitches in.
     memset(&m, 0, sizeof(m));
     for (uint32_t step = 0; step < 8; ++step) {
-        string_mirror_play(&m, 441.0f, 0.5f, 0.5f, 0.0f, step > 4, 5, out, 256);
+        string_mirror_play(&m, 441.0f, 0.5f, 0.5f, step > 4, 5, out, 256);
     }
     TEST(m.tagged && m.tag == 5);
-    string_mirror_play(&m, 10.0f, 0.5f, 0.5f, 0.0f, false, 6, out, 256);
+    string_mirror_play(&m, 10.0f, 0.5f, 0.5f, false, 6, out, 256);
     TEST(out[0] == 0.0f && out[255] == 0.0f);
-    string_mirror_play(&m, 330.0f, 0.5f, 0.0f, 0.0f, false, 6, out, 256);
+    string_mirror_play(&m, 330.0f, 0.5f, 0.0f, false, 6, out, 256);
     memset(&fresh, 0, sizeof(fresh));
-    string_mirror_init(&fresh, 330.0f, 0.5f, 0.0f, 6);
+    string_mirror_init(&fresh, 330.0f, 0.5f, 6);
     string_mirror_step(&fresh, 330.0f, 0.5f, 0.0f, false, want, 256);
     TEST(memcmp(out, want, sizeof(out)) == 0);
     TEST(m.tagged && m.tag == 6);
-}
-
-// A tiny nonzero pick clamps to a 1-sample comb (never identity, never
-// silence); p = 0 stays the bit-identical no-comb ring.
-static void check_string_mirror_pick_tiny()
-{
-    static StringMirror m;
-    static float        ref[string_ring_size];
-    const uint32_t      n = string_mirror_scalars(441.0f, 0.5f, 0.0f).n;
-    TEST(n == 98);
-
-    memset(&m, 0, sizeof(m));
-    string_mirror_init(&m, 441.0f, 0.5f, 0.001f, 12);
-    string_pick_reference(ref, n, 12, 1, true);
-    string_pick_scale_to_noise(ref, n, 12);
-    TEST(string_rings_close(m.ring, ref, n));
-    string_pick_reference(ref, n, 12, 0, false);
-    TEST(! string_rings_equal(m.ring, ref, n));
-    double energy = 0.0;
-    for (uint32_t k = 0; k < n; ++k) {
-        energy += static_cast<double>(m.ring[k]) * static_cast<double>(m.ring[k]);
-    }
-    TEST(energy > 1.0);
-
-    memset(&m, 0, sizeof(m));
-    string_mirror_init(&m, 441.0f, 0.5f, 0.0f, 12);
-    TEST(string_rings_equal(m.ring, ref, n));
-}
-
-static double string_ring_dft_mag(const float* ring, uint32_t n, uint32_t harmonic)
-{
-    constexpr double two_pi = 6.283185307179586;
-    double           re     = 0.0;
-    double           im     = 0.0;
-    for (uint32_t i = 0; i < n; ++i) {
-        const double ph = two_pi * static_cast<double>(harmonic * i) / static_cast<double>(n);
-        re += static_cast<double>(ring[i]) * cos(ph);
-        im += static_cast<double>(ring[i]) * sin(ph);
-    }
-    return sqrt(re * re + im * im);
-}
-
-static void check_string_mirror_pick_circular()
-{
-    static StringMirror m;
-    static StringMirror m_half;
-    static float        ref[string_ring_size];
-    static float        tiled[16 * string_ring_size];
-
-    // (a) Circularity / spectral nulls at multiples of fs / (pick * period).
-    const uint32_t n98 = string_mirror_scalars(441.0f, 0.5f, 0.0f).n;
-    TEST(n98 == 98);
-
-    struct NullCase {
-        float    pick;
-        uint32_t off;
-        uint32_t null_step;
-    };
-
-    const NullCase cases[3] = {
-        { 0.5f, 49, 2 },
-        { 14.0f / 98.0f, 14, 7 },
-        { 0.357f, 35, 14 },
-    };
-    for (uint32_t ci = 0; ci < 3; ++ci) {
-        const NullCase& c   = cases[ci];
-        const uint32_t  off = static_cast<uint32_t>(floorf(c.pick * static_cast<float>(n98) + 0.5f));
-        TEST(off == c.off);
-        memset(&m, 0, sizeof(m));
-        string_mirror_init(&m, 441.0f, 0.5f, c.pick, 41);
-
-        // Tile the n98-sample excitation over 16 periods so the existing Hann
-        // DFT helper string_amp_at also measures exact periodic nulls.
-        const uint32_t tiled_len = 16 * n98;
-        for (uint32_t i = 0; i < tiled_len; ++i) {
-            tiled[i] = m.ring[i % n98];
-        }
-
-        double   mag_sq_sum   = 0.0;
-        double   null_sum     = 0.0;
-        double   non_null_sum = 0.0;
-        uint32_t count        = 0;
-        for (uint32_t h = 1; h <= n98 / 2; ++h) {
-            const double mag = string_ring_dft_mag(m.ring, n98, h);
-            mag_sq_sum += mag * mag;
-            ++count;
-            if (h % c.null_step == 0) {
-                null_sum += mag;
-            }
-            else {
-                non_null_sum += mag;
-            }
-        }
-        const double rms_bin = sqrt(mag_sq_sum / static_cast<double>(count));
-        TEST(rms_bin > 0.0);
-        for (uint32_t h = 1; h <= n98 / 2; ++h) {
-            if (h % c.null_step == 0) {
-                const double mag = string_ring_dft_mag(m.ring, n98, h);
-                const double freq_hz =
-                    static_cast<double>(h) * static_cast<double>(string_fs) / static_cast<double>(n98);
-                const double hann_mag = string_amp_at(tiled, 0, tiled_len, freq_hz);
-                TEST(mag < 1e-3 * rms_bin);
-                TEST(hann_mag < 1e-3 * rms_bin * 8.0);
-            }
-        }
-        TEST(non_null_sum > 100.0 * null_sum);
-    }
-
-    // Coprime / odd-n cases: f0 = 400 Hz with off = 1, and f0 = 420 Hz (odd prime n = 103).
-    {
-        const uint32_t n400 = string_mirror_scalars(400.0f, 0.5f, 0.0f).n;
-        TEST(n400 == 108);
-        memset(&m, 0, sizeof(m));
-        string_mirror_init(&m, 400.0f, 0.5f, 0.001f, 73);
-        double sum = 0.0;
-        for (uint32_t k = 0; k < n400; ++k) {
-            TEST(std::isfinite(m.ring[k]));
-            sum += static_cast<double>(m.ring[k]);
-        }
-        TEST(fabs(sum / n400) < 1e-6);
-
-        const uint32_t n420 = string_mirror_scalars(420.0f, 0.5f, 0.0f).n;
-        TEST(n420 == 103 && (n420 & 1u) == 1u);
-        memset(&m, 0, sizeof(m));
-        string_mirror_init(&m, 420.0f, 0.5f, 0.3f, 73);
-        sum = 0.0;
-        for (uint32_t k = 0; k < n420; ++k) {
-            TEST(std::isfinite(m.ring[k]));
-            sum += static_cast<double>(m.ring[k]);
-        }
-        TEST(fabs(sum / n420) < 1e-6);
-    }
-
-    // (b) Energy non-boost and (c) pick == 0 bit-exactness across pitch/seed/pick grid.
-    const float    freqs[2] = { 441.0f, 82.41f };
-    const uint32_t seeds[2] = { 3, 55 };
-    const float    picks[4] = { 0.05f, 0.12f, 0.5f, 0.9f };
-    for (uint32_t fi = 0; fi < 2; ++fi) {
-        const float    f0 = freqs[fi];
-        const uint32_t n  = string_mirror_scalars(f0, 0.5f, 0.0f).n;
-        for (uint32_t si = 0; si < 2; ++si) {
-            const uint32_t seed         = seeds[si];
-            double         noise_energy = 0.0;
-            for (uint32_t i = 0; i < n; ++i) {
-                const float x = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
-                noise_energy += static_cast<double>(x) * static_cast<double>(x);
-            }
-            const double rms_noise = sqrt(noise_energy / static_cast<double>(n));
-            for (uint32_t pi = 0; pi < 4; ++pi) {
-                memset(&m, 0, sizeof(m));
-                string_mirror_init(&m, f0, 0.5f, picks[pi], seed);
-                double comb_energy = 0.0;
-                for (uint32_t k = 0; k < n; ++k) {
-                    comb_energy += static_cast<double>(m.ring[k]) * static_cast<double>(m.ring[k]);
-                }
-                const double rms_comb = sqrt(comb_energy / static_cast<double>(n));
-                TEST(rms_comb <= rms_noise * (1.0 + 1e-3));
-                TEST(rms_comb >= rms_noise * (1.0 - 1e-3));
-            }
-
-            // (c) pick == 0 bit-exactness and independence from pick == 0.5.
-            memset(&m, 0, sizeof(m));
-            string_mirror_init(&m, f0, 0.5f, 0.0f, seed);
-            string_pick_reference(ref, n, seed, 0, false);
-            TEST(string_rings_equal(m.ring, ref, n));
-
-            memset(&m_half, 0, sizeof(m_half));
-            string_mirror_init(&m_half, f0, 0.5f, 0.5f, seed);
-            const float scale = m_half.ring[0] != 0.0f ? m.ring[0] / m_half.ring[0] : 1.0f;
-            bool        same  = true;
-            for (uint32_t k = 0; k < n; ++k) {
-                if (! approx(m.ring[k], m_half.ring[k] * scale, 1e-4f)) {
-                    same = false;
-                    break;
-                }
-            }
-            TEST(! same);
-        }
-    }
 }
 
 // ---- String dispersion. Frozen legacy loop (no cascade) for the d = 0 bit-identity check.
@@ -24627,18 +24603,19 @@ static void string_legacy_step(StringMirror* m, float f0, float damping, float* 
 }
 
 // Independent double-precision phase-closure oracle for the loop (lowpass + fractional allpass + cascade):
-// returns the frequency (Hz) of the k-th loop resonance, k = 1..4. Its own count loop and Newton solve.
-static void string_disp_oracle(double f0, double dispersion, double sections, double damping, double* partials)
+// returns the frequency (Hz) of the k-th loop resonance, k = 1..4. Its own single-section path and Newton solve.
+static void string_disp_oracle(double f0, double dispersion, double damping, double* partials)
 {
     const double fs  = 44100.0;
     const double len = fs / f0;
     const double c   = 0.1 + 0.3 * damping;
     const double w0  = 2.0 * M_PI * f0 / fs;
-    // Own count loop and Newton solve of r^3 - r = strength * dispersion / (count * w0^3) for each candidate count.
-    double count = floor(sections + 0.5);
+    // Own single-section path and Newton solve of r^3 - r = strength * dispersion / w0^3, with the same fallback to no
+    // section when less than 3 samples of loop delay would remain.
+    double count = 1.0;
     double ad    = 0.0;
     double pd    = 0.0;
-    for (; count > 0.0; count -= 1.0) {
+    {
         const double q = static_cast<double>(string_dispersion_strength) * dispersion / (count * w0 * w0 * w0);
         double       r = 1.0 + cbrt(q);
         for (int it = 0; it < 80; ++it) {
@@ -24646,8 +24623,8 @@ static void string_disp_oracle(double f0, double dispersion, double sections, do
         }
         ad = (1.0 - r) / (1.0 + r);
         pd = (2.0 / w0) * atan2((1.0 - ad) * sin(0.5 * w0), (1.0 + ad) * cos(0.5 * w0));
-        if (len - c / (1.0 - c) - count * pd >= 3.0) {
-            break;
+        if (! (len - c / (1.0 - c) - count * pd >= 3.0)) {
+            count = 0.0;
         }
     }
     const double delay       = len - c / (1.0 - c) - count * pd;
@@ -24693,23 +24670,15 @@ struct StringDispExtra {
 // Renders a fresh note and measures the fundamental and partials 2..4. Returns true when the fundamental is
 // within 1 cent of f0, and the stretch of each of partials 2, 3 and 4 (cents over k f1) is within 1 cent of
 // the oracle's.
-static bool string_disp_case(float            f0,
-                             float            dispersion,
-                             float            sections,
-                             double*          stretch,
-                             StringDispExtra* extra = nullptr)
+static bool string_disp_case(float f0, float dispersion, double* stretch, StringDispExtra* extra = nullptr)
 {
     memset(&string_test_mirror, 0, sizeof(string_test_mirror));
-    string_mirror_init(&string_test_mirror, f0, 0.0f, 0.0f, 4321, 1.0f, dispersion, sections);
+    string_mirror_init(&string_test_mirror, f0, 0.0f, 4321, 1.0f, dispersion);
     for (uint32_t i = 0; i < string_test_samples; i += 256) {
-        string_mirror_step(&string_test_mirror, f0, 0.0f, 0.0f, false, string_test_out + i, 256, dispersion, sections);
+        string_mirror_step(&string_test_mirror, f0, 0.0f, 0.0f, false, string_test_out + i, 256, dispersion);
     }
     double oracle[5];
-    string_disp_oracle(static_cast<double>(f0),
-                       static_cast<double>(dispersion),
-                       static_cast<double>(sections),
-                       0.0,
-                       oracle);
+    string_disp_oracle(static_cast<double>(f0), static_cast<double>(dispersion), 0.0, oracle);
     const double f1_width = fmax(0.4, 0.006 * static_cast<double>(f0));
     const double f1       = string_peak_freq(string_test_out, 11025, 32768, static_cast<double>(f0), f1_width);
     double       peaks[5] = {};
@@ -24739,16 +24708,25 @@ static bool string_disp_case(float            f0,
     return fabs(1200.0 * log2(f1 / static_cast<double>(f0))) < 1.0 && matches;
 }
 
-// Frozen legacy memory layout (8-word header, 2040-slot ring) running the natural d = 0 string loop. Only the
+// Frozen legacy memory layout (8-word header, 2040-slot ring) running the natural string loop.  Only the
 // ring wrap point differs from the current layout (14-word header, 2034 slots); the loop is integer indexed
 // (delay_whole + fractional allpass), so its output must match the current layout bit for bit.
 static constexpr uint32_t string_legacy_ring_size = 2040;
 
+// Frozen baseline: re-frozen at the voicing wave from the tree that already carried the dispersion recalibration
+// (count-normalized solve, strength 0.05863), the release damping curve (applied at the summed write point, outside
+// the scalars) and the String Dispersion target migration.  Changes since the original capture at HEAD 34d1b94:
+// dispersion cascade and its per-count solve added, recalibration, damping curve, dispersion migration, and now
+// pick removal plus the sections freeze (the captured excitation is the pick = 0 burst; the captured scalars take
+// the requested section count, and the current code must equal them at a count of one for every requested count).
+// The helpers below are verbatim copies of the pre-removal arithmetic, so a regression in the current scalar or
+// excitation code cannot hide in the comparison.  Update only deliberately.
 static void string_legacy_layout_step(float*               ring,
                                       uint32_t*            wr,
                                       float*               t1,
                                       float*               u1,
                                       float*               e,
+                                      float*               ds,
                                       const StringScalars& s,
                                       float*               out,
                                       uint32_t             count)
@@ -24759,21 +24737,43 @@ static void string_legacy_layout_step(float*               ring,
         const float    x  = ring[rd];
         out[i]            = x;
         *e += kr * (1.0f - *e);
-        const float t = (1.0f - s.c) * x + s.c * *t1;
-        const float u = s.a * t + *t1 - s.a * *u1;
-        float       v = u * (s.g * *e);
-        v             = fabsf(v) < 8.0f ? v : 0.0f;
-        ring[*wr]     = v;
-        *t1           = t;
-        *u1           = u;
-        *wr           = *wr + 1 == string_legacy_ring_size ? 0 : *wr + 1;
+        const float t       = (1.0f - s.c) * x + s.c * *t1;
+        const float u       = s.a * t + *t1 - s.a * *u1;
+        float       cascade = u;
+        for (uint32_t k = 0; k < s.num_sections; ++k) {
+            const float section_out = s.disp_a * cascade + ds[k];
+            ds[k]                   = cascade - s.disp_a * section_out;
+            cascade                 = section_out;
+        }
+        float v   = cascade * (s.g * *e);
+        v         = fabsf(v) < 8.0f ? v : 0.0f;
+        ring[*wr] = v;
+        *t1       = t;
+        *u1       = u;
+        *wr       = *wr + 1 == string_legacy_ring_size ? 0 : *wr + 1;
     }
 }
 
-// Frozen pre-dispersion note-on arithmetic, ported verbatim (same float operation order) from HEAD 34d1b94
-// string_mirror_scalars / string_mirror_init (brightness 1 path). Independent of the current scalar and
-// excitation code, so a regression there cannot hide in the legacy-capacity comparison. Update only deliberately.
-static StringScalars string_legacy_frozen_scalars(float f0, float damping, float release_damping)
+static float string_legacy_frozen_ratio(float q)
+{
+    if (q <= 0.3849002f) {
+        const float cos_arg = fminf(1.0f, 2.598076f * q);
+        return 1.1547005f * cosf(acosf(cos_arg) * 0.33333334f);
+    }
+    const float cardano = powf(q * 0.5f + sqrtf(q * q * 0.25f - 0.037037037f), 0.33333334f);
+    return cardano + 0.33333334f / cardano;
+}
+
+static float string_legacy_frozen_phase_delay(float coeff, float omega)
+{
+    return (2.0f / omega) * atan2f((1.0f - coeff) * sinf(0.5f * omega), (1.0f + coeff) * cosf(0.5f * omega));
+}
+
+static StringScalars string_legacy_frozen_scalars(float f0,
+                                                  float damping,
+                                                  float release_damping,
+                                                  float dispersion,
+                                                  float sections)
 {
     StringScalars s = {};
     s.silent        = ! (f0 >= 22.0f);
@@ -24791,7 +24791,26 @@ static StringScalars string_legacy_frozen_scalars(float f0, float damping, float
     const float mag   = (1.0f - s.c) / sqrtf(1.0f - 2.0f * s.c * cosf(omega) + s.c * s.c);
     const float g     = powf(10.0f, -3.0f * len / (string_fs * t60)) / mag;
     s.g               = g < 0.9999f ? g : 0.9999f;
-    const float delay = len - tau;
+    float disp_delay  = 0.0f;
+    if (dispersion > 0.0f) {
+        const float    rounded   = floorf(sections + 0.5f);
+        const uint32_t requested = static_cast<uint32_t>(fminf(fmaxf(rounded, 1.0f), 6.0f));
+        for (uint32_t count = requested; count > 0; --count) {
+            const float count_f     = static_cast<float>(count);
+            const float disp_q      = 0.05863f * dispersion / (count_f * (omega * omega * omega));
+            const float disp_r      = string_legacy_frozen_ratio(disp_q);
+            const float coeff       = (1.0f - disp_r) / (1.0f + disp_r);
+            const float count_delay = count_f * string_legacy_frozen_phase_delay(coeff, omega);
+            if (len - tau - count_delay >= 3.0f) {
+                s.disp_a       = coeff;
+                s.num_sections = count;
+                disp_delay     = count_delay;
+                break;
+            }
+        }
+    }
+    s.disp_delay      = disp_delay;
+    const float delay = len - tau - s.disp_delay;
     s.n               = static_cast<uint32_t>(floorf(delay - 1.0f));
     const float d     = delay - static_cast<float>(s.n);
     s.a               = (1.0f - d) / (1.0f + d);
@@ -24799,30 +24818,12 @@ static StringScalars string_legacy_frozen_scalars(float f0, float damping, float
     return s;
 }
 
-static void string_legacy_frozen_init(float* ring, const StringScalars& s, float pick, uint32_t seed)
+// Frozen excitation: the pick = 0 burst (noise fill, then zero mean).
+static void string_legacy_frozen_init(float* ring, const StringScalars& s, uint32_t seed)
 {
-    const uint32_t n   = s.n;
-    uint32_t       off = static_cast<uint32_t>(floorf(pick * static_cast<float>(n) + 0.5f));
-    off                = (pick > 0.0f && off < 1) ? 1 : off;
-    off                = off < n - 1 ? off : n - 1;
-    float noise_energy = 0.0f;
-    if (off > 0) {
-        for (uint32_t lane = 0; lane < 256; ++lane) {
-            float lane_energy = 0.0f;
-            for (uint32_t i = lane; i < n; i += 256) {
-                const uint32_t src        = (i + n - off) % n;
-                const float    noise_here = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
-                const float noise_prior   = static_cast<float>(string_pcg_hash(seed + src) & 0xFFFFu) / 32767.5f - 1.0f;
-                ring[i]                   = noise_here - noise_prior;
-                lane_energy += noise_here * noise_here;
-            }
-            noise_energy += lane_energy;
-        }
-    }
-    else {
-        for (uint32_t i = 0; i < n; ++i) {
-            ring[i] = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
-        }
+    const uint32_t n = s.n;
+    for (uint32_t i = 0; i < n; ++i) {
+        ring[i] = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
     }
     float sum = 0.0f;
     for (uint32_t k = 0; k < n; ++k) {
@@ -24832,21 +24833,12 @@ static void string_legacy_frozen_init(float* ring, const StringScalars& s, float
     for (uint32_t k = 0; k < n; ++k) {
         ring[k] -= mean;
     }
-    if (off > 0) {
-        float comb_energy = 0.0f;
-        for (uint32_t k = 0; k < n; ++k) {
-            comb_energy += ring[k] * ring[k];
-        }
-        const float comb_gain = comb_energy > 0.0f ? sqrtf(noise_energy / comb_energy) : 1.0f;
-        for (uint32_t k = 0; k < n; ++k) {
-            ring[k] *= comb_gain;
-        }
-    }
 }
 
-// d = 0 natural string path: current layout (with the dispersion rows at 0 and with them omitted) versus the
-// legacy 2040-slot layout. Output must be bit-identical, and the last 2034 logical ring slots must match
-// exactly across several wraps of both layouts.
+// Natural string path: current layout (with the dispersion rows at 0 and with them omitted) versus the legacy
+// 2040-slot layout, for dispersion 0 and above.  Output must be bit-identical, and the last 2034 logical ring
+// slots must match exactly across several wraps of both layouts.  The frozen side runs with one section, the only
+// count the current code has.
 static void check_string_natural_path_legacy_capacity()
 {
     static StringMirror current;
@@ -24855,64 +24847,73 @@ static void check_string_natural_path_legacy_capacity()
     static float        out_plain[6144];
     static float        out_legacy[6144];
     static StringMirror plain;
-    constexpr uint32_t  count       = 6144;
-    const float         f0s[9]      = { 22.5f, 30.0f, 55.0f, 110.0f, 261.63f, 441.0f, 880.0f, 3000.0f, 8000.0f };
-    const float         dampings[2] = { 0.5f, 0.0f };
-    const float         picks[2]    = { 0.0f, 0.5f };
-    uint32_t            compared    = 0;
+    constexpr uint32_t  count          = 6144;
+    const float         f0s[9]         = { 22.5f, 30.0f, 55.0f, 110.0f, 261.63f, 441.0f, 880.0f, 3000.0f, 8000.0f };
+    const float         dampings[2]    = { 0.5f, 0.0f };
+    const float         dispersions[3] = { 0.0f, 0.5f, 1.0f };
+    uint32_t            compared       = 0;
     for (const float f0 : f0s) {
         for (const float damping : dampings) {
-            for (const float pick : picks) {
-                const StringScalars s = string_legacy_frozen_scalars(f0, damping, 0.0f);
-                TEST(! s.silent && s.n >= 2 && s.n < string_ring_size);
-                const StringScalars now = string_mirror_scalars(f0, damping, 0.0f);
-                TEST(now.n == s.n && now.c == s.c && now.a == s.a && now.g == s.g && now.gr == s.gr);
-                memset(&current, 0, sizeof(current));
-                memset(&plain, 0, sizeof(plain));
-                string_mirror_init(&current, f0, damping, pick, 77, 1.0f, 0.0f, 4.0f);
-                string_mirror_init(&plain, f0, damping, pick, 77);
-                // The legacy side uses the frozen pre-dispersion scalars and excitation, not the current helpers.
-                memset(legacy_ring, 0, sizeof(legacy_ring));
-                string_legacy_frozen_init(legacy_ring, s, pick, 77);
-                uint32_t legacy_wr = s.n;
-                float    t1        = 0.0f;
-                float    u1        = 0.0f;
-                float    e         = 1.0f;
-                for (uint32_t i = 0; i < count; i += 256) {
-                    string_mirror_step(&current, f0, damping, 0.0f, false, out_current + i, 256, 0.0f, 4.0f);
-                    string_mirror_step(&plain, f0, damping, 0.0f, false, out_plain + i, 256);
-                    string_legacy_layout_step(legacy_ring, &legacy_wr, &t1, &u1, &e, s, out_legacy + i, 256);
+            for (const float dispersion : dispersions) {
+                {
+                    const StringScalars s = string_legacy_frozen_scalars(f0, damping, 0.0f, dispersion, 1.0f);
+                    TEST(! s.silent && s.n >= 2 && s.n < string_ring_size);
+                    const StringScalars now = string_mirror_scalars(f0, damping, 0.0f, dispersion);
+                    TEST(now.n == s.n && now.c == s.c && now.a == s.a && now.g == s.g && now.gr == s.gr &&
+                         now.disp_a == s.disp_a && now.num_sections == s.num_sections &&
+                         now.disp_delay == s.disp_delay);
+                    memset(&current, 0, sizeof(current));
+                    memset(&plain, 0, sizeof(plain));
+                    string_mirror_init(&current, f0, damping, 77, 1.0f, dispersion);
+                    // The legacy side uses the frozen scalars and excitation, not the current helpers.
+                    memset(legacy_ring, 0, sizeof(legacy_ring));
+                    string_legacy_frozen_init(legacy_ring, s, 77);
+                    uint32_t legacy_wr               = s.n;
+                    float    t1                      = 0.0f;
+                    float    u1                      = 0.0f;
+                    float    e                       = 1.0f;
+                    float    ds[string_max_sections] = {};
+                    for (uint32_t i = 0; i < count; i += 256) {
+                        string_mirror_step(&current, f0, damping, 0.0f, false, out_current + i, 256, dispersion);
+                        string_legacy_layout_step(legacy_ring, &legacy_wr, &t1, &u1, &e, ds, s, out_legacy + i, 256);
+                    }
+                    TEST(memcmp(out_current, out_legacy, sizeof(out_legacy)) == 0);
+                    if (dispersion == 0.0f) {
+                        string_mirror_init(&plain, f0, damping, 77);
+                        for (uint32_t i = 0; i < count; i += 256) {
+                            string_mirror_step(&plain, f0, damping, 0.0f, false, out_plain + i, 256);
+                        }
+                        TEST(memcmp(out_plain, out_legacy, sizeof(out_legacy)) == 0);
+                    }
+                    double energy = 0.0;
+                    for (uint32_t i = 0; i < count; ++i) {
+                        energy += static_cast<double>(out_legacy[i]) * static_cast<double>(out_legacy[i]);
+                    }
+                    TEST(energy > 0.0);
+                    TEST(current.wr == (s.n + count) % string_ring_size &&
+                         legacy_wr == (s.n + count) % string_legacy_ring_size);
+                    // Logical write j lives at (n + j) modulo the layout's ring size; compare the last 2034 writes.
+                    bool ring_same = true;
+                    for (uint32_t j = count - string_ring_size; j < count; ++j) {
+                        ring_same = ring_same && current.ring[(s.n + j) % string_ring_size] ==
+                                                     legacy_ring[(s.n + j) % string_legacy_ring_size];
+                    }
+                    TEST(ring_same);
+                    ++compared;
                 }
-                TEST(memcmp(out_current, out_legacy, sizeof(out_legacy)) == 0);
-                TEST(memcmp(out_plain, out_legacy, sizeof(out_legacy)) == 0);
-                double energy = 0.0;
-                for (uint32_t i = 0; i < count; ++i) {
-                    energy += static_cast<double>(out_legacy[i]) * static_cast<double>(out_legacy[i]);
-                }
-                TEST(energy > 0.0);
-                TEST(current.wr == (s.n + count) % string_ring_size &&
-                     legacy_wr == (s.n + count) % string_legacy_ring_size);
-                // Logical write j lives at (n + j) modulo the layout's ring size; compare the last 2034 writes.
-                bool ring_same = true;
-                for (uint32_t j = count - string_ring_size; j < count; ++j) {
-                    ring_same = ring_same && current.ring[(s.n + j) % string_ring_size] ==
-                                                 legacy_ring[(s.n + j) % string_legacy_ring_size];
-                }
-                TEST(ring_same);
-                ++compared;
             }
         }
     }
-    TEST(compared == 36);
+    TEST(compared == 54);
 }
 
 // Held note whose pitch sweeps from `start` up to `peak` (in the fallback region) and down to `target`, then
 // holds. Every sample stays finite and bounded. Returns true when the settled fundamental (measured long after
 // the sweep) is within 1 cent of the target.
-static bool string_disp_held_sweep(float start, float peak, float target, float dispersion, float sections)
+static bool string_disp_held_sweep(float start, float peak, float target, float dispersion)
 {
     memset(&string_test_mirror, 0, sizeof(string_test_mirror));
-    string_mirror_init(&string_test_mirror, start, 0.0f, 0.0f, 4321, 1.0f, dispersion, sections);
+    string_mirror_init(&string_test_mirror, start, 0.0f, 4321, 1.0f, dispersion);
     for (uint32_t block = 0; block < string_test_samples / 256; ++block) {
         float f0 = target;
         if (block < 10) {
@@ -24922,7 +24923,7 @@ static bool string_disp_held_sweep(float start, float peak, float target, float 
             f0 = peak * powf(target / peak, static_cast<float>(block - 9) / 10.0f);
         }
         float* const out = string_test_out + block * 256;
-        string_mirror_step(&string_test_mirror, f0, 0.0f, 0.0f, false, out, 256, dispersion, sections);
+        string_mirror_step(&string_test_mirror, f0, 0.0f, 0.0f, false, out, 256, dispersion);
         for (uint32_t i = 0; i < 256; ++i) {
             TEST(std::isfinite(out[i]) && fabsf(out[i]) < 8.0f);
         }
@@ -24938,64 +24939,162 @@ static bool string_disp_held_sweep(float start, float peak, float target, float 
            fabs(1200.0 * log2(f1 / static_cast<double>(target))) < 1.0;
 }
 
-// Renders a fresh note and measures the stretch (cents over k f1) of partials 2..4 without consulting the oracle:
-// a coarse scan around each ideal harmonic position, then a bracketed refinement. Returns false when f1 or a
-// partial did not land on a valid peak.
-static bool string_disp_measure_stretch(float f0, float dispersion, float sections, double* stretch)
+// Inertness of the stored section count: the shader always runs one section, so renders made with the stored
+// count at 1 and at 6 must be bit-identical.  Mutation 6 reads the stored count instead of the constant 1, which
+// makes the two renders differ.
+static bool string_disp_sections_inert()
 {
-    memset(&string_test_mirror, 0, sizeof(string_test_mirror));
-    string_mirror_init(&string_test_mirror, f0, 0.0f, 0.0f, 4321, 1.0f, dispersion, sections);
-    for (uint32_t i = 0; i < string_test_samples; i += 256) {
-        string_mirror_step(&string_test_mirror, f0, 0.0f, 0.0f, false, string_test_out + i, 256, dispersion, sections);
-    }
-    const double f1_width = fmax(0.4, 0.006 * static_cast<double>(f0));
-    const double f1       = string_peak_freq(string_test_out, 11025, 32768, static_cast<double>(f0), f1_width);
-    bool         valid    = string_peak_valid(f1, static_cast<double>(f0), f1_width);
-    for (int k = 2; k <= 4; ++k) {
-        const double center   = k * f1;
-        double       best     = center;
-        double       best_amp = -1.0;
-        for (double f = center - 0.3 * static_cast<double>(f0); f <= center + 0.3 * static_cast<double>(f0); f += 0.5) {
-            const double amp = string_amp_at(string_test_out, 11025, 32768, f);
-            if (amp > best_amp) {
-                best_amp = amp;
-                best     = f;
-            }
-        }
-        const double peak = string_peak_freq(string_test_out, 11025, 32768, best, 0.5);
-        valid             = valid && std::isfinite(peak);
-        stretch[k]        = 1200.0 * log2(peak / center);
-    }
-    return valid;
-}
-
-// Cross-count equality: with the per-count normalisation the stretch of partials 2..4 at fixed d and f0 is nearly
-// the same for 1..6 sections, with only a small systematic rise at the higher partials. Mutation 6 breaks it.
-static bool string_disp_count_invariant()
-{
-    const float pitches[3] = { 55.0f, 110.0f, 220.0f };
-    bool        ok         = true;
+    static float render_one[4096];
+    static float render_six[4096];
+    const float  pitches[3] = { 55.0f, 110.0f, 220.0f };
+    bool         ok         = true;
     for (const float f0 : pitches) {
-        double lowest[5]  = { 1e9, 1e9, 1e9, 1e9, 1e9 };
-        double highest[5] = { -1e9, -1e9, -1e9, -1e9, -1e9 };
-        double previous4  = -1e9;
-        double first4     = 0.0;
-        for (uint32_t sections = 1; sections <= 6; ++sections) {
-            double stretch[5] = {};
-            ok                = string_disp_measure_stretch(f0, 1.0f, static_cast<float>(sections), stretch) && ok;
-            for (int k = 2; k <= 4; ++k) {
-                lowest[k]  = fmin(lowest[k], stretch[k]);
-                highest[k] = fmax(highest[k], stretch[k]);
+        for (uint32_t pass = 0; pass < 2; ++pass) {
+            string_test_stored_sections = pass == 0 ? 1.0f : 6.0f;
+            float* const out            = pass == 0 ? render_one : render_six;
+            memset(&string_test_mirror, 0, sizeof(string_test_mirror));
+            string_mirror_init(&string_test_mirror, f0, 0.0f, 4321, 1.0f, 1.0f);
+            for (uint32_t i = 0; i < 4096; i += 256) {
+                string_mirror_step(&string_test_mirror, f0, 0.0f, 0.0f, false, out + i, 256, 1.0f);
             }
-            // Slight, systematic, measurable: partial 4 rises with every added section.
-            ok        = stretch[4] > previous4 + 0.1 && ok;
-            previous4 = stretch[4];
-            first4    = sections == 1 ? stretch[4] : first4;
-            ok        = (sections < 6 || (stretch[4] - first4 > 2.0 && stretch[4] - first4 < 5.0)) && ok;
         }
-        ok = highest[2] - lowest[2] < 0.6 && highest[3] - lowest[3] < 1.8 && highest[4] - lowest[4] < 4.2 && ok;
+        string_test_stored_sections = 1.0f;
+        ok                          = memcmp(render_one, render_six, sizeof(render_one)) == 0 && ok;
     }
     return ok;
+}
+
+// Release damping curve: 0.025 * 2^(x * 6.0588937) is 0.05 / T60 with T60 = 2.0 * 0.015^x, so x = 0 rings for
+// about 2.0 s, x = 0.5 for about 0.245 s and x = 1 chokes in about 0.03 s.  Inputs outside [0, 1] clamp and NaN
+// maps to 0.
+static void check_string_release_damping_curve()
+{
+    const double ln2            = 0.6931471805599453;
+    const double neg_log2_ratio = -log(0.015) / ln2;
+    TEST(Synth::string_release_damping_curve(0.0f) == 0.025f);
+    TEST(fabs(static_cast<double>(Synth::string_release_damping_curve(1.0f)) - 0.05 / 0.03) < 0.003);
+    TEST(fabs(static_cast<double>(Synth::string_release_damping_curve(0.5f)) - 0.05 / (2.0 * sqrt(0.015))) < 0.002);
+    for (uint32_t i = 0; i <= 100; ++i) {
+        const double x        = static_cast<double>(i) / 100.0;
+        const double expected = 0.025 * exp2(x * neg_log2_ratio);
+        const double actual   = static_cast<double>(Synth::string_release_damping_curve(static_cast<float>(x)));
+        TEST(fabs(actual / expected - 1.0) < 0.01); // mstd::exp2 is a cubic approximation
+    }
+    float previous = Synth::string_release_damping_curve(0.0f);
+    for (uint32_t i = 1; i <= 1000; ++i) {
+        const float value = Synth::string_release_damping_curve(static_cast<float>(i) / 1000.0f);
+        TEST(value > previous);
+        previous = value;
+    }
+    TEST(Synth::string_release_damping_curve(-0.5f) == Synth::string_release_damping_curve(0.0f));
+    TEST(Synth::string_release_damping_curve(-INFINITY) == Synth::string_release_damping_curve(0.0f));
+    TEST(Synth::string_release_damping_curve(1.5f) == Synth::string_release_damping_curve(1.0f));
+    TEST(Synth::string_release_damping_curve(INFINITY) == Synth::string_release_damping_curve(1.0f));
+    TEST(Synth::string_release_damping_curve(NAN) == Synth::string_release_damping_curve(0.0f));
+}
+
+// Dispersion as a modulation target: a slow LFO sweeps the per-block dispersion between 0.05 and 0.95 over a
+// 4 s period.  The retune subtracts the cascade phase delay every block, so the fundamental holds at the
+// sampled points while the 4th-partial stretch follows the modulation.
+static void check_string_dispersion_modulation()
+{
+    constexpr float    f0            = 110.0f;
+    constexpr uint32_t blocks        = string_test_samples / 256;
+    const auto         dispersion_at = [](uint32_t block) {
+        const double t = static_cast<double>(block) * 256.0 / 44100.0;
+        return static_cast<float>(0.5 + 0.45 * sin(2.0 * M_PI * t / 4.0));
+    };
+    memset(&string_test_mirror, 0, sizeof(string_test_mirror));
+    string_mirror_init(&string_test_mirror, f0, 0.0f, 4321, 1.0f, dispersion_at(0));
+    for (uint32_t b = 0; b < blocks; ++b) {
+        string_mirror_step(&string_test_mirror,
+                           f0,
+                           0.0f,
+                           0.0f,
+                           false,
+                           string_test_out + b * 256,
+                           256,
+                           dispersion_at(b));
+    }
+    for (uint32_t i = 0; i < string_test_samples; ++i) {
+        TEST(std::isfinite(string_test_out[i]));
+    }
+    // Windows centred on t = 0.6, 1.0 (LFO peak), 2.0, 3.0 (LFO trough) seconds.
+    const uint32_t window     = 16384;
+    const double   centres[4] = { 0.6, 1.0, 2.0, 3.0 };
+    double         stretch[4] = {};
+    for (uint32_t w = 0; w < 4; ++w) {
+        const uint32_t start  = static_cast<uint32_t>(centres[w] * 44100.0) - window / 2;
+        double         energy = 0.0;
+        for (uint32_t i = start; i < start + window; ++i) {
+            energy += static_cast<double>(string_test_out[i]) * static_cast<double>(string_test_out[i]);
+        }
+        TEST(energy > 1.0e-3);
+        const double f1 = string_peak_freq(string_test_out, start, window, static_cast<double>(f0), 0.66);
+        TEST(fabs(1200.0 * log2(f1 / static_cast<double>(f0))) < 3.0);
+        const double p4 = string_peak_freq(string_test_out, start, window, 4.0 * f1, 8.0);
+        stretch[w]      = 1200.0 * log2(p4 / (4.0 * f1));
+    }
+    // d is about 0.95 at t = 1 s and 0.05 at t = 3 s: about 14 cents (single section, 15 cents at d = 1)
+    // versus about 1 cent on the 4th partial.
+    TEST(stretch[1] > stretch[3] + 8.0);
+    TEST(stretch[1] > 10.0);
+    TEST(stretch[3] < 6.0);
+    TEST(stretch[1] > stretch[0] && stretch[0] > stretch[3]);
+}
+
+// A routed String Dispersion (modulation block under the same JSON key) round-trips as an object and an
+// unrouted one as a plain number.
+static void check_string_dispersion_routed_codec()
+{
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank         = *bank_storage;
+    Synth::Instrument                                  instrument   = {};
+    build_binding_fixture(&bank, &instrument);
+    Synth::Oscillator& layer         = instrument.layers[0];
+    layer.osc_type[0]                = Synth::WaveType::string_wave;
+    layer.fir_band_count             = 1;
+    Synth::TargetBinding& routed     = layer.targets[Synth::mod_string_dispersion];
+    routed.base_value                = 0.4f;
+    routed.envelope_depth            = 1.0f;
+    routed.lfo_desc_id               = 1;
+    routed.lfo_op                    = Synth::SourceOp::add;
+    routed.lfo_depth                 = 0.25f;
+    bank.bank.instruments.entries[0] = instrument;
+    TEST(Synth::validate_instrument_bank(&bank.bank));
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&payload)[Synth::library_payload_max] = payload_storage->elements;
+    uint32_t length                             = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
+    TEST(length > 0);
+    TEST(strstr(payload, "\"string_dispersion\":{") != nullptr);
+    const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& decoded = *decoded_storage;
+    memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
+    TEST(Synth::decode_editor_bank_json(payload, length, &decoded));
+    const Synth::Oscillator& dec =
+        decoded.bank.instruments.entries[decoded.bank.channel_zones[0][0].instrument].layers[0];
+    TEST(dec.targets[Synth::mod_string_dispersion].base_value == 0.4f);
+    TEST(dec.targets[Synth::mod_string_dispersion].lfo_desc_id == 1);
+    TEST(dec.targets[Synth::mod_string_dispersion].lfo_depth == 0.25f);
+    // Unrouted again: the same value encodes as a number, and the object form is gone.
+    bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_string_dispersion]            = {};
+    bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_string_dispersion].base_value = 0.4f;
+    length = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
+    TEST(length > 0);
+    TEST(strstr(payload, "\"string_dispersion\":0.4") != nullptr);
+    TEST(strstr(payload, "\"string_dispersion\":{") == nullptr);
+    memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
+    TEST(Synth::decode_editor_bank_json(payload, length, &decoded));
+    const Synth::TargetBinding& plain = decoded.bank.instruments.entries[decoded.bank.channel_zones[0][0].instrument]
+                                            .layers[0]
+                                            .targets[Synth::mod_string_dispersion];
+    TEST(plain.base_value == 0.4f && plain.lfo_desc_id == 0 && plain.num_inputs == 0);
+    // Routed with an out-of-range base is refused by the validator.
+    bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_string_dispersion]            = routed;
+    bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_string_dispersion].base_value = 1.5f;
+    TEST(! Synth::validate_instrument_bank(&bank.bank));
 }
 
 static void check_string_mirror_dispersion()
@@ -25007,127 +25106,113 @@ static void check_string_mirror_dispersion()
     static float        out_b[2048];
     static float        out_l[2048];
     static float        ring_l[string_ring_size];
-    // (a) d = 0 is bit-identical to the frozen legacy loop for every sections value, pick off and on.
-    // At damping 0.5: 441 Hz gives N = 98 and 400 Hz N = 108 (even), 420 Hz gives N = 103 (odd).
+    // (a) d = 0 is bit-identical to the frozen legacy loop.  At damping 0.5: 441 Hz gives N = 98 and 400 Hz N = 108
+    // (even), 420 Hz gives N = 103 (odd).
     const float legacy_freqs[3] = { 441.0f, 400.0f, 420.0f };
     for (const float f0 : legacy_freqs) {
         const StringScalars plain = string_mirror_scalars(f0, 0.5f, 0.0f);
         TEST(plain.n % 2 == (f0 == 420.0f ? 1u : 0u));
-        for (uint32_t pick = 0; pick < 2; ++pick) {
-            for (uint32_t sections = 1; sections <= 6; ++sections) {
-                const StringScalars gated = string_mirror_scalars(f0, 0.5f, 0.0f, 0.0f, static_cast<float>(sections));
-                TEST(gated.num_sections == 0 && gated.disp_delay == 0.0f && gated.n == plain.n && gated.a == plain.a);
-                memset(&a, 0, sizeof(a));
-                memset(&b, 0, sizeof(b));
-                memset(&legacy, 0, sizeof(legacy));
-                const float p = pick ? 0.5f : 0.0f;
-                string_mirror_init(&a, f0, 0.5f, p, 55, 1.0f, 0.0f, static_cast<float>(sections));
-                string_mirror_init(&b, f0, 0.5f, p, 55);
-                string_mirror_init(&legacy, f0, 0.5f, p, 55);
-                string_mirror_step(&a, f0, 0.5f, 0.0f, false, out_a, 2048, 0.0f, static_cast<float>(sections));
-                string_mirror_step(&b, f0, 0.5f, 0.0f, false, out_b, 2048);
-                for (uint32_t i = 0; i < 2048; i += 256) {
-                    string_legacy_step(&legacy, f0, 0.5f, out_l + i, 256);
-                }
-                TEST(memcmp(out_a, out_l, sizeof(out_a)) == 0 && memcmp(out_b, out_l, sizeof(out_b)) == 0);
-                memcpy(ring_l, legacy.ring, sizeof(ring_l));
-                TEST(memcmp(a.ring, ring_l, sizeof(ring_l)) == 0 && memcmp(b.ring, ring_l, sizeof(ring_l)) == 0);
-                TEST(a.ds[0] == 0.0f && a.ds[5] == 0.0f);
-            }
+        const StringScalars gated = string_mirror_scalars(f0, 0.5f, 0.0f, 0.0f);
+        TEST(gated.num_sections == 0 && gated.disp_delay == 0.0f && gated.n == plain.n && gated.a == plain.a);
+        memset(&a, 0, sizeof(a));
+        memset(&b, 0, sizeof(b));
+        memset(&legacy, 0, sizeof(legacy));
+        string_mirror_init(&a, f0, 0.5f, 55, 1.0f, 0.0f);
+        string_mirror_init(&b, f0, 0.5f, 55);
+        string_mirror_init(&legacy, f0, 0.5f, 55);
+        string_mirror_step(&a, f0, 0.5f, 0.0f, false, out_a, 2048, 0.0f);
+        string_mirror_step(&b, f0, 0.5f, 0.0f, false, out_b, 2048);
+        for (uint32_t i = 0; i < 2048; i += 256) {
+            string_legacy_step(&legacy, f0, 0.5f, out_l + i, 256);
         }
+        TEST(memcmp(out_a, out_l, sizeof(out_a)) == 0 && memcmp(out_b, out_l, sizeof(out_b)) == 0);
+        memcpy(ring_l, legacy.ring, sizeof(ring_l));
+        TEST(memcmp(a.ring, ring_l, sizeof(ring_l)) == 0 && memcmp(b.ring, ring_l, sizeof(ring_l)) == 0);
+        TEST(a.ds[0] == 0.0f);
     }
-    // (b) Tuning and (c) stretch vs the oracle, over d x sections x f0; the 4th-partial stretch is
-    // also near 18 cents * d (4 sections) and pitch-invariant across [55, 880] Hz.
-    const float disps[4]          = { 0.01f, 0.25f, 0.5f, 1.0f };
-    const float section_counts[3] = { 1.0f, 4.0f, 6.0f };
+    // (b) Tuning and (c) stretch vs the oracle, over d x f0; the 4th-partial stretch is also near 15 cents * d and
+    // pitch-invariant across [55, 880] Hz.
+    const float disps[4]    = { 0.01f, 0.25f, 0.5f, 1.0f };
     const float pitches[10] = { 55.0f, 65.41f, 82.41f, 110.0f, 164.81f, 220.0f, 329.63f, 440.0f, 659.26f, 880.0f };
     for (const float d : disps) {
-        for (const float sections : section_counts) {
-            double lowest   = 1e9;
-            double highest  = -1e9;
-            double lowest2  = 1e9;
-            double highest2 = -1e9;
-            double lowest3  = 1e9;
-            double highest3 = -1e9;
-            for (const float f0 : pitches) {
-                double          stretch = 0.0;
-                StringDispExtra extra   = {};
-                TEST(string_disp_case(f0, d, sections, &stretch, &extra));
-                TEST(stretch > 0.0 && extra.stretch_p2 > 0.0 && extra.stretch_p3 > 0.0);
-                TEST(stretch > extra.stretch_p3 && extra.stretch_p3 > extra.stretch_p2);
-                // Gate boundary just above zero: the stretch is small, positive and matches the oracle.
-                if (d == 0.01f) {
-                    // Small and positive overall (18 cents at d = 1). Above 440 Hz the fractional-allpass
-                    // re-quantisation of the loop delay (measured up to +-3 cents) swamps the increment, so the
-                    // increment over the d = 0 oracle is only bounded below that.
-                    TEST(stretch < 4.0);
-                    if (f0 <= 440.0f) {
-                        double flat[5];
-                        double tiny[5];
-                        string_disp_oracle(static_cast<double>(f0), 0.0, 0.0, 0.0, flat);
-                        string_disp_oracle(static_cast<double>(f0), 0.01, static_cast<double>(sections), 0.0, tiny);
-                        const double increment = 1200.0 * log2((tiny[4] / tiny[1]) / (flat[4] / flat[1]));
-                        TEST(increment > 0.05 && increment < 0.4 * static_cast<double>(sections));
-                    }
-                    TEST(fabs(stretch - extra.oracle_stretch) < 1.0);
+        double lowest   = 1e9;
+        double highest  = -1e9;
+        double lowest2  = 1e9;
+        double highest2 = -1e9;
+        double lowest3  = 1e9;
+        double highest3 = -1e9;
+        for (const float f0 : pitches) {
+            double          stretch = 0.0;
+            StringDispExtra extra   = {};
+            TEST(string_disp_case(f0, d, &stretch, &extra));
+            TEST(stretch > 0.0 && extra.stretch_p2 > 0.0 && extra.stretch_p3 > 0.0);
+            TEST(stretch > extra.stretch_p3 && extra.stretch_p3 > extra.stretch_p2);
+            // Gate boundary just above zero: the stretch is small, positive and matches the oracle.
+            if (d == 0.01f) {
+                // Small and positive overall.  Above 440 Hz the fractional-allpass re-quantization of the loop delay
+                // (measured up to +-3 cents) swamps the increment, so the increment over the d = 0 oracle is only
+                // bounded below that.
+                TEST(stretch < 4.0);
+                if (f0 <= 440.0f) {
+                    double flat[5];
+                    double tiny[5];
+                    string_disp_oracle(static_cast<double>(f0), 0.0, 0.0, flat);
+                    string_disp_oracle(static_cast<double>(f0), 0.01, 0.0, tiny);
+                    const double increment = 1200.0 * log2((tiny[4] / tiny[1]) / (flat[4] / flat[1]));
+                    TEST(increment > 0.05 && increment < 0.4);
                 }
-                lowest   = fmin(lowest, stretch);
-                highest  = fmax(highest, stretch);
-                lowest2  = fmin(lowest2, extra.stretch_p2);
-                highest2 = fmax(highest2, extra.stretch_p2);
-                lowest3  = fmin(lowest3, extra.stretch_p3);
-                highest3 = fmax(highest3, extra.stretch_p3);
-                if (sections == 4.0f) {
-                    TEST(fabs(stretch - 18.0 * static_cast<double>(d)) < 6.0);
-                }
+                TEST(fabs(stretch - extra.oracle_stretch) < 1.0);
             }
-            TEST(highest - lowest < 4.5);
-            // Partials 2 and 3 stretch less (about (k^2 - 1) / 15 of partial 4) and stay pitch invariant.
-            TEST(highest2 - lowest2 < 1.0);
-            TEST(highest3 - lowest3 < 2.5);
+            lowest   = fmin(lowest, stretch);
+            highest  = fmax(highest, stretch);
+            lowest2  = fmin(lowest2, extra.stretch_p2);
+            highest2 = fmax(highest2, extra.stretch_p2);
+            lowest3  = fmin(lowest3, extra.stretch_p3);
+            highest3 = fmax(highest3, extra.stretch_p3);
+            if (d == 1.0f) {
+                TEST(fabs(stretch - 15.0 * static_cast<double>(d)) < 6.0);
+            }
         }
+        TEST(highest - lowest < 4.5);
+        // Partials 2 and 3 stretch less (about (k^2 - 1) / 15 of partial 4) and stay pitch invariant.
+        TEST(highest2 - lowest2 < 1.0);
+        TEST(highest3 - lowest3 < 2.5);
     }
-    // (d) The sections knob does not scale the strength: at fixed d and f0 the stretch of partials 2..4 is nearly
-    // the same for 1..6 sections (the residual is the higher-order growth of the cascade's curvature with the
-    // section count, a small systematic rise at the higher partials), and every count stays in tune.
-    for (uint32_t sections = 1; sections <= 6; ++sections) {
-        double stretch = 0.0;
-        TEST(string_disp_case(110.0f, 1.0f, static_cast<float>(sections), &stretch));
-    }
-    TEST(string_disp_count_invariant());
-    // (d2) Mutation 6 (no division by the section count) makes the strength scale with the count.
+    // (d) The stored section count is inert (mutation 6 breaks it).
+    TEST(string_disp_sections_inert());
     string_disp_mutation = 6;
-    TEST(! string_disp_count_invariant());
-    string_disp_mutation = 0;
+    TEST(! string_disp_sections_inert());
+    string_disp_mutation        = 0;
+    string_test_stored_sections = 1.0f;
 
-    // (e) Fallback sweep: scalars stay in domain over a wide f0 range, all counts are used unreduced
-    // inside [55, 880] Hz, and a held-note pitch sweep up and down stays finite, bounded and audible.
+    // (e) Fallback sweep: scalars stay in domain over a wide f0 range, the single section is used unreduced inside
+    // [55, 880] Hz, and a held-note pitch sweep up and down stays finite, bounded and audible.
     for (float f0 = 22.0f; f0 < 8000.0f; f0 *= 1.01f) {
         for (const float d : disps) {
-            const StringScalars s = string_mirror_scalars(f0, 0.5f, 0.0f, d, 6.0f);
-            TEST(std::isfinite(s.disp_a) && s.num_sections <= 6 && s.n >= 2 && s.n < string_ring_size);
+            const StringScalars s = string_mirror_scalars(f0, 0.5f, 0.0f, d);
+            TEST(std::isfinite(s.disp_a) && s.num_sections <= 1 && s.n >= 2 && s.n < string_ring_size);
             TEST(s.disp_delay >= 0.0f && std::isfinite(s.a) && fabsf(s.a) < 1.0f);
             if (f0 >= 55.0f && f0 <= 880.0f) {
-                TEST(s.num_sections == 6);
+                TEST(s.num_sections == 1);
             }
         }
     }
     memset(&a, 0, sizeof(a));
-    string_mirror_init(&a, 880.0f, 0.5f, 0.0f, 7, 1.0f, 1.0f, 6.0f);
+    string_mirror_init(&a, 880.0f, 0.5f, 7, 1.0f, 1.0f);
     double tail_energy = 0.0;
     for (uint32_t block = 0; block < 400; ++block) {
         const float phase = static_cast<float>(block < 200 ? block : 400 - block) / 200.0f;
         const float f0    = 880.0f * powf(3000.0f / 880.0f, phase);
-        string_mirror_step(&a, f0, 0.5f, 0.0f, false, out_a, 256, 1.0f, 6.0f);
+        string_mirror_step(&a, f0, 0.5f, 0.0f, false, out_a, 256, 1.0f);
         for (uint32_t i = 0; i < 256; ++i) {
             TEST(std::isfinite(out_a[i]) && fabsf(out_a[i]) < 8.0f);
             tail_energy += block >= 399 ? static_cast<double>(out_a[i]) * static_cast<double>(out_a[i]) : 0.0;
         }
     }
     TEST(tail_energy > 0.0);
-    // Settled tuning after fallback: the note is held through a sweep into the fallback region (where cascade
-    // sections are dropped) and back; once settled, the fundamental is in tune whenever the resulting pitch is
-    // inside [55, 880] Hz. Outside that domain only the finite/bounded checks in the helper apply.
+    // Settled tuning after fallback: the note is held through a sweep into the fallback region (where the section is
+    // dropped) and back; once settled, the fundamental is in tune whenever the resulting pitch is inside [55, 880] Hz.
+    // Outside that domain only the finite/bounded checks in the helper apply.
     {
         const float sweeps[6][3] = { { 880.0f, 3000.0f, 880.0f },  { 55.0f, 3000.0f, 440.0f },
                                      { 220.0f, 8000.0f, 220.0f },  { 880.0f, 1500.0f, 55.0f },
@@ -25136,22 +25221,22 @@ static void check_string_mirror_dispersion()
             for (const float d : disps) {
                 const bool in_domain = sweep[2] >= 55.0f && sweep[2] <= 880.0f;
                 if (in_domain) {
-                    TEST(string_disp_held_sweep(sweep[0], sweep[1], sweep[2], d, 6.0f));
+                    TEST(string_disp_held_sweep(sweep[0], sweep[1], sweep[2], d));
                 }
                 else {
-                    string_disp_held_sweep(sweep[0], sweep[1], sweep[2], d, 6.0f);
+                    string_disp_held_sweep(sweep[0], sweep[1], sweep[2], d);
                 }
             }
         }
     }
-    // (f) Mutations must each fail the tuning / oracle-stretch case at some pitch.
+    // (f) Mutations 1, 2, 3 and 5 must each fail the tuning / oracle-stretch case at some pitch.
     const float mutation_pitches[3] = { 55.0f, 220.0f, 880.0f };
-    for (int mutation = 1; mutation <= 6; ++mutation) {
+    for (const int mutation : { 1, 2, 3, 5 }) {
         string_disp_mutation = mutation;
         bool all_ok          = true;
         for (const float f0 : mutation_pitches) {
             double stretch = 0.0;
-            all_ok         = string_disp_case(f0, 1.0f, 4.0f, &stretch) && all_ok;
+            all_ok         = string_disp_case(f0, 1.0f, &stretch) && all_ok;
         }
         string_disp_mutation = 0;
         TEST(! all_ok);
@@ -25164,18 +25249,18 @@ static void string_mirror_m2_regressions_b()
     check_string_mirror_release_zero_rings();
     check_string_mirror_release_lifetime();
     check_string_mirror_sustain_holds();
-    check_string_mirror_pick_comb();
     check_string_mirror_dispersion();
+    check_string_release_damping_curve();
+    check_string_dispersion_modulation();
+    check_string_dispersion_routed_codec();
     check_string_natural_path_legacy_capacity();
     check_string_mirror_brightness();
-    check_string_mirror_pick_circular();
     check_string_mirror_fm_ring_read();
     check_string_mirror_ring_read_edges();
     check_string_fm_layout_characterization();
     check_string_mirror_nan_guard();
     check_string_mirror_damping_clamp();
     check_string_mirror_silent_onset_init();
-    check_string_mirror_pick_tiny();
     check_string_slot_grammar_pins();
 }
 
@@ -30714,9 +30799,9 @@ int main()
         TEST(strncmp(graph.node(mapping.osc_nodes[0]).slots.entries[1].list_options[1],
                      "sawtooth",
                      sizeof(graph.node(mapping.osc_nodes[0]).slots.entries[1].list_options[0])) == 0);
-        TEST(strncmp(graph.node(mapping.osc_nodes[0]).slots.entries[32].list_options[2],
+        TEST(strncmp(graph.node(mapping.osc_nodes[0]).slots.entries[42].list_options[2],
                      "sawtooth",
-                     sizeof(graph.node(mapping.osc_nodes[0]).slots.entries[32].list_options[0])) == 0);
+                     sizeof(graph.node(mapping.osc_nodes[0]).slots.entries[42].list_options[0])) == 0);
         Sculptor::PropertyValue saw;
         saw.list_index = 1;
         graph.set_slot_value(mapping.osc_nodes[0], 1, saw); // "sawtooth"
@@ -31431,7 +31516,7 @@ int main()
         }
 
         // Overfull implied node projection: the fully-wired fixture implies 304 nodes;
-        // 99 detached records push it past 402, 98 land exactly on 402.
+        // 113 detached records push it past 416, 112 land exactly on 416.
         const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
         Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
         const std::unique_ptr<Synth::InstrumentEditorBank> max_bank_storage =
@@ -31441,7 +31526,7 @@ int main()
         uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
         uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
-        // The max_nodes pool (402) leaves the four-target fixture's 66
+        // The max_nodes pool (416) leaves the four-target fixture's 66
         // implied nodes too far below the pool for the 120-record detached cap to
         // reach the per-zone node-pool refusal, so this test alone wires fifteen
         // more targets (FM ratio and the fourteen band targets) with full
@@ -31505,12 +31590,12 @@ int main()
         max_bank.bank.instruments.entries[0]         = instrument;
         max_bank.bank.channel_zones[0][0].start_note = 1;
         max_bank.bank.channel_zones[0][0].instrument = 0;
-        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 99, 2, 1, 0, 0);
+        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 113, 2, 1, 0, 0);
         TEST(! decode_bank_with_editor_section(max_bank, editor_json, &restored));
-        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 98, 2, 1, 0, 0);
+        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 112, 2, 1, 0, 0);
         TEST(decode_bank_with_editor_section(max_bank, editor_json, &restored));
         // The accepted boundary fills the node pool exactly: the projection
-        // still succeeds at 304 + 98 = 402 nodes.
+        // still succeeds at 304 + 112 = 416 nodes.
         const std::unique_ptr<Sculptor::Graph> boundary_graph_storage = std::make_unique<Sculptor::Graph>();
         Sculptor::Graph&                       boundary_graph         = *boundary_graph_storage;
         Sculptor::OscGraphMapping              boundary_mapping       = {};
@@ -37886,7 +37971,7 @@ int main()
             check_editor_round_trip_capacity_failures();
             check_unrepresented_layout_refusal();
             check_decoded_fm_lfo_binding_survives_compile();
-            check_string_pick_trap_decode_compile();
+            check_string_brightness_trap_decode_compile();
             check_renamed_oscillator_persists_through_save_load_and_reprojection();
             check_exactly_32_byte_oscillator_name_round_trips();
             check_empty_rename_is_a_no_op();

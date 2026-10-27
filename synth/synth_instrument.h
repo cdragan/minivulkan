@@ -42,6 +42,7 @@ enum ModTarget : uint8_t {
     mod_fir_band3_slope,
     mod_string_damping,
     mod_string_release_damping,
+    mod_string_dispersion,
     num_mod_targets
 };
 
@@ -130,15 +131,11 @@ struct Oscillator {
     FilterType    fir_type          = fir_off;
     uint8_t       fir_band_count    = 1;    // Bandpass bands 1..4; band 0 reuses mod_fir_spread/slope.
     TargetBinding targets[num_mod_targets]; // One binding per modulated quantity (volume/panning/etc.)
-    // String wave pick position 0..1 (0 = no comb).  A plain scalar, not a mod target.
-    float string_pick = 0.0f;
     // String wave pluck brightness 0..1: 1 leaves the excitation burst unfiltered (the default), lower values
     // low-pass it for a warmer pluck.  A plain scalar, not a mod target.
     float string_brightness = 1.0f;
-    // String wave dispersion 0..1: stiff-string inharmonicity, strongest on low notes.  0 turns the effect off
-    // (the default).  A plain scalar, not a mod target.
-    float string_dispersion = 0.0f;
-    // Number of allpass sections shaping the dispersion, an integer value 1..6.  Ignored while dispersion is 0.
+    // Dispersion section count, an integer value 1..6.  Stored, validated and serialized for a future re-enable,
+    // but inert: the synth always runs a single section.
     float string_dispersion_sections = 4.0f;
 };
 

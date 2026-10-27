@@ -51,12 +51,10 @@ struct OscillatorParams {
     uint  note_seed;                  // Per-note constant: the note-on noise counter, never advanced
     float pad_tilt[2];                // Pad spectral tilt: harmonic exponent is 1 + clamp(tilt, -1, 1)
     uint  string_state_offs;          // String state region in floats: header words 0..13, then the ring
-    float string_pick;                // String pick position [0..1], comb applied at note-on
     float string_damping;             // String damping [0..1], higher = shorter decay
-    float string_release_damping;     // String release damping [0..1]
+    float string_release_damping;     // Effective release damping 0.025..1.667: 0.05 / T60 in s, curved from the knob
     float string_brightness;          // String pluck brightness [0..1], 1 = unfiltered burst, applied at note-on
     float string_dispersion;          // String dispersion [0..1], 0 = off (the plain string, bit-identical)
-    float string_dispersion_sections; // String dispersion allpass section count [1..6], ignored at dispersion 0
 };
 
 layout(binding = 0) buffer data_buf { float data[]; };
@@ -214,7 +212,6 @@ float oscillator(uint osc_type, float phase, float duty, float tilt, uint noise_
 
 const uint   string_ring_size    = 2034;
 const uint   string_header_words = 14;
-const uint   string_max_sections = 6u;
 const float  string_min_freq     = 22.0;
 const float  string_dispersion_strength = 0.05863;
 shared float string_block_out[256];
@@ -261,26 +258,23 @@ float string_ring_read(uint ring_offs, float loop_phase)
 }
 
 // Karplus-Strong plucked string, run once per 256-sample block.
-// The ring holds one loop of excitation: a noise burst, optionally combed (circularly, around
-// the ring period) by the pick position and rescaled to the noise RMS, then optionally softened
+// The ring holds one loop of excitation: a zero-mean noise burst, optionally softened
 // by a circular one-pole lowpass (brightness below 1) that keeps the burst RMS.
 // Each sample is read delay_whole samples behind the write point, then damped by a one-pole
 // lowpass (string_damping_coeff) and tuned to the fractional delay by an allpass
 // (string_allpass_coeff).  string_loop_gain sets the decay to the target T60.
 // string_release_gain glides toward release_gain_target on note release to shorten the tail.
-// Dispersion (stiff-string inharmonicity) adds up to 6 identical first-order allpass sections after the
-// tuning allpass.  Their phase delay at f0 is subtracted from the loop delay so the pitch stays put,
-// while their delay falls with frequency, which lifts the partials.  Dispersion 0 skips all of it.
+// Dispersion (stiff-string inharmonicity) adds one first-order allpass section after the
+// tuning allpass.  Its phase delay at f0 is subtracted from the loop delay so the pitch stays put,
+// while its delay falls with frequency, which lifts the partials.  Dispersion 0 skips all of it.
 // Header layout: 0 write pos, 1 prev lowpass, 2 prev allpass, 3 release gain, 4 loop length,
-// 5-6 seed tag, 7-12 dispersion section states, 13 unused.
+// 5-6 seed tag, 7 dispersion section state, 8-13 unused.
 void string_pass(uint  base,
                  float f0,
                  float damping,
                  float release_damping,
-                 float pick,
                  float brightness,
                  float dispersion,
-                 float dispersion_sections,
                  bool  release,
                  uint  note_seed)
 {
@@ -310,25 +304,22 @@ void string_pass(uint  base,
     const float string_loop_gain = loop_gain_raw < 0.9999 ? loop_gain_raw : 0.9999;
 
     // Dispersion block-rate setup, gated off entirely at 0 (a zero-coefficient section still delays one sample).
-    // The total curvature is count invariant (each of N sections carries 1/N of it), so the sections knob
-    // trades smoothness for cost without scaling the strength.  The count falls back from the requested value
-    // to the first one that leaves at least 3 samples of loop delay, or to no cascade at all.
-    float disp_coeff   = 0.0;
-    float disp_delay   = 0.0;
-    uint  num_sections = 0u;
+    // The cascade is a single allpass section (the section count is frozen at one).  It falls back to no section
+    // at all when it would leave less than 3 samples of loop delay.
+    // Dispersion is modulatable: a modulated value changes the timbre every block while the retune below
+    // (loop_length minus the section delay) holds the fundamental.
+    float disp_coeff  = 0.0;
+    float disp_delay  = 0.0;
+    bool  disp_active = false;
     if (dispersion > 0.0) {
-        const uint requested = uint(clamp(floor(dispersion_sections + 0.5), 1.0, float(string_max_sections)));
-        for (uint count = requested; count > 0u; count -= 1u) {
-            const float disp_q = string_dispersion_strength * dispersion / (float(count) * (omega * omega * omega));
-            const float disp_r = string_dispersion_ratio(disp_q);
-            const float count_coeff = (1.0 - disp_r) / (1.0 + disp_r);
-            const float count_delay = float(count) * string_allpass_phase_delay(count_coeff, omega);
-            if (loop_length - lowpass_delay - count_delay >= 3.0) {
-                disp_coeff   = count_coeff;
-                disp_delay   = count_delay;
-                num_sections = count;
-                break;
-            }
+        const float disp_q = string_dispersion_strength * dispersion / (omega * omega * omega);
+        const float disp_r = string_dispersion_ratio(disp_q);
+        const float section_coeff = (1.0 - disp_r) / (1.0 + disp_r);
+        const float section_delay = string_allpass_phase_delay(section_coeff, omega);
+        if (loop_length - lowpass_delay - section_delay >= 3.0) {
+            disp_coeff  = section_coeff;
+            disp_delay  = section_delay;
+            disp_active = true;
         }
     }
     const float delay                = loop_length - lowpass_delay - disp_delay;
@@ -347,66 +338,21 @@ void string_pass(uint  base,
     float       string_prev_lowpass;
     float       string_prev_allpass;
     float       string_release_gain;
-    float       disp_state[string_max_sections];
+    float       disp_state;
     if (init) {
-        // Note-on or retrigger: noise burst, optional circular pick comb, zero mean, RMS match to the noise.
-        uint pick_offset = uint(floor(pick * float(delay_whole) + 0.5));
-        // Clamp to at least 1 so a tiny nonzero pick still combs (1 sample); only pick = 0 skips the comb.
-        pick_offset = (pick > 0.0 && pick_offset < 1u) ? 1u : pick_offset;
-        pick_offset = pick_offset < delay_whole - 1u ? pick_offset : delay_whole - 1u;
-        // Circular comb y[i] = h(i) - h((i - pick_offset) mod n) fused into the noise fill so
-        // all 256 lanes fill the ring in parallel without cross-lane dependencies.
-        if (pick_offset > 0u) {
-            float lane_energy = 0.0;
-            for (uint i = lane; i < delay_whole; i += 256u) {
-                const uint  src         = (i + delay_whole - pick_offset) % delay_whole;
-                const float noise_here  = float(pcg_hash(note_seed + i) & 0xFFFFu) / 32767.5 - 1.0;
-                const float noise_prior = float(pcg_hash(note_seed + src) & 0xFFFFu) / 32767.5 - 1.0;
-                data[ring_offs + i]     = noise_here - noise_prior;
-                lane_energy += noise_here * noise_here;
-            }
-            string_block_out[lane] = lane_energy;
-        }
-        else if (lane == 0u) {
-            for (uint i = 0u; i < delay_whole; i++) {
-                data[ring_offs + i] = float(pcg_hash(note_seed + i) & 0xFFFFu) / 32767.5 - 1.0;
-            }
-        }
-        memoryBarrierBuffer();
-        memoryBarrierShared();
-        barrier();
+        // Note-on or retrigger: noise burst, then zero mean.  Lane 0 owns the whole excitation; the other
+        // lanes leave the init block and reach the barrier in main() after the pass.
         if (lane == 0u) {
             float sum = 0.0;
-            for (uint k = 0u; k < delay_whole; k++) {
-                sum += data[ring_offs + k];
+            for (uint i = 0u; i < delay_whole; i++) {
+                const float noise_value = float(pcg_hash(note_seed + i) & 0xFFFFu) / 32767.5 - 1.0;
+                data[ring_offs + i]     = noise_value;
+                sum += noise_value;
             }
             const float mean = sum / float(delay_whole);
             for (uint k = 0u; k < delay_whole; k++) {
                 data[ring_offs + k] -= mean;
             }
-            if (pick_offset > 0u) {
-                float noise_energy = 0.0;
-                for (uint k = 0u; k < 256u; k++) {
-                    noise_energy += string_block_out[k];
-                }
-                float comb_energy = 0.0;
-                for (uint k = 0u; k < delay_whole; k++) {
-                    comb_energy += data[ring_offs + k] * data[ring_offs + k];
-                }
-                // The comb of near-white noise carries about twice the energy; match the noise RMS.
-                string_block_out[0] = comb_energy > 0.0 ? sqrt(noise_energy / comb_energy) : 1.0;
-            }
-        }
-        if (pick_offset > 0u) {
-            memoryBarrierBuffer();
-            memoryBarrierShared();
-            barrier();
-            const float comb_gain = string_block_out[0];
-            for (uint k = lane; k < delay_whole; k += 256u) {
-                data[ring_offs + k] *= comb_gain;
-            }
-            memoryBarrierBuffer();
-            barrier();
         }
         if (lane == 0u && brightness < 1.0) {
             // Pluck brightness: a circular one-pole lowpass over the finished burst, skipped at 1 so
@@ -444,10 +390,8 @@ void string_pass(uint  base,
             string_prev_lowpass = 0.0;
             string_prev_allpass = 0.0;
             string_release_gain = 1.0;
-            for (uint s = 0u; s < string_max_sections; s++) {
-                disp_state[s]       = 0.0;
-                data[base + 7u + s] = 0.0;
-            }
+            disp_state          = 0.0;
+            data[base + 7u]     = 0.0;
         }
     }
     else if (lane == 0u) {
@@ -455,9 +399,7 @@ void string_pass(uint  base,
         string_prev_lowpass = data[base + 1u];
         string_prev_allpass = data[base + 2u];
         string_release_gain = data[base + 3u];
-        for (uint s = 0u; s < string_max_sections; s++) {
-            disp_state[s] = data[base + 7u + s];
-        }
+        disp_state          = data[base + 7u];
     }
 
     if (lane != 0u) {
@@ -481,9 +423,9 @@ void string_pass(uint  base,
         const float allpass_out =
             string_allpass_coeff * lowpass_out + string_prev_lowpass - string_allpass_coeff * string_prev_allpass;
         float cascade_out = allpass_out;
-        for (uint s = 0u; s < num_sections; s++) {
-            const float section_out = disp_coeff * cascade_out + disp_state[s];
-            disp_state[s]           = cascade_out - disp_coeff * section_out;
+        if (disp_active) {
+            const float section_out = disp_coeff * cascade_out + disp_state;
+            disp_state              = cascade_out - disp_coeff * section_out;
             cascade_out             = section_out;
         }
         float loop_output = cascade_out * (string_loop_gain * string_release_gain);
@@ -501,8 +443,8 @@ void string_pass(uint  base,
     data[base + 2u]    = string_prev_allpass;
     data[base + 3u]    = string_release_gain;
     data[base + 4u]    = loop_length;
-    for (uint s = 0u; s < num_sections; s++) {
-        data[base + 7u + s] = disp_state[s];
+    if (disp_active) {
+        data[base + 7u] = disp_state;
     }
     string_write_pos   = write_pos;
     string_loop_length = loop_length;
@@ -541,10 +483,8 @@ void main()
                     param.phase_step * float(sampling_rate),
                     param.string_damping,
                     param.string_release_damping,
-                    param.string_pick,
                     param.string_brightness,
                     param.string_dispersion,
-                    param.string_dispersion_sections,
                     ((param.osc_pack >> 24) & 1u) != 0u,
                     note_seed);
         // barrier() alone does not publish the data[] ring writes.
