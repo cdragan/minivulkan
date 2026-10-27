@@ -30,6 +30,12 @@
 			"default": 0,
 			"description": "Sustain decay length: once a layer's volume envelope enters its sustain span, the whole volume decays exponentially toward silence over this many seconds, through the release as well.  0 keeps the legacy hold/loop behavior."
 		},
+		"voices": {
+			"type": "string",
+			"enum": ["multiple", "reuse per-note", "single"],
+			"default": "multiple",
+			"description": "Voice allocation.  multiple: every note-on takes new voices.  reuse per-note: a repeated note on the same instrument restarts its own voices in place and keeps their current loudness, so a quick re-press does not dip to silence.  single: the instrument plays one note at a time across all MIDI channels, and any new note takes over the sounding voices with the same restart; other notes of the instrument fade out."
+		},
 		"graph_layout": {
 			"type": "array",
 			"maxItems": 177,

@@ -94,7 +94,7 @@ static float eval_lfo_normalized(const LFODescriptor& lfo,
         }
 
         case WaveType::sawtooth_wave: {
-            const float duty = static_cast<float>(lfo.duty) / 255.0f;
+            const float duty       = static_cast<float>(lfo.duty) / 255.0f;
             float       frac_phase = phase - static_cast<float>(static_cast<int>(phase));
 
             // Start point: the cycle position p the wave shows at phase 0
@@ -119,7 +119,7 @@ static float eval_lfo_normalized(const LFODescriptor& lfo,
             }
             else {
                 const float fall = 1.0f - duty;
-                wave = (fall > 0.0f) ? (1.0f - frac_phase) / fall : 0.0f;
+                wave             = (fall > 0.0f) ? (1.0f - frac_phase) / fall : 0.0f;
             }
             break;
         }
@@ -141,22 +141,22 @@ float lfo_beat_div_period_ms(uint8_t beat_div)
     float beats;
     switch (beat_div) {
         case 1:
-            beats = 4.0f;   // 1 note
+            beats = 4.0f; // 1 note
             break;
         case 2:
-            beats = 2.0f;   // 1/2 note
+            beats = 2.0f; // 1/2 note
             break;
         case 3:
-            beats = 1.0f;   // 1/4 note
+            beats = 1.0f; // 1/4 note
             break;
         case 4:
-            beats = 0.5f;   // 1/8 note
+            beats = 0.5f; // 1/8 note
             break;
         case 5:
-            beats = 0.25f;  // 1/16 note
+            beats = 0.25f; // 1/16 note
             break;
         default:
-            return 0.0f;    // div 0 (and invalid values): absolute period applies
+            return 0.0f; // div 0 (and invalid values): absolute period applies
     }
 
     return beats * 60000.0f / static_cast<float>(get_runtime_tempo_bpm());
@@ -210,6 +210,25 @@ static float envelope_value_at(const EnvelopeDescriptor& envelope, const Envelop
     const uint32_t env_tick  = state.tick;
 
     const EnvelopeDescriptor::Point pt1 = envelope.points[env_point];
+
+    // An in-place restart carries the previous level in old_value.  While the state is in the first
+    // segment, that level replaces the first point's value as the segment start, so the segment ramps
+    // from the carried level to the next point.  Zero means no seed.
+    if (env_point == 0 && state.old_value != 0.0f && envelope.num_points > 1) {
+        float start_value = state.old_value;
+        if (env_tick > pt1.position) {
+            assert(env_point + 1 < envelope.num_points);
+            const EnvelopeDescriptor::Point pt2 = envelope.points[env_point + 1];
+
+            const int delta_pos = static_cast<int>(env_tick - pt1.position);
+            const int duration  = static_cast<int>(pt2.position - pt1.position);
+            if (duration > 0) {
+                const float end_value = envelope.min_value + static_cast<float>(pt2.value) * envelope.min_max_delta;
+                start_value += (end_value - start_value) * static_cast<float>(delta_pos) / static_cast<float>(duration);
+            }
+        }
+        return start_value;
+    }
 
     int env_value = pt1.value;
 
@@ -434,42 +453,88 @@ uint32_t get_ringbuf_contig_tail(const uint64_t pos, const uint32_t capacity)
 
 } // namespace Synth
 
-uint16_t Synth::quick_release_target(const EnvelopeDescriptor& envelope, const EnvelopeState& state)
+Synth::EnvelopeState Synth::quick_release_target(const EnvelopeDescriptor& envelope, const EnvelopeState& state)
 {
     // Defensive: num_points == 0 (hand-built malformed JSON) must not underflow
     // the scan bound.
     const uint32_t last_point = envelope.num_points ? envelope.num_points - 1 : 0;
+
     // Bank-envelope decode does not validate sustain_last_point < num_points,
     // so the scan start clamps defensively.
-    const uint32_t scan_start = envelope.sustain_last_point < last_point ? envelope.sustain_last_point : last_point;
-    const float    current    = envelope_value_at(envelope, state);
+    uint32_t cur = envelope.sustain_last_point < last_point ? envelope.sustain_last_point : last_point;
 
-    for (uint32_t point_idx = scan_start; point_idx < last_point; point_idx++) {
-        const float point_value =
-            envelope.min_value + static_cast<float>(envelope.points[point_idx].value) * envelope.min_max_delta;
-        if (point_value <= current) {
-            return static_cast<uint16_t>(point_idx);
+    const float current = envelope_value_at(envelope, state);
+
+    EnvelopeState target = {};
+    target.point         = static_cast<uint16_t>(last_point);
+    target.tick          = envelope.points[last_point].position;
+
+    // The curve is piecewise linear, so the target is a location on a segment.
+    // The last point never begins a segment.
+    while (cur + 1 < envelope.num_points) {
+        const EnvelopeDescriptor::Point& pt1 = envelope.points[cur];
+        const EnvelopeDescriptor::Point& pt2 = envelope.points[cur + 1];
+
+        const float value1 = envelope.min_value + static_cast<float>(pt1.value) * envelope.min_max_delta;
+        const float value2 = envelope.min_value + static_cast<float>(pt2.value) * envelope.min_max_delta;
+
+        if (value1 > current && value2 > current) {
+            ++cur;
+            continue;
         }
+
+        target.point = static_cast<uint16_t>(cur);
+        target.tick  = pt1.position;
+
+        if (! (value1 < current && value2 < current)) {
+            // Current value lies between the two point values (equality included): solve the
+            // line equation for the ratio and apply it to the time axis.
+            const float delta_value = value2 - value1;
+            const float ratio       = delta_value != 0.0f ? (current - value1) / delta_value : 0.0f;
+            const float delta_pos   = static_cast<float>(pt2.position - pt1.position);
+            const float offset      = ratio * delta_pos + 0.5f;
+            target.tick = static_cast<uint16_t>(pt1.position + static_cast<uint32_t>(offset > 0.0f ? offset : 0.0f));
+            if (target.tick >= pt2.position) {
+                // The ratio reaches the second point: park on that point, which is what the
+                // envelope advance expects for a tick equal to a point position.
+                target.point = static_cast<uint16_t>(cur + 1);
+                target.tick  = pt2.position;
+            }
+        }
+        break;
     }
-    return static_cast<uint16_t>(last_point);
+
+    return target;
 }
 
 bool Synth::apply_quick_release(const EnvelopeDescriptor& envelope, EnvelopeState* state)
 {
-    const uint16_t target = quick_release_target(envelope, *state);
+    const EnvelopeState target = quick_release_target(envelope, *state);
 
-    // Strictly ahead in (point, tick) order; the point positions are sorted,
-    // so a same-point target is ahead only when its position is past the tick.
-    const bool ahead =
-        target > state->point || (target == state->point && envelope.points[target].position > state->tick);
+    // Strictly ahead in (point, tick) order.  Ticks are absolute positions, so the same
+    // point compares by tick.
+    const bool ahead = target.point > state->point || (target.point == state->point && target.tick > state->tick);
     if (! ahead) {
         return false;
     }
 
-    state->point   = target;
-    state->tick    = envelope.points[target].position;
-    state->reverse = 0;
+    state->point     = target.point;
+    state->tick      = target.tick;
+    state->reverse   = 0;
+    state->old_value = 0.0f;
     return true;
+}
+
+bool Synth::envelope_note_off(const EnvelopeDescriptor& envelope, EnvelopeState* state)
+{
+    // The direction is forward after note-off whatever the flags are.  The
+    // quick-release jump below can refuse to move, so the clear comes first.
+    state->reverse = 0;
+
+    if ((envelope.flags & envelope_quick_release) == 0) {
+        return false;
+    }
+    return apply_quick_release(envelope, state);
 }
 
 uint32_t Synth::sustain_decay_ticks(const float release_seconds)
@@ -506,7 +571,7 @@ float Synth::string_release_damping_curve(const float x)
 {
     // 0.05 / (2.0 * exp2(x * log2(0.015))) = 0.025 * exp2(x * -log2(0.015)).
     constexpr float neg_log2_t60_ratio = 6.0588937f;
-    const float clamped                = x >= 0.0f ? (x <= 1.0f ? x : 1.0f) : 0.0f;
+    const float     clamped            = x >= 0.0f ? (x <= 1.0f ? x : 1.0f) : 0.0f;
     return 0.025f * mstd::exp2(clamped * neg_log2_t60_ratio);
 }
 
@@ -703,7 +768,7 @@ float Synth::eval_sourced_lfo(const ParamDescriptor::LFOParam& gen,
     // that base by source * rate_scale_ms; the offset result clamps to at least 1 ms
     // so an editor-supplied scale can never drive the period negative (unsigned
     // underflow) or to zero (a divide-by-zero in the LFO phase).
-    const float    base_ms   = static_cast<float>(resolved_lfo_period_ms(gen.lfo));
+    const float base_ms = static_cast<float>(resolved_lfo_period_ms(gen.lfo));
     // The rate source only offsets the base when one is configured; its value is
     // ignored otherwise (the caller still passes the leaf snapshot).
     const float    offset_ms = base_ms + (gen.rate_param_id ? rate_source_value * gen.rate_scale_ms : 0.0f);

@@ -75,6 +75,8 @@ constexpr uint32_t mod_wheel_cc = 1;
 struct Voice {
     bool     active;
     uint8_t  channel;
+    uint8_t  note;                // MIDI note this voice plays, set at note-on
+    uint8_t  instrument;          // Instrument index this voice plays, set at note-on
     uint8_t  osc_ids[max_layers]; // Oscillator slots owned by this voice
     uint8_t  osc_count;           // Number of live oscillator slots owned (0 = none)
     bool     releasing;           // True after note-off, until the volume envelope finishes
@@ -378,13 +380,13 @@ struct ShaderParams {
         uint32_t fir_memory_offs;
         uint32_t taps_offs;
         uint32_t noise_counter;
-        uint32_t note_seed;                  // Per-note constant: the note-on noise counter, never advanced
-        float    pad_tilt[2];                // Pad spectral tilt; harmonic exponent is 1 + clamp(tilt, -1, 1).
-        uint32_t string_state_offs;          // String state region in floats: header, then ring
-        float    string_damping;             // String damping 0..1, higher = shorter decay
-        float    string_release_damping;     // Effective release damping 0.025..1.667: 0.05 / T60 in s, curved from the knob
-        float    string_brightness;          // String pluck brightness 0..1, used by the note-on excitation
-        float    string_dispersion;          // String dispersion 0..1, 0 = off
+        uint32_t note_seed;           // Per-note constant: the note-on noise counter, never advanced
+        float    pad_tilt[2];         // Pad spectral tilt; harmonic exponent is 1 + clamp(tilt, -1, 1).
+        uint32_t string_state_offs;   // String state region in floats: header, then ring
+        float    string_damping;      // String damping 0..1, higher = shorter decay
+        float string_release_damping; // Effective release damping 0.025..1.667: 0.05 / T60 in s, curved from the knob
+        float string_brightness;      // String pluck brightness 0..1, used by the note-on excitation
+        float string_dispersion;      // String dispersion 0..1, 0 = off
     };
 
     // synth_chan_combine shader (binding 0); the master-mix pass reuses the
@@ -587,22 +589,22 @@ struct RunningOscillator {
 
     // Resolved values written by update_modulation each step, read by the
     // shader-param fill.
-    float    volume;                     // Current volume
-    float    panning;                    // Current panning
-    float    pitch;                      // Absolute equivalent MIDI pitch (69 = A4), resolved by update_modulation from
-                                         // note + octave offset + pitch offset/skews + the modulated pitch target value
-    float    spread;                     // FIR Pitch Spread in semitones, from the spread target's dest
-                                         // node; <= 0 means the oscillator's FIR is off
-    float    fir_slope;                  // FIR window slope percent, from the slope target's dest node
-    float    duty[2];                    // Duty cycle for sawtooth and pulse oscillator (0..1)
-    float    pad_tilt[2];                // Pad spectral tilt; harmonic exponent is 1 + clamp(tilt, -1, 1).
-    float    string_damping;             // String damping 0..1, resolved each step
-    float    string_release_damping;     // String release damping 0..1, resolved each step
-    float    string_brightness;          // String pluck brightness 0..1, copied from the layer at note-on
-    float    string_dispersion;          // String dispersion 0..1, resolved each step
-    uint32_t string_state_offs;          // String state region offset in bytes, fixed per slot
-    float    osc_mix;                    // Mix between osc_type[0] and osc_type[1] (0..1)
-    float    fm_index;                   // FM modulation depth
+    float    volume;                 // Current volume
+    float    panning;                // Current panning
+    float    pitch;                  // Absolute equivalent MIDI pitch (69 = A4), resolved by update_modulation from
+                                     // note + octave offset + pitch offset/skews + the modulated pitch target value
+    float    spread;                 // FIR Pitch Spread in semitones, from the spread target's dest
+                                     // node; <= 0 means the oscillator's FIR is off
+    float    fir_slope;              // FIR window slope percent, from the slope target's dest node
+    float    duty[2];                // Duty cycle for sawtooth and pulse oscillator (0..1)
+    float    pad_tilt[2];            // Pad spectral tilt; harmonic exponent is 1 + clamp(tilt, -1, 1).
+    float    string_damping;         // String damping 0..1, resolved each step
+    float    string_release_damping; // String release damping 0..1, resolved each step
+    float    string_brightness;      // String pluck brightness 0..1, copied from the layer at note-on
+    float    string_dispersion;      // String dispersion 0..1, resolved each step
+    uint32_t string_state_offs;      // String state region offset in bytes, fixed per slot
+    float    osc_mix;                // Mix between osc_type[0] and osc_type[1] (0..1)
+    float    fm_index;               // FM modulation depth
 
     // Multi-band bandpass state, refreshed by update_modulation each step.
     // Band 0 mirrors the legacy spread/slope fields above, so its kernel math
@@ -618,6 +620,8 @@ struct RunningOscillator {
                           // kernel (silence) instead of bypassing.
 
     uint8_t layer_idx;      // This oscillator's index in its voice's osc_ids list
+    uint8_t source_layer;   // Instrument layer this oscillator plays.  It is fixed for the note, unlike
+                            // layer_idx, which changes when a finished oscillator leaves osc_ids.
     uint8_t voice_id;       // Voice which owns this oscillator (0 = none/free)
     bool    clear_fir_hist; // Set on note-on of a filtered slot; the next render
                             // zeroes this slot's FIR history before the shader reads
@@ -1205,11 +1209,11 @@ static bool get_next_midi_event(DispatchedMidiEvent* event, uint32_t end_samples
 }
 
 // Enters a voice's release: marks it releasing (an already-releasing voice
-// keeps fading and must never jump twice) and, for every quick-release
-// envelope parameter owned by the voice, jumps the envelope forward to its
-// release target.  All release entry points call this before the next
-// update_modulation() step, so the jump lands before the next envelope
-// evaluation.
+// keeps fading and must never jump twice) and applies the note-off rule to
+// every envelope parameter owned by the voice (a backward ping-pong direction
+// turns forward, and a quick-release envelope jumps to its release target).
+// All release entry points call this before the next update_modulation()
+// step, so the change lands before the next envelope evaluation.
 static void begin_voice_release(uint32_t voice_idx)
 {
     Voice& voice = voices[voice_idx];
@@ -1219,9 +1223,8 @@ static void begin_voice_release(uint32_t voice_idx)
     voice.releasing = true;
     for (uint32_t node_idx = 1; node_idx < total_params; node_idx++) {
         if (param_descs[node_idx].kind == Synth::ParamKind::envelope &&
-            parameters[node_idx].sustain_voice == voice_idx &&
-            (param_descs[node_idx].envelope.flags & Synth::envelope_quick_release) != 0) {
-            Synth::apply_quick_release(param_descs[node_idx].envelope, &parameters[node_idx].envelope);
+            parameters[node_idx].sustain_voice == voice_idx) {
+            Synth::envelope_note_off(param_descs[node_idx].envelope, &parameters[node_idx].envelope);
         }
     }
 }
@@ -1269,22 +1272,6 @@ static void free_oscillator(uint32_t osc_idx)
         param_descs[osc_param(osc_idx, role)] = {};
         parameters[osc_param(osc_idx, role)]  = {};
     }
-}
-
-// Returns a partially-allocated note to the free pool when allocation fails
-// part-way through, and reclaims a still-alive note on re-trigger.  osc_ids[0,
-// osc_count) is kept exactly the live oscillators, so this frees all of them; it is
-// safe at any failure point.
-static void drop_voice(uint32_t voice_idx, uint32_t channel, uint32_t note)
-{
-    Voice& voice = voices[voice_idx];
-
-    for (uint32_t layer_idx = 0; layer_idx < voice.osc_count; ++layer_idx) {
-        free_oscillator(voice.osc_ids[layer_idx]);
-    }
-    voice.osc_count              = 0;
-    voice.active                 = false;
-    note_to_voice[channel][note] = 0;
 }
 
 // Maps a binding's input-source role to the concrete parameter id of the channel or voice leaf
@@ -1369,6 +1356,8 @@ static void writer_configure_lfo(const void*     ctx,
 // generator (per lfo_op), then each routed input source; absent generators contribute no source.
 // Each layer instantiates its own generators, so layers with the same descriptor id evaluate the
 // same value in phase without sharing nodes.  Every route is data, not code here.
+// An in-place restart passes the level of the previous envelope node in env_seed.  The restarted
+// envelope ramps from that level through its first segment.  Zero means no seed (a new note).
 static void configure_target_modulation(const Instrument& instrument,
                                         ModTarget         target,
                                         uint32_t          dest_role,
@@ -1376,7 +1365,8 @@ static void configure_target_modulation(const Instrument& instrument,
                                         uint32_t          channel,
                                         uint32_t          voice_idx,
                                         uint32_t          layer_idx,
-                                        float             base_extra)
+                                        float             base_extra,
+                                        float             env_seed)
 {
     const TargetBinding& binding = instrument.layers[layer_idx].targets[target];
 
@@ -1388,9 +1378,10 @@ static void configure_target_modulation(const Instrument& instrument,
     param_descs[env_node] = {};
     parameters[env_node]  = {};
     if (binding.envelope_desc_id) {
-        param_descs[env_node].kind         = Synth::ParamKind::envelope;
-        param_descs[env_node].envelope     = synth_bank.envelopes.entries[binding.envelope_desc_id - 1];
-        parameters[env_node].sustain_voice = static_cast<uint16_t>(voice_idx);
+        param_descs[env_node].kind              = Synth::ParamKind::envelope;
+        param_descs[env_node].envelope          = synth_bank.envelopes.entries[binding.envelope_desc_id - 1];
+        parameters[env_node].sustain_voice      = static_cast<uint16_t>(voice_idx);
+        parameters[env_node].envelope.old_value = env_seed;
     }
 
     // LFO generator node.  Clear it first; configure_lfo overrides the descriptor when the layer has
@@ -1441,6 +1432,26 @@ static void set_input_leaf(uint32_t node, float value)
     Synth::write_external_leaf(value, leaf(node));
 }
 
+// Values of Instrument::voice_mode.  Zero (multiple) is the default for every bank.
+constexpr uint8_t voice_mode_reuse_per_note = 1;
+constexpr uint8_t voice_mode_single         = 2;
+
+// A playing voice restarts in place only while it still holds every layer of the instrument
+// which it plays.  A layer which already ended, or a bank swap which changed the layer count,
+// sends the note to a new voice instead.
+static bool voice_restartable_in_place(const Voice& voice, uint32_t layer_count)
+{
+    if (voice.osc_count != layer_count) {
+        return false;
+    }
+    for (uint32_t osc_pos = 0; osc_pos < voice.osc_count; ++osc_pos) {
+        if (oscillators[voice.osc_ids[osc_pos]].source_layer != osc_pos) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& event)
 {
     const uint32_t channel = event.channel;
@@ -1453,42 +1464,82 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
     const uint8_t target_instrument =
         route_instrument(synth_bank.channel_zones[channel], Synth::max_instr_per_channel, static_cast<uint8_t>(note));
 
-    // Re-triggering a note still alive (held or releasing, possibly with some
-    // layers already silenced) fades it out over its final block instead of cutting it, and
-    // gives up the note mapping so the new note can take it.
+    const Instrument& instrument  = synth_bank.instruments.entries[target_instrument];
+    const uint32_t    layer_count = instrument.layer_count;
+    assert(layer_count >= 1 && layer_count <= max_layers);
+
+    // A note still alive on this key (held or releasing, possibly with some layers already
+    // silenced) is replaced only after the new note has its voice and oscillators.  When any
+    // allocation fails, the new note is dropped and the playing voice and its mapping stay
+    // untouched.
     const uint32_t existing_voice = note_to_voice[channel][note];
-    if (existing_voice) {
-        voices[existing_voice].note_finished = true;
-        note_to_voice[channel][note]         = 0;
+
+    // The voice mode can pick a playing voice of this instrument to restart in place.
+    // Zero means the note takes a new voice.
+    uint32_t reset_voice = 0;
+    if (instrument.voice_mode == voice_mode_reuse_per_note) {
+        // Only the same note on the same instrument restarts; another instrument's voice stays.
+        if (existing_voice && ! voices[existing_voice].note_finished &&
+            voices[existing_voice].instrument == target_instrument &&
+            voice_restartable_in_place(voices[existing_voice], layer_count)) {
+            reset_voice = existing_voice;
+        }
+    }
+    else if (instrument.voice_mode == voice_mode_single) {
+        // One note sounds per instrument, across all channels.  The lowest live voice restarts.
+        for (uint32_t scan_idx = 1; scan_idx < max_voices && ! reset_voice; scan_idx++) {
+            const Voice& scan_voice = voices[scan_idx];
+            if (scan_voice.active && ! scan_voice.note_finished && scan_voice.instrument == target_instrument &&
+                voice_restartable_in_place(scan_voice, layer_count)) {
+                reset_voice = scan_idx;
+            }
+        }
     }
 
-    uint32_t voice_idx = allocate_unused_voice();
-    if (! voice_idx) {
-        // The fading voice still holds its slots; cut it instead of dropping the note.
-        if (existing_voice) {
-            drop_voice(existing_voice, channel, note);
-            voice_idx = allocate_unused_voice();
+    // The envelope level of each target which carries over a restart, per instrument layer.
+    float    env_seeds[max_layers][Synth::num_mod_targets] = {};
+    uint32_t previous_channel                              = 0;
+    uint32_t previous_note                                 = 0;
+    uint32_t voice_idx                                     = reset_voice;
+
+    if (reset_voice) {
+        // A restart updates the voice's own oscillators in place.  It allocates nothing, so it
+        // cannot fail and the playing sound is never at risk.
+        const Voice& previous = voices[reset_voice];
+
+        previous_channel = previous.channel;
+        previous_note    = previous.note;
+
+        // Read the envelope levels before any node is cleared.  Each envelope node carries its
+        // current level (the end-of-step value which its dest consumed) into the restart, so no
+        // target drops to its first point.
+        for (uint32_t osc_pos = 0; osc_pos < previous.osc_count; ++osc_pos) {
+            const RunningOscillator& previous_osc = oscillators[previous.osc_ids[osc_pos]];
+            for (const ModTargetNode& node : mod_target_nodes) {
+                const uint32_t env_node = osc_param(previous.osc_ids[osc_pos], node.dest_role + 1);
+                if (param_descs[env_node].kind == Synth::ParamKind::envelope) {
+                    env_seeds[previous_osc.source_layer][node.target] = parameters[env_node].prev_value;
+                }
+            }
         }
+    }
+    else {
+        voice_idx = allocate_unused_voice();
         if (! voice_idx) {
             d_printf("All voices are active, dropping note %u on channel %u\n", note, channel);
             return;
         }
     }
-    assert(voices[voice_idx].osc_count == 0);
 
     Voice& voice         = voices[voice_idx];
     voice.channel        = static_cast<uint8_t>(channel);
+    voice.note           = static_cast<uint8_t>(note);
+    voice.instrument     = target_instrument;
     voice.active         = true;
     voice.releasing      = false;
     voice.note_finished  = false;
     voice.sustained      = false;
     voice.release_sample = event.release_sample;
-
-    note_to_voice[channel][note] = static_cast<uint8_t>(voice_idx);
-
-    const Instrument& instrument  = synth_bank.instruments.entries[target_instrument];
-    const uint32_t    layer_count = instrument.layer_count;
-    assert(layer_count >= 1 && layer_count <= max_layers);
 
     voice.release_total_ticks = Synth::sustain_decay_ticks(instrument.release_seconds);
 
@@ -1500,12 +1551,50 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
     set_input_leaf(voice_param(voice_idx, voice_input_aftertouch), 0.0f);
     set_input_leaf(voice_param(voice_idx, voice_input_pressure_combine), 0.0f);
 
-    if (! allocate_oscillators(voice.osc_ids, layer_count, voice_idx, instrument)) {
-        d_printf("All oscillators are active, dropping note %u on channel %u\n", note, channel);
-        drop_voice(voice_idx, channel, note);
-        return;
+    if (reset_voice) {
+        assert(voice.osc_count == layer_count);
     }
-    voice.osc_count = static_cast<uint8_t>(layer_count);
+    else {
+        if (! allocate_oscillators(voice.osc_ids, layer_count, voice_idx, instrument)) {
+            // allocate_oscillators frees its own partial claims.  The voice slot goes back to the
+            // free pool, and the playing voice and its mapping stay untouched.
+            d_printf("All oscillators are active, dropping note %u on channel %u\n", note, channel);
+            voice.active    = false;
+            voice.osc_count = 0;
+            return;
+        }
+        voice.osc_count = static_cast<uint8_t>(layer_count);
+    }
+
+    // A restart for another key gives up the old key.  The old mapping is cleared only while
+    // it still points to this voice.
+    if (reset_voice && (previous_channel != channel || previous_note != note) &&
+        note_to_voice[previous_channel][previous_note] == voice_idx) {
+        note_to_voice[previous_channel][previous_note] = 0;
+    }
+
+    // Single mode: every other live voice of this instrument fades out over its final block.
+    // The sweep runs only after the new note succeeded.  A swept voice gives up its key only
+    // while the key still points to it.
+    if (instrument.voice_mode == voice_mode_single) {
+        for (uint32_t sweep_idx = 1; sweep_idx < max_voices; sweep_idx++) {
+            Voice& swept = voices[sweep_idx];
+            if (sweep_idx != voice_idx && swept.active && ! swept.note_finished &&
+                swept.instrument == target_instrument) {
+                if (note_to_voice[swept.channel][swept.note] == sweep_idx) {
+                    note_to_voice[swept.channel][swept.note] = 0;
+                }
+                swept.note_finished = true;
+            }
+        }
+    }
+
+    // The new note owns its voice now.  The replaced note fades out over its final block
+    // instead of being cut, and gives up the note mapping to the new note.
+    if (existing_voice && existing_voice != voice_idx) {
+        voices[existing_voice].note_finished = true;
+    }
+    note_to_voice[channel][note] = static_cast<uint8_t>(voice_idx);
 
     // One per-note pitch skew applies to every layer; each layer adds its own skew on top.
     const float note_skew = Synth::random_pitch_skew(&note_skew_rng, instrument.note_skew_semitones);
@@ -1514,19 +1603,20 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
 
         RunningOscillator& osc = oscillators[voice.osc_ids[layer_idx]];
         osc.layer_idx          = static_cast<uint8_t>(layer_idx);
+        osc.source_layer       = static_cast<uint8_t>(layer_idx);
         osc.midi_channel       = channel;
         osc.output_channel     = channel;
         osc.note               = note;
         osc.freq_mult          = 1;
 
-        const Oscillator& layer        = instrument.layers[layer_idx];
-        osc.osc_type[0]                = layer.osc_type[0];
-        osc.osc_type[1]                = layer.osc_type[1];
-        osc.osc_mode                   = layer.osc_mode;
-        osc.mod_ratio                  = layer.mod_ratio;
-        osc.string_brightness          = layer.string_brightness;
-        osc.octave_offset              = layer.octave_offset;
-        osc.fir_type                   = layer.fir_type;
+        const Oscillator& layer = instrument.layers[layer_idx];
+        osc.osc_type[0]         = layer.osc_type[0];
+        osc.osc_type[1]         = layer.osc_type[1];
+        osc.osc_mode            = layer.osc_mode;
+        osc.mod_ratio           = layer.mod_ratio;
+        osc.string_brightness   = layer.string_brightness;
+        osc.octave_offset       = layer.octave_offset;
+        osc.fir_type            = layer.fir_type;
         osc.fir_band_count = layer.fir_type == Synth::fir_bandpass ? (layer.fir_band_count < 1   ? 1
                                                                       : layer.fir_band_count > 4 ? 4
                                                                                                  : layer.fir_band_count)
@@ -1534,11 +1624,26 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         // The per-note pitch skew rides on the pitch target: it joins the
         // binding's base value in the dest parameter's initial state.
         const float layer_skew = Synth::random_pitch_skew(&note_skew_rng, instrument.layer_skew_semitones);
-        osc.phase              = 0.0f;
-        osc.mod_phase          = 0.0f;
-        osc.old_volume         = 0.0f; // ramp up from silence to avoid a click
-        // old_panning keeps its base-value seed: the dest node is stale until the first advance.
-        osc.old_panning  = layer.targets[mod_panning].base_value;
+        if (! reset_voice) {
+            // A new note starts every running quantity from silence.
+            osc.phase      = 0.0f;
+            osc.mod_phase  = 0.0f;
+            osc.old_volume = 0.0f;
+            // old_panning keeps its base-value seed: the dest node is stale until the first advance.
+            osc.old_panning = layer.targets[mod_panning].base_value;
+        }
+        // Otherwise the oscillator keeps running through the restart.  Classification of the fields
+        // which the note-on initialization touches:
+        //  - Persist (running signal state; the waveform stays continuous): phase, mod_phase,
+        //    old_volume and old_panning (the block gradient continues from the last rendered
+        //    values), the FIR history (clear_fir_hist is left alone), fir_active (the engagement
+        //    edge detector), the slot constants (osc_output_offs, string_state_offs, fir offsets)
+        //    and the volume, pan and pitch values which update_modulation rewrites every step.
+        //  - Reset (note-dependent): layer parameters, midi/output channel and note, the pitch
+        //    skew in the pitch dest base, the noise and note seeds, the terminating flag and the
+        //    release decay control (decay_mult, decay_factor, decay_tick, decaying).  The
+        //    envelope and LFO generator nodes restart through configure_target_modulation, with
+        //    the envelope levels carried by env_seeds.
         osc.terminating  = false;
         osc.decay_mult   = Synth::sustain_decay_per_tick(voice.release_total_ticks);
         osc.decay_factor = 1.0f;
@@ -1571,7 +1676,8 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
                                         channel,
                                         voice_idx,
                                         layer_idx,
-                                        base_extra);
+                                        base_extra,
+                                        env_seeds[layer_idx][node.target]);
         }
 
         // Trigger-time gate: the oscillator only sounds when its final
@@ -1598,19 +1704,27 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         RunningOscillator& osc      = oscillators[voice.osc_ids[layer_idx]];
         const uint32_t     osc_slot = voice.osc_ids[layer_idx];
 
+        // A restarted oscillator which already runs this filter keeps its history and its
+        // engagement state; a restarted one which gains or loses the filter starts it like a new note.
+        const bool keeps_filter = reset_voice && (osc.fir_taps_offs != 0) == osc_has_filter(instrument, layer_idx);
+
         if (osc_has_filter(instrument, layer_idx)) {
             osc.fir_taps_offs   = fir_slots[osc_slot].coeff_offs;
             osc.fir_memory_offs = fir_slots[osc_slot].history_offs;
-            osc.clear_fir_hist  = true;
+            if (! keeps_filter) {
+                osc.clear_fir_hist = true;
+            }
         }
         else {
             osc.fir_taps_offs   = 0;
             osc.fir_memory_offs = 0;
             osc.clear_fir_hist  = false;
         }
-        // Note-on seed from the layer's own binding bases; the first
-        // modulation step re-evaluates it from the dest parameters.
-        osc.fir_active = layer_fir_active(instrument.layers[layer_idx]);
+        if (! keeps_filter) {
+            // Note-on seed from the layer's own binding bases; the first
+            // modulation step re-evaluates it from the dest parameters.
+            osc.fir_active = layer_fir_active(instrument.layers[layer_idx]);
+        }
     }
 }
 
@@ -2135,8 +2249,8 @@ static void update_modulation()
         osc.string_release_damping =
             unit_range_clamp(parameters[osc_param(osc_idx, osc_string_release_damping_dest)].value);
         osc.string_dispersion = unit_range_clamp(parameters[osc_param(osc_idx, osc_string_dispersion_dest)].value);
-        osc.osc_mix  = parameters[osc_param(osc_idx, osc_mix_dest)].value;
-        osc.fm_index = parameters[osc_param(osc_idx, osc_fm_index_dest)].value;
+        osc.osc_mix           = parameters[osc_param(osc_idx, osc_mix_dest)].value;
+        osc.fm_index          = parameters[osc_param(osc_idx, osc_fm_index_dest)].value;
         // The ratio clamps like the static row: legacy 0 ratios play at the
         // slider floor and hand-written out-of-range values stay in bounds.
         const float ratio_dest = parameters[osc_param(osc_idx, osc_fm_ratio_dest)].value;
@@ -2597,18 +2711,18 @@ static void render_audio_step()
         // The cached engagement flag gates the shader: an inactive filter
         // passes through (taps offset 0), an all-zero-gain bandpass keeps
         // reading its staged zeroed kernel (silence).
-        param.taps_offs                  = oscillator.fir_active ? oscillator.fir_taps_offs / 4 : 0;
-        param.noise_counter              = oscillator.noise_counter;
-        param.note_seed                  = oscillator.note_seed;
-        param.pad_tilt[0]                = oscillator.pad_tilt[0];
-        param.pad_tilt[1]                = oscillator.pad_tilt[1];
-        param.string_state_offs          = oscillator.string_state_offs / 4;
-        param.string_damping             = oscillator.string_damping;
+        param.taps_offs         = oscillator.fir_active ? oscillator.fir_taps_offs / 4 : 0;
+        param.noise_counter     = oscillator.noise_counter;
+        param.note_seed         = oscillator.note_seed;
+        param.pad_tilt[0]       = oscillator.pad_tilt[0];
+        param.pad_tilt[1]       = oscillator.pad_tilt[1];
+        param.string_state_offs = oscillator.string_state_offs / 4;
+        param.string_damping    = oscillator.string_damping;
         // The summed (dest + envelope + LFO) value is clamped to [0, 1] first, then curved once here
         // so every modulation input gets the same response.
         param.string_release_damping = Synth::string_release_damping_curve(oscillator.string_release_damping);
-        param.string_brightness          = oscillator.string_brightness;
-        param.string_dispersion          = oscillator.string_dispersion;
+        param.string_brightness      = oscillator.string_brightness;
+        param.string_dispersion      = oscillator.string_dispersion;
 
         // Wrap the phases so float precision does not degrade on long notes.
         oscillator.phase += phase_step;

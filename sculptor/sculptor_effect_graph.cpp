@@ -123,9 +123,7 @@ static const float effect_default_params[Synth::num_effect_types][Synth::max_eff
 // The FIR band Gain row's editing metadata (every band, band 0 included):
 // the oscillator Band Gain bounds.  A zeroed gain stays explicit state the
 // slider cannot reach (min 0.01), mirroring the oscillator's row.
-static const Sculptor::EffectParamInfo fx_band_gain_info = {
-    "Gain", 0.01f, 1.0f, false, "Band's output amplitude"
-};
+static const Sculptor::EffectParamInfo fx_band_gain_info = { "Gain", 0.01f, 1.0f, false, "Band's output amplitude" };
 
 // The Multi-band FIR band rows' editing metadata: Center/Spread in Hz take
 // the plain FIR edges' slider range.  The bounds are editing aids only: the
@@ -171,7 +169,7 @@ static bool fx_splice_effect_run(Synth::EffectChainBinding*    chain,
                                  Sculptor::EffectGraphMapping* mapping        = nullptr,
                                  uint32_t*                     after_slot_new = nullptr);
 static bool fx_connect_run(Synth::EffectChainBinding*    chain,
-                           Sculptor::EffectChainRouting*           routing,
+                           Sculptor::EffectChainRouting* routing,
                            bool                          to_front,
                            uint32_t                      target_slot,
                            uint32_t                      source_slot,
@@ -733,7 +731,8 @@ bool Sculptor::fx_decode_row_slot(Synth::EffectSlotBinding&   effect,
         // The FIR slope row reports the band grammar's slope kind (3), not
         // the parameter index, so every FIR row shares one kind space
         // (0 lowpass, 1 highpass, 2 gain, 3 slope).
-        *fir_row = (effect.type == Synth::EffectType::fir && param == 2) ? 3u : param;
+        if (fir_row)
+            *fir_row = (effect.type == Synth::EffectType::fir && param == 2) ? 3u : param;
         return true;
     }
 
@@ -749,7 +748,8 @@ bool Sculptor::fx_decode_row_slot(Synth::EffectSlotBinding&   effect,
     *row_base = slot_idx - *field;
     // The multiband node's four uniform rows report their own kind; the plain
     // FIR's band 0 keeps the legacy Gain-row mapping.
-    *fir_row = effect.type == Synth::EffectType::fir_multiband ? row : band == 0 ? 2u : row;
+    if (fir_row)
+        *fir_row = effect.type == Synth::EffectType::fir_multiband ? row : band == 0 ? 2u : row;
     *binding = &effect.fir_bands.bands[fx_band_binding_ordinal(effect, band, row)];
     return true;
 }
@@ -841,7 +841,7 @@ static void append_fx_param_block(Sculptor::Graph*                 graph,
     }
     row.child_row   = base_child_row;
     row.child_level = base_child_level;
-    row.tooltip = param_info.tooltip;
+    row.tooltip     = param_info.tooltip;
 
     row.connectable = binding.lfo_desc_id == 0 || binding.num_inputs < Synth::max_mod_inputs;
     // The drop-menu anchor: the always-visible base row opens the
@@ -959,6 +959,7 @@ bool Sculptor::fx_effect_slot_hidden(const Synth::EffectSlotBinding& effect,
     }
     return Sculptor::fx_param_field_hidden(graph, node_idx, param, field);
 }
+
 // Number of nodes the chain's projection needs: fixed endpoints, one per
 // projected effect slot, and one per pinned-or-referenced LFO descriptor.
 // Editors preflight node-adding commands against Sculptor::max_nodes with
@@ -1597,13 +1598,7 @@ static bool fx_release_prev_source(const Sculptor::Graph&              graph,
     Synth::EffectParamBinding* prev_row = nullptr;
     uint32_t                   row_base = 0;
     uint32_t                   field    = 0;
-    uint32_t                   fir_row  = 0;
-    if (! Sculptor::fx_decode_row_slot(chain.effects[prev_slot],
-                                       prev.slot_idx,
-                                       &prev_row,
-                                       &row_base,
-                                       &field,
-                                       &fir_row) ||
+    if (! Sculptor::fx_decode_row_slot(chain.effects[prev_slot], prev.slot_idx, &prev_row, &row_base, &field) ||
         (field != 4 && field != 7)) {
         return true;
     }
@@ -1630,9 +1625,8 @@ static void fx_drop_prev_lfo_input(Synth::EffectChainBinding&          chain,
     Synth::EffectParamBinding* prev_row = nullptr;
     uint32_t                   row_base = 0;
     uint32_t                   field    = 0;
-    uint32_t                   fir_row  = 0;
     if (prev_slot >= 0 &&
-        Sculptor::fx_decode_row_slot(chain.effects[prev_slot], prev.slot_idx, &prev_row, &row_base, &field, &fir_row) &&
+        Sculptor::fx_decode_row_slot(chain.effects[prev_slot], prev.slot_idx, &prev_row, &row_base, &field) &&
         field == 1) {
         prev_row->lfo_desc_id = 0;
         return;
@@ -1656,9 +1650,8 @@ static bool fx_drop_prev_modulator_wire(const Sculptor::Graph&              grap
     Synth::EffectParamBinding* prev_row = nullptr;
     uint32_t                   row_base = 0;
     uint32_t                   field    = 0;
-    uint32_t                   fir_row  = 0;
     if (prev_slot >= 0 &&
-        Sculptor::fx_decode_row_slot(chain.effects[prev_slot], prev.slot_idx, &prev_row, &row_base, &field, &fir_row)) {
+        Sculptor::fx_decode_row_slot(chain.effects[prev_slot], prev.slot_idx, &prev_row, &row_base, &field)) {
         if (field == 1) {
             prev_row->lfo_desc_id = 0;
             return true;
@@ -2050,13 +2043,11 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
             Synth::EffectParamBinding* row_binding = nullptr;
             uint32_t                   row_base    = 0;
             uint32_t                   row_field   = 0;
-            uint32_t                   fir_row     = 0;
             const bool row_decoded = in_slot >= 0 && Sculptor::fx_decode_row_slot(chain.effects[in_slot],
                                                                                   in_point.slot_idx,
                                                                                   &row_binding,
                                                                                   &row_base,
-                                                                                  &row_field,
-                                                                                  &fir_row);
+                                                                                  &row_field);
             if (row_decoded && row_field == 1) {
                 if (in_point.slot_idx >= graph.node(in_point.node_idx).slots.num_allocated) {
                     return false;
@@ -2877,14 +2868,13 @@ static bool fx_splice_effect_run(Synth::EffectChainBinding*    chain,
 // right after the source slot, then write the connection flag. Refusals
 // leave the chain untouched.
 static bool fx_connect_run(Synth::EffectChainBinding*    chain,
-                           Sculptor::EffectChainRouting*           routing,
+                           Sculptor::EffectChainRouting* routing,
                            bool                          to_front,
                            uint32_t                      target_slot,
                            uint32_t                      source_slot,
                            Sculptor::EffectGraphMapping* mapping)
 {
-    if (! fx_slot_occupied(*chain, target_slot) ||
-        fx_slot_input_fed(*chain, *routing, target_slot)) {
+    if (! fx_slot_occupied(*chain, target_slot) || fx_slot_input_fed(*chain, *routing, target_slot)) {
         return false;
     }
     const uint32_t run = fx_run_length(*chain, *routing, target_slot);

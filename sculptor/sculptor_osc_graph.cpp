@@ -148,8 +148,9 @@ const LabelTooltip target_descs[Synth::num_mod_targets] = {
     { "Release Damping", "Extra string damping applied while the key is released" },
     { "String Dispersion", "Stiff-string inharmonicity: raises the upper partials, strongest on low notes (0 = off)" },
 };
-const char* const wave_names[7]     = { "off", "sine", "sawtooth", "pulse", "noise", "pad", "string" };
-const char* const osc_mode_names[4] = { "blend", "frequency modulation", "hard sync", "ring modulation" };
+const char* const wave_names[7]       = { "off", "sine", "sawtooth", "pulse", "noise", "pad", "string" };
+const char* const voice_mode_names[3] = { "multiple", "reuse per-note", "single" };
+const char* const osc_mode_names[4]   = { "blend", "frequency modulation", "hard sync", "ring modulation" };
 const char* const filter_type_names[Synth::num_filter_types] = { "off", "bandpass", "lowpass", "highpass" };
 
 // Dropdown order puts "off" first.  The stored enum order is fixed: zero must
@@ -908,7 +909,7 @@ static void clear_mapping(Sculptor::OscGraphMapping* mapping)
     }
     mapping->osc_output_slot = Sculptor::pool_no_slot;
     mapping->instrument_node = Sculptor::pool_no_slot;
-    for (uint32_t i = 0; i < 3; ++i) {
+    for (uint32_t i = 0; i < 4; ++i) {
         mapping->instrument_slots[i] = Sculptor::pool_no_slot;
     }
     // Uniform node layouts; populated even when no such node exists so the
@@ -1699,8 +1700,8 @@ bool Sculptor::project_instrument_to_graph(const Synth::Instrument&     instrume
         instrument.layer_count <= Synth::max_layers ? instrument.layer_count : Synth::max_layers;
 
     // MIDI Inputs starts low enough that the Instrument Parameters node
-    // fits right above it, so both are inside the default view.
-    const uint32_t input_node = graph->create_node("MIDI Inputs", vmath::vec2(0.0f, 128.0f));
+    // (four rows) fits right above it, so both are inside the default view.
+    const uint32_t input_node = graph->create_node("MIDI Inputs", vmath::vec2(0.0f, 160.0f));
     if (input_node == Sculptor::pool_no_slot) {
         return false;
     }
@@ -1732,7 +1733,7 @@ bool Sculptor::project_instrument_to_graph(const Synth::Instrument&     instrume
     // The note/layer detune and release rows live on a dedicated node
     // right above MIDI Inputs (same X), so they survive CC-dot changes
     // and stay editable as one group.  The offset clears the node's own
-    // rendered height (three rows); saved layout records override it.
+    // rendered height (four rows); saved layout records override it.
     const uint32_t instrument_node = graph->create_node("Instrument Parameters", vmath::vec2(0.0f, 0.0f));
     if (instrument_node == Sculptor::pool_no_slot) {
         return false;
@@ -1752,6 +1753,12 @@ bool Sculptor::project_instrument_to_graph(const Synth::Instrument&     instrume
         graph->add_slot(instrument_node,
                         with_tooltip(bounded_real_slot("Release (s)", instrument.release_seconds, 0.0f, 30.0f),
                                      "Sustain volume decay time in seconds (0 = no decay)"));
+    // Voice allocation policy; the names match the bank JSON spelling.
+    mapping->instrument_slots[3] = graph->add_slot(
+        instrument_node,
+        with_tooltip(list_slot("Voices", voice_mode_names, 3, instrument.voice_mode <= 2 ? instrument.voice_mode : 0),
+                     "How notes share voices: multiple = every note gets its own voice; reuse per-note = the same "
+                     "note restarts its voice in place; single = one note at a time per instrument"));
 
     // One node per editor layer, in order: mapping.osc_nodes[o] names node
     // o, whether or not a slot names it.  The source row (slot -> editor
@@ -2222,10 +2229,10 @@ bool Sculptor::compile_graph_to_instrument(const Graph&             graph,
     // the Instrument{} zero-init instead of a slot read.
     if (mapping.instrument_node != pool_no_slot) {
         const Node& params = graph.node(mapping.instrument_node);
-        if (params.slots.num_allocated < 3) {
+        if (params.slots.num_allocated < 4) {
             return false;
         }
-        for (uint32_t i = 0; i < 3; ++i) {
+        for (uint32_t i = 0; i < 4; ++i) {
             if (mapping.instrument_slots[i] == pool_no_slot) {
                 return false;
             }
@@ -2233,6 +2240,7 @@ bool Sculptor::compile_graph_to_instrument(const Graph&             graph,
         out->note_skew_semitones  = params.slots.entries[mapping.instrument_slots[0]].value.real;
         out->layer_skew_semitones = params.slots.entries[mapping.instrument_slots[1]].value.real;
         out->release_seconds      = params.slots.entries[mapping.instrument_slots[2]].value.real;
+        out->voice_mode           = params.slots.entries[mapping.instrument_slots[3]].value.list_index;
     }
 
     // Invariant: every wire into an oscillator lands on a block family

@@ -2054,6 +2054,17 @@ static void check_osc_playback_gaps()
     TEST(playback.note_skew_semitones == instrument.note_skew_semitones);
     TEST(playback.layer_skew_semitones == instrument.layer_skew_semitones);
     TEST(playback.release_seconds == instrument.release_seconds);
+    TEST(playback.voice_mode == instrument.voice_mode);
+    // The voice mode rides into the playback form for every mode.
+    for (uint32_t mode = 1; mode < 3; mode++) {
+        bank.bank.instruments.entries[0].voice_mode = static_cast<uint8_t>(mode);
+        Synth::Instrument moded                     = {};
+        TEST(Sculptor::compile_playback_instrument(bank.bank.instruments.entries[0],
+                                                   bank.graph_osc_source[0][0],
+                                                   &moded));
+        TEST(moded.voice_mode == mode);
+    }
+    bank.bank.instruments.entries[0].voice_mode = instrument.voice_mode;
     TEST(Synth::validate_instrument_bank(&bank.bank));
 
     // A zone whose row is all zero but that still carries oscillator nodes
@@ -14333,6 +14344,108 @@ static void check_realtime_source_pins()
     // The unconditional per-step FM Ratio write clamps to the static row bounds.
     TEST(strstr(src, "= ratio_dest < Synth::osc_mod_ratio_min") != nullptr);
     TEST(strstr(src, ": ratio_dest > Synth::osc_mod_ratio_max") != nullptr);
+
+    // The decay entry has one held-entry condition.  A release must never start the decay, so no
+    // early-release disjunct and no named boolean for one exists.
+    TEST(find_in_range(update, update_end, "enters_early_release") == nullptr);
+    TEST(find_in_range(update, update_end, "enters_held") == nullptr);
+    TEST(find_in_range(update, update_end, "voice.releasing && env_desc.sustain_first_point < env_desc.num_points") ==
+         nullptr);
+    TEST(find_in_range(update,
+                       update_end,
+                       "voice.active && ! voice.releasing && env_state.point >= env_desc.sustain_first_point && "
+                       "env_state.point <= env_desc.sustain_last_point") != nullptr);
+
+    // Voice allocation.  The pool size stays 64 (63 usable slots).
+    TEST(strstr(src, "constexpr uint32_t max_voices = 64;") != nullptr);
+
+    // A new note drops cleanly when voices or oscillators run out.  The allocation and its failure
+    // checks come before the old voice is marked finished and before the note mapping changes.  No
+    // reuse or reclaim machinery remains, and the failure paths do not touch the playing voice.
+    const char* const note_on     = strstr(src, "static void process_note_on(");
+    const char* const note_on_end = note_on ? strstr(note_on + 1, "\nstatic ") : nullptr;
+    TEST(note_on != nullptr && note_on_end != nullptr);
+    if (note_on && note_on_end) {
+        TEST(find_in_range(note_on, note_on_end, "seed_volumes") == nullptr);
+        TEST(find_in_range(note_on, note_on_end, "outgoing") == nullptr);
+        TEST(find_in_range(note_on, note_on_end, "available_oscs") == nullptr);
+        TEST(find_in_range(note_on, note_on_end, "drop_voice(") == nullptr);
+        TEST(find_in_range(note_on, note_on_end, "note_to_voice[channel][note] = 0;") == nullptr);
+        TEST(strstr(src, "drop_voice") == nullptr);
+
+        const char* const read_existing  = find_in_range(note_on, note_on_end, "= note_to_voice[channel][note];");
+        const char* const allocate_voice = find_in_range(note_on, note_on_end, "allocate_unused_voice(");
+        const char* const voice_check    = find_in_range(note_on, note_on_end, "if (! voice_idx) {");
+        const char* const allocate_oscs  = find_in_range(note_on, note_on_end, "allocate_oscillators(");
+        const char* const osc_check      = find_in_range(note_on, note_on_end, "if (! allocate_oscillators(");
+        const char* const finished_write = find_in_range(note_on, note_on_end, ".note_finished = true;");
+        const char* const mapping_write =
+            find_in_range(note_on, note_on_end, "note_to_voice[channel][note] = static_cast<uint8_t>(voice_idx);");
+        TEST(read_existing && allocate_voice && voice_check && allocate_oscs && osc_check && finished_write &&
+             mapping_write);
+        if (read_existing && allocate_voice && voice_check && allocate_oscs && osc_check && finished_write &&
+            mapping_write) {
+            TEST(read_existing < allocate_voice);
+            TEST(allocate_voice < voice_check);
+            TEST(voice_check < allocate_oscs);
+            TEST(allocate_oscs < finished_write);
+            TEST(finished_write < mapping_write);
+
+            // The voice failure returns before anything else changes.
+            const char* const voice_return = find_in_range(voice_check, note_on_end, "return;");
+            TEST(voice_return != nullptr && voice_return < allocate_oscs);
+
+            // The oscillator failure branch frees only the new voice slot.
+            const char* const osc_return = find_in_range(osc_check, note_on_end, "return;");
+            TEST(osc_return != nullptr && osc_return < finished_write);
+            if (osc_return) {
+                TEST(find_in_range(osc_check, osc_return, "voice.active = false;") != nullptr);
+                TEST(find_in_range(osc_check, osc_return, "voice.osc_count = 0;") != nullptr);
+                TEST(find_in_range(osc_check, osc_return, "note_to_voice") == nullptr);
+                TEST(find_in_range(osc_check, osc_return, "note_finished") == nullptr);
+            }
+
+            // No mapping write precedes the successful allocation.
+            TEST(find_in_range(note_on, allocate_oscs, "note_to_voice[channel][note] =") == nullptr);
+        }
+    }
+
+    // Note-off applies the mandated rule to every envelope owned by the voice, through one call
+    // and without a quick-release flag test at the call site.  The releasing guard stays so a voice
+    // never applies the rule twice.
+    const char* const release_begin = strstr(src, "static void begin_voice_release(");
+    const char* const release_end   = release_begin ? strstr(release_begin + 1, "\nstatic ") : nullptr;
+    TEST(release_begin != nullptr && release_end != nullptr);
+    if (release_begin && release_end) {
+        const char* const note_off_call = find_in_range(release_begin, release_end, "Synth::envelope_note_off(");
+        const char* const guard         = find_in_range(release_begin, release_end, "if (voice.releasing) {");
+        const char* const owner_test =
+            find_in_range(release_begin, release_end, "parameters[node_idx].sustain_voice == voice_idx");
+        TEST(note_off_call && guard && owner_test);
+        if (note_off_call && guard && owner_test) {
+            TEST(guard < owner_test && owner_test < note_off_call);
+            TEST(find_in_range(guard, release_end, "return;") != nullptr);
+            TEST(find_in_range(guard, owner_test, "return;") != nullptr);
+            TEST(find_in_range(guard, release_end, "voice.releasing = true;") != nullptr);
+        }
+        TEST(find_in_range(release_begin, release_end, "ParamKind::envelope") != nullptr);
+        TEST(find_in_range(release_begin, release_end, "envelope_quick_release") == nullptr);
+        TEST(find_in_range(release_begin, release_end, "Synth::apply_quick_release(") == nullptr);
+        TEST(find_in_range(release_begin, release_end, "envelope_note_off(") != nullptr);
+
+        // Exactly one caller applies the note-off rule in the runtime.
+        uint32_t call_count = 0;
+        for (const char* p = src; p < src + got;) {
+            const char* const hit = find_in_range(p, src + got, "Synth::envelope_note_off(");
+            if (! hit) {
+                break;
+            }
+            call_count++;
+            p = hit + 1;
+        }
+        TEST(call_count == 1);
+        TEST(find_in_range(src, src + got, "Synth::apply_quick_release(") == nullptr);
+    }
 }
 
 // Oscillator pitch editing and note-on pitch gate: the shared helpers, the runtime
@@ -20577,6 +20690,28 @@ static void osc_instrument_node_regressions()
              instrument.layer_skew_semitones);
         TEST(graph.node(mapping.instrument_node).slots.entries[release_slot].value.real == instrument.release_seconds);
         TEST(! find_graph_slot(graph, mapping.input_node, "Random Note Detune", &note_slot));
+
+        // Voices row: the fourth row sits on the same node with the three codec names, seeded
+        // from voice_mode, and a stored mode survives a re-projection.
+        uint32_t voices_slot = Sculptor::pool_no_slot;
+        TEST(find_graph_slot(graph, mapping.instrument_node, "Voices", &voices_slot));
+        TEST(voices_slot == mapping.instrument_slots[3]);
+        TEST(! find_graph_slot(graph, mapping.input_node, "Voices", &voices_slot));
+        const Sculptor::Slot& voices_row = graph.node(mapping.instrument_node).slots.entries[voices_slot];
+        TEST(voices_row.kind == Sculptor::SlotKind::property);
+        TEST(voices_row.num_list_options == 3);
+        TEST(strcmp(voices_row.list_options[0], "multiple") == 0);
+        TEST(strcmp(voices_row.list_options[1], "reuse per-note") == 0);
+        TEST(strcmp(voices_row.list_options[2], "single") == 0);
+        TEST(voices_row.value.list_index == instrument.voice_mode);
+        TEST(voices_row.value.list_index == 0);
+        for (uint32_t mode = 1; mode < 3; mode++) {
+            source.bank.instruments.entries[0].voice_mode = static_cast<uint8_t>(mode);
+            TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+            graph.take_changes(discarded, Sculptor::max_pending_changes);
+            TEST(graph.node(mapping.instrument_node).slots.entries[mapping.instrument_slots[3]].value.list_index ==
+                 mode);
+        }
     }
 
     // Release drain: a slot write plus a real value_changed event moves the
@@ -20608,10 +20743,26 @@ static void osc_instrument_node_regressions()
         release_change.slot_idx              = mapping.instrument_slots[2];
         TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, release_change));
         TEST(source.bank.instruments.entries[0].release_seconds == 12.5f);
+
+        // Voices drain: each list edit moves the bank field through the same apply path.
+        TEST(source.bank.instruments.entries[0].voice_mode == 0);
+        const uint32_t edits[3] = { 2, 1, 0 };
+        for (uint32_t edit_mode : edits) {
+            Sculptor::PropertyValue voices_edit = {};
+            voices_edit.list_index              = static_cast<uint8_t>(edit_mode);
+            graph.set_slot_value(mapping.instrument_node, mapping.instrument_slots[3], voices_edit);
+            Sculptor::GraphChange voices_change = {};
+            voices_change.kind                  = Sculptor::ChangeKind::value_changed;
+            voices_change.node_idx              = mapping.instrument_node;
+            voices_change.slot_idx              = mapping.instrument_slots[3];
+            TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, voices_change));
+            TEST(source.bank.instruments.entries[0].voice_mode == edit_mode);
+            TEST(source.bank.instruments.entries[0].release_seconds == 12.5f);
+        }
     }
 
     // Sentinel fallback: a mapping the projection did not build (no
-    // instrument node) compiles with the three fields at the
+    // instrument node) compiles with the four fields at the
     // Instrument{} zero-init instead of failing or reading wild slots.
     {
         const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
@@ -20627,7 +20778,7 @@ static void osc_instrument_node_regressions()
         TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
         graph.take_changes(discarded, Sculptor::max_pending_changes);
         mapping.instrument_node = Sculptor::pool_no_slot;
-        for (uint32_t i = 0; i < 3; ++i) {
+        for (uint32_t i = 0; i < 4; ++i) {
             mapping.instrument_slots[i] = Sculptor::pool_no_slot;
         }
         Synth::Instrument compiled = {};
@@ -20635,6 +20786,7 @@ static void osc_instrument_node_regressions()
         TEST(compiled.note_skew_semitones == 0.0f);
         TEST(compiled.layer_skew_semitones == 0.0f);
         TEST(compiled.release_seconds == 0.0f);
+        TEST(compiled.voice_mode == 0);
     }
 
     // Ping-pong toggle snap: toggling a multi-point span off snaps the live
@@ -21324,11 +21476,13 @@ static void check_pad_tilt_json_codec()
 // pins its policy.
 static void check_quick_release_regressions()
 {
-    // The jump-target selection.  The scan is inclusive from the
-    // sustain end point, compares effective values (min_max_delta may be
-    // negative or zero), skips higher-valued points, picks the first value
-    // <= the current one, falls back to the final point when nothing
-    // qualifies, and refuses targets that are not strictly ahead.
+    // The jump location.  The curve is piecewise linear, so the target is a location on
+    // a segment of the release slope.  The scan starts at the segment which begins at the
+    // sustain end point and compares effective values (min_max_delta may be negative or
+    // zero).  Segments with both values above the current one are skipped; a segment with
+    // both values below it stops at the segment's first point; otherwise the location is
+    // interpolated by the value ratio; the final point is the fallback.  Targets which are
+    // not strictly ahead are refused.
     {
         Synth::EnvelopeDescriptor env = {};
         env.num_points                = 5;
@@ -21339,86 +21493,195 @@ static void check_quick_release_regressions()
         env.points[0]                 = { 0, 0x4000 }; // note-off anchor: quarter level
         env.points[1]                 = { 2, 0xC000 };
         env.points[2]                 = { 4, 0x8000 }; // sustain end: above the anchor
-        env.points[3]                 = { 6, 0x3000 }; // first point at/below the anchor
+        env.points[3]                 = { 6, 0x3000 }; // below the anchor
         env.points[4]                 = { 8, 0 };      // final point
 
-        // The span end itself is scanned and the higher point 2 is skipped:
-        // the first at/below value wins and the state parks on it.  The
-        // reversed seed makes the cleared-direction assertion real.
-        Synth::EnvelopeState state = { 0, 0, 1 };
-        TEST(Synth::quick_release_target(env, state) == 3);
+        // The segment from the sustain end to point 3 spans the anchor, and the
+        // interpolation lands on point 3.  The reversed seed makes the cleared-direction
+        // assertion real.
+        Synth::EnvelopeState       state  = { 0, 0, 1 };
+        const Synth::EnvelopeState target = Synth::quick_release_target(env, state);
+        TEST(target.point == 3 && target.tick == 6 && target.reverse == 0);
         TEST(Synth::apply_quick_release(env, &state));
         TEST(state.point == 3 && state.tick == env.points[3].position);
         TEST(state.reverse == 0); // forward after the jump
 
         // The target helper is pure: a seeded reverse flag survives it.
-        Synth::EnvelopeState pure_state = { 0, 0, 1 };
-        TEST(Synth::quick_release_target(env, pure_state) == 3);
+        Synth::EnvelopeState       pure_state  = { 0, 0, 1 };
+        const Synth::EnvelopeState pure_target = Synth::quick_release_target(env, pure_state);
+        TEST(pure_target.point == 3 && pure_target.tick == 6);
         TEST(pure_state.point == 0 && pure_state.tick == 0 && pure_state.reverse == 1);
 
-        // No qualifying point: every point after the sustain end sits above
-        // the current value, so the fallback target is the final point.
-        Synth::EnvelopeDescriptor rising = env;
-        rising.points[3]                 = { 6, 0xE000 }; // both later points above the anchor
-        rising.points[4]                 = { 8, 0x8000 };
-        Synth::EnvelopeState low_state   = { 0, 0 };
-        TEST(Synth::quick_release_target(rising, low_state) == 4);
+        // Fallback: every segment after the sustain end sits above the current value, so
+        // the loop ends without stopping and the target is the final point.
+        Synth::EnvelopeDescriptor rising      = env;
+        rising.points[3]                      = { 6, 0xE000 }; // both later segments above the anchor
+        rising.points[4]                      = { 8, 0x8000 };
+        Synth::EnvelopeState       low_state  = { 0, 0 };
+        const Synth::EnvelopeState low_target = Synth::quick_release_target(rising, low_state);
+        TEST(low_target.point == 4 && low_target.tick == rising.points[4].position);
         TEST(Synth::apply_quick_release(rising, &low_state));
         TEST(low_state.point == 4 && low_state.tick == rising.points[4].position);
 
         // A target on the current position is not strictly ahead: apply
         // refuses and leaves the state, including the reverse flag, intact.
-        Synth::EnvelopeState parked_state = { 6, 3, 1 };
-        TEST(Synth::quick_release_target(env, parked_state) == 3);
+        Synth::EnvelopeState       parked_state  = { 6, 3, 1 };
+        const Synth::EnvelopeState parked_target = Synth::quick_release_target(env, parked_state);
+        TEST(parked_target.point == 3 && parked_target.tick == 6);
         TEST(! Synth::apply_quick_release(env, &parked_state));
         TEST(parked_state.point == 3 && parked_state.tick == 6 && parked_state.reverse == 1);
-
-        // A target behind the current position is refused the same way.
-        Synth::EnvelopeDescriptor behind = env;
-        behind.points[2]                 = { 4, 0x2000 }; // below the current point's value
-        Synth::EnvelopeState past_state  = { 6, 3, 0 };
-        TEST(Synth::quick_release_target(behind, past_state) == 2);
-        TEST(! Synth::apply_quick_release(behind, &past_state));
-        TEST(past_state.point == 3 && past_state.tick == 6);
     }
 
-    // Inverted range: min_max_delta may be negative, so the scan must
-    // follow effective values; a raw comparison would pick point 3 (raw
-    // 0x2000 <= 0x8000) where the effective order picks point 2.
+    // A both-below segment stops at its first point, and a target behind the current
+    // position is refused.  The tail is not monotonic: it falls below the sustain level
+    // and then rises above it.
     {
-        Synth::EnvelopeDescriptor inverted  = {};
-        inverted.num_points                 = 4;
-        inverted.sustain_first_point        = 2;
-        inverted.sustain_last_point         = 2;
-        inverted.min_value                  = 1.0f;
-        inverted.min_max_delta              = -1.0f / 65535.0f;
-        inverted.points[0]                  = { 0, 0x8000 }; // current effective 0.5
-        inverted.points[1]                  = { 2, 0x4000 }; // effective 0.75
-        inverted.points[2]                  = { 4, 0xC000 }; // effective 0.25: first at/below
-        inverted.points[3]                  = { 6, 0x2000 }; // effective 0.875
-        Synth::EnvelopeState inverted_state = { 0, 0 };
-        TEST(Synth::quick_release_target(inverted, inverted_state) == 2);
+        Synth::EnvelopeDescriptor env = {};
+        env.num_points                = 5;
+        env.sustain_first_point       = 1;
+        env.sustain_last_point        = 1;
+        env.min_value                 = 0.0f;
+        env.min_max_delta             = 1.0f / 65536.0f;
+        env.points[0]                 = { 0, 0 };
+        env.points[1]                 = { 10, 0x2000 }; // sustain end
+        env.points[2]                 = { 20, 0x1000 };
+        env.points[3]                 = { 30, 0xC000 };
+        env.points[4]                 = { 40, 0 };
+
+        // Current value 0.75 at point 3: the segment (point 1, point 2) lies entirely below
+        // it, so the target is that segment's first point, which is behind the position.
+        Synth::EnvelopeState       high_state  = { 30, 3, 0 };
+        const Synth::EnvelopeState high_target = Synth::quick_release_target(env, high_state);
+        TEST(high_target.point == 1 && high_target.tick == 10);
+        TEST(! Synth::apply_quick_release(env, &high_state));
+        TEST(high_state.point == 3 && high_state.tick == 30);
+
+        // From the attack the same segment is ahead, and the jump lands on its first point.
+        Synth::EnvelopeDescriptor peak         = env;
+        peak.points[1]                         = { 10, 0xC000 };
+        peak.points[2]                         = { 20, 0x4000 };
+        peak.points[3]                         = { 30, 0x2000 };
+        peak.sustain_first_point               = 2;
+        peak.sustain_last_point                = 2;
+        Synth::EnvelopeState       peak_state  = { 10, 1, 0 };
+        const Synth::EnvelopeState peak_target = Synth::quick_release_target(peak, peak_state);
+        TEST(peak_target.point == 2 && peak_target.tick == 20);
+        TEST(Synth::apply_quick_release(peak, &peak_state));
+        TEST(peak_state.point == 2 && peak_state.tick == 20);
+    }
+
+    // The interpolated location, with exact binary values.  The attack reaches 0.25 at
+    // tick 5; the release slope from tick 10 (0.5) to tick 30 (0) reaches 0.25 at tick 20.
+    {
+        Synth::EnvelopeDescriptor env = {};
+        env.num_points                = 3;
+        env.sustain_first_point       = 1;
+        env.sustain_last_point        = 1;
+        env.min_value                 = 0.0f;
+        env.min_max_delta             = 1.0f / 65536.0f;
+        env.points[0]                 = { 0, 0 };
+        env.points[1]                 = { 10, 0x8000 };
+        env.points[2]                 = { 30, 0 };
+
+        Synth::EnvelopeState state = { 5, 0, 0 };
+        TEST(approx(Synth::eval_envelope_at(env, state), 0.25f, 1.0e-6f));
+        const Synth::EnvelopeState target = Synth::quick_release_target(env, state);
+        TEST(target.point == 1 && target.tick == 20);
+        TEST(Synth::apply_quick_release(env, &state));
+        TEST(state.point == 1 && state.tick == 20);
+        // The curve is continuous across the jump: the jump keeps the level.
+        TEST(approx(Synth::eval_envelope_at(env, state), 0.25f, 1.0e-6f));
+
+        // Segments which both lie above the current value are skipped before the stop.  The
+        // current 0.125 on the attack lies below the first two release segments (both above
+        // it); it is spanned by the last one (0.5 -> 0 over ticks 30..40) at ratio 0.75,
+        // tick 37.5, which rounds to tick 38.
+        Synth::EnvelopeDescriptor skip  = {};
+        skip.num_points                 = 5;
+        skip.sustain_first_point        = 1;
+        skip.sustain_last_point         = 1;
+        skip.min_value                  = 0.0f;
+        skip.min_max_delta              = 1.0f / 65536.0f;
+        skip.points[0]                  = { 0, 0 };
+        skip.points[1]                  = { 10, 0x4000 };
+        skip.points[2]                  = { 20, 0xC000 };
+        skip.points[3]                  = { 30, 0x8000 };
+        skip.points[4]                  = { 40, 0 };
+        Synth::EnvelopeState skip_state = { 5, 0, 0 };
+        TEST(approx(Synth::eval_envelope_at(skip, skip_state), 0.125f, 1.0e-6f));
+        const Synth::EnvelopeState skip_target = Synth::quick_release_target(skip, skip_state);
+        TEST(skip_target.point == 3 && skip_target.tick == 38);
+        TEST(Synth::apply_quick_release(skip, &skip_state));
+        TEST(skip_state.point == 3 && skip_state.tick == 38);
+        TEST(approx(Synth::eval_envelope_at(skip, skip_state), 0.1f, 1.0e-3f));
+    }
+
+    // Inverted range: min_max_delta may be negative, so the comparison must follow
+    // effective values.  Effective values of the points are 0.5, 0.75, 0.25, 0.875.  The
+    // sustain-end segment (0.25 -> 0.875) spans the current 0.5 at ratio 0.4 of its 2
+    // ticks, which is tick 4.8 (rounded 5).  A raw comparison would see the opposite
+    // order.
+    {
+        Synth::EnvelopeDescriptor inverted         = {};
+        inverted.num_points                        = 4;
+        inverted.sustain_first_point               = 2;
+        inverted.sustain_last_point                = 2;
+        inverted.min_value                         = 1.0f;
+        inverted.min_max_delta                     = -1.0f / 65535.0f;
+        inverted.points[0]                         = { 0, 0x8000 }; // current effective 0.5
+        inverted.points[1]                         = { 2, 0x4000 }; // effective 0.75
+        inverted.points[2]                         = { 4, 0xC000 }; // effective 0.25
+        inverted.points[3]                         = { 6, 0x2000 }; // effective 0.875
+        Synth::EnvelopeState       inverted_state  = { 0, 0 };
+        const Synth::EnvelopeState inverted_target = Synth::quick_release_target(inverted, inverted_state);
+        TEST(inverted_target.point == 2 && inverted_target.tick == 5);
         TEST(Synth::apply_quick_release(inverted, &inverted_state));
-        TEST(inverted_state.point == 2 && inverted_state.tick == 4);
+        TEST(inverted_state.point == 2 && inverted_state.tick == 5);
     }
 
-    // Flat range: a zero delta makes every effective value equal, so the
-    // scan start (the sustain end) qualifies.
+    // Flat range: a zero delta makes every effective value equal, so the first segment
+    // from the sustain end spans the current value at ratio zero: its first point.
     {
-        Synth::EnvelopeDescriptor flat  = {};
-        flat.num_points                 = 4;
-        flat.sustain_first_point        = 2;
-        flat.sustain_last_point         = 2;
-        flat.min_value                  = 0.5f;
-        flat.min_max_delta              = 0.0f;
-        flat.points[0]                  = { 0, 0x1234 }; // raw values are irrelevant at delta 0
-        flat.points[1]                  = { 2, 0x1234 };
-        flat.points[2]                  = { 4, 0x1234 };
-        flat.points[3]                  = { 6, 0x1234 };
-        Synth::EnvelopeState flat_state = { 0, 0 };
-        TEST(Synth::quick_release_target(flat, flat_state) == 2);
+        Synth::EnvelopeDescriptor flat         = {};
+        flat.num_points                        = 4;
+        flat.sustain_first_point               = 2;
+        flat.sustain_last_point                = 2;
+        flat.min_value                         = 0.5f;
+        flat.min_max_delta                     = 0.0f;
+        flat.points[0]                         = { 0, 0x1234 }; // raw values are irrelevant at delta 0
+        flat.points[1]                         = { 2, 0x1234 };
+        flat.points[2]                         = { 4, 0x1234 };
+        flat.points[3]                         = { 6, 0x1234 };
+        Synth::EnvelopeState       flat_state  = { 0, 0 };
+        const Synth::EnvelopeState flat_target = Synth::quick_release_target(flat, flat_state);
+        TEST(flat_target.point == 2 && flat_target.tick == 4);
         TEST(Synth::apply_quick_release(flat, &flat_state));
         TEST(flat_state.point == 2 && flat_state.tick == 4);
+    }
+
+    // The sustain end on the final point (no sustain span, or a sustain index out of
+    // range): no segment begins there, so the target is the final point.
+    {
+        Synth::EnvelopeDescriptor env     = {};
+        env.num_points                    = 3;
+        env.sustain_first_point           = 2;
+        env.sustain_last_point            = 2;
+        env.min_value                     = 0.0f;
+        env.min_max_delta                 = 1.0f / 65536.0f;
+        env.points[0]                     = { 0, 0 };
+        env.points[1]                     = { 4, 0xFFFF };
+        env.points[2]                     = { 8, 0 };
+        Synth::EnvelopeState       state  = { 2, 0, 0 };
+        const Synth::EnvelopeState target = Synth::quick_release_target(env, state);
+        TEST(target.point == 2 && target.tick == 8);
+
+        env.sustain_last_point             = 200; // unvalidated decode: clamps to the final point
+        const Synth::EnvelopeState clamped = Synth::quick_release_target(env, state);
+        TEST(clamped.point == 2 && clamped.tick == 8);
+
+        Synth::EnvelopeDescriptor  empty        = {};
+        const Synth::EnvelopeState empty_target = Synth::quick_release_target(empty, Synth::EnvelopeState{});
+        TEST(empty_target.point == 0 && empty_target.tick == 0);
     }
 
     // The jump's state contract.  After a non-final jump the state
@@ -21704,6 +21967,1701 @@ static void check_quick_release_regressions()
         TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, toggle_change));
         TEST((source.bank.envelopes.entries[1].flags & Synth::envelope_quick_release) != 0);
         TEST((source.bank.envelopes.entries[1].flags & Synth::envelope_ping_pong) != 0);
+    }
+}
+
+// The note-off rule (Synth::envelope_note_off), tested on the real envelope code.
+// With Quick Release off, only a backward ping-pong direction changes (it turns
+// forward).  With Quick Release on, the envelope also jumps to its release target from
+// any position.
+static void check_envelope_note_off_regressions()
+{
+    // The held-entry condition of the Release-seconds decay in update_modulation
+    // (production text pinned in check_realtime_source_pins).
+    auto held_entry = [](const Synth::EnvelopeDescriptor& env, const Synth::EnvelopeState& state, bool releasing) {
+        return ! releasing && state.point >= env.sustain_first_point && state.point <= env.sustain_last_point;
+    };
+
+    // C3.1: Quick Release off, three points without a sustain span (0 -> 1 over four
+    // ticks -> 0 over four ticks).  A quick tap rides the full attack and the full fall.
+    {
+        Synth::EnvelopeDescriptor env = {};
+        env.num_points                = 3;
+        env.sustain_first_point       = 2; // the decoder default is the final point
+        env.sustain_last_point        = 2;
+        env.min_value                 = 0.0f;
+        env.min_max_delta             = 1.0f / 65535.0f;
+        env.points[0]                 = { 0, 0 };
+        env.points[1]                 = { 4, 0xFFFF };
+        env.points[2]                 = { 8, 0 };
+
+        // The tap lands mid-attack (a), after the peak (c), and at the very start.
+        const Synth::EnvelopeState taps[3] = { { 2, 0, 0 }, { 6, 1, 0 }, { 0, 0, 0 } };
+        for (uint32_t tap_idx = 0; tap_idx < 3; tap_idx++) {
+            Synth::EnvelopeState state = { 0, 0, 0 };
+            float                peak  = 0.0f;
+            // Held steps up to the tap position.  The decay never starts, because the
+            // state stays before the sustain span.
+            while (state.point != taps[tap_idx].point || state.tick != taps[tap_idx].tick) {
+                TEST(! held_entry(env, state, false));
+                const float value = Synth::eval_envelope(env, &state, true);
+                if (value > peak) {
+                    peak = value;
+                }
+            }
+            const Synth::EnvelopeState before = state;
+            TEST(! Synth::envelope_note_off(env, &state)); // flags 0: no jump
+            TEST(state.point == before.point && state.tick == before.tick && state.reverse == 0);
+
+            // Released steps: one tick at most per step, never a held entry, and the
+            // value reaches 1 and then 0 at the parked final point.
+            uint32_t parked_steps = 0;
+            uint32_t steps        = 0;
+            while (parked_steps < 3 && steps < 64) {
+                TEST(! held_entry(env, state, true));
+                const uint32_t previous_tick  = state.tick;
+                const bool     entered_parked = state.point == 2 && state.tick == env.points[2].position;
+                const float    value          = Synth::eval_envelope(env, &state, false);
+                if (value > peak) {
+                    peak = value;
+                }
+                TEST(state.tick - previous_tick <= 1);
+                // T3.1d: the termination count of the production rule (two entered-parked
+                // steps) starts only after the envelope parks on the final point.
+                parked_steps = entered_parked ? parked_steps + 1 : 0;
+                TEST(parked_steps == 0 || (state.point == 2 && state.tick == 8));
+                steps++;
+            }
+            TEST(approx(peak, 1.0f, 0.0001f)); // the full attack was played
+            TEST(state.point == 2 && state.tick == 8);
+            TEST(approx(Synth::eval_envelope_at(env, state), 0.0f, 0.0001f)); // the full fall was played
+            TEST(parked_steps >= 2);                                          // termination fires only after the park
+        }
+    }
+
+    // T3.1e: Quick Release off never moves the position for any envelope shape and any
+    // note-off position.
+    {
+        Synth::EnvelopeDescriptor env           = {};
+        env.num_points                          = 5;
+        env.sustain_first_point                 = 2;
+        env.sustain_last_point                  = 2;
+        env.min_value                           = 0.0f;
+        env.min_max_delta                       = 1.0f / 65535.0f;
+        env.points[0]                           = { 0, 0x4000 };
+        env.points[1]                           = { 2, 0xC000 };
+        env.points[2]                           = { 4, 0x8000 };
+        env.points[3]                           = { 6, 0x3000 };
+        env.points[4]                           = { 8, 0 };
+        const Synth::EnvelopeState positions[6] = { { 0, 0, 1 }, { 1, 0, 1 }, { 3, 1, 1 },
+                                                    { 4, 2, 1 }, { 5, 2, 1 }, { 7, 3, 1 } };
+        for (const Synth::EnvelopeState& position : positions) {
+            Synth::EnvelopeState state = position;
+            TEST(! Synth::envelope_note_off(env, &state));
+            TEST(state.point == position.point && state.tick == position.tick);
+            TEST(state.reverse == 0);
+        }
+    }
+
+    // C3.2: a ping-pong span traversed backwards turns forward at note-off.  The flip is
+    // unconditional on Quick Release, and the position is unchanged.
+    for (uint32_t quick_release = 0; quick_release < 2; quick_release++) {
+        Synth::EnvelopeDescriptor env = {};
+        env.num_points                = 4;
+        env.sustain_first_point       = 1;
+        env.sustain_last_point        = 2;
+        env.min_value                 = 0.0f;
+        env.min_max_delta             = 1.0f / 65535.0f;
+        env.points[0]                 = { 0, 0 };
+        env.points[1]                 = { 2, 0x4000 };
+        env.points[2]                 = { 4, 0x8000 };
+        env.points[3]                 = { 6, 0 };
+        env.flags = Synth::envelope_ping_pong |
+                    (quick_release ? static_cast<uint8_t>(Synth::envelope_quick_release) : static_cast<uint8_t>(0));
+
+        Synth::EnvelopeState state = { 0, 0, 0 };
+        while (! (state.point == 2 && state.tick == env.points[2].position)) {
+            Synth::eval_envelope(env, &state, true);
+        }
+        Synth::eval_envelope(env, &state, true); // reverses off the span end
+        TEST(state.reverse == 1);
+        TEST(state.point == 1 && state.tick == 3);
+
+        const bool moved = Synth::envelope_note_off(env, &state);
+        TEST(state.reverse == 0);
+        if (quick_release) {
+            // The current value 0.375 lies on the release segment (0.5 -> 0 over ticks
+            // 4..6) at ratio 0.25, which rounds to tick 5.
+            TEST(moved);
+            TEST(state.point == 2 && state.tick == 5);
+        }
+        else {
+            TEST(! moved);
+            TEST(state.point == 1 && state.tick == 3); // position unchanged
+            // The released run goes forward one tick per step and never bounces back.
+            uint32_t previous_position = static_cast<uint32_t>(state.tick);
+            while (! (state.point == 3 && state.tick == 6)) {
+                Synth::eval_envelope(env, &state, false);
+                TEST(state.reverse == 0);
+                TEST(static_cast<uint32_t>(state.tick) == previous_position + 1);
+                previous_position = state.tick;
+            }
+        }
+        // Either way the released run ends on the parked final point.
+        while (! (state.point == 3 && state.tick == 6)) {
+            Synth::eval_envelope(env, &state, false);
+        }
+        TEST(approx(Synth::eval_envelope(env, &state, false), 0.0f, 0.0001f));
+
+        // A forward state at note-off stays forward.
+        Synth::EnvelopeState forward = { 1, 1, 0 };
+        Synth::envelope_note_off(env, &forward);
+        TEST(forward.reverse == 0);
+    }
+
+    // The five-point fixture of the jump-target tests, with Quick Release on.
+    Synth::EnvelopeDescriptor quick = {};
+    quick.num_points                = 5;
+    quick.sustain_first_point       = 2;
+    quick.sustain_last_point        = 2;
+    quick.min_value                 = 0.0f;
+    quick.min_max_delta             = 1.0f / 65535.0f;
+    quick.flags                     = Synth::envelope_quick_release;
+    quick.points[0]                 = { 0, 0x4000 };
+    quick.points[1]                 = { 2, 0xC000 };
+    quick.points[2]                 = { 4, 0x8000 };
+    quick.points[3]                 = { 6, 0x3000 };
+    quick.points[4]                 = { 8, 0 };
+
+    // T4.4: a refused jump still keeps the cleared direction.  The state is already
+    // parked on the target point, so apply_quick_release refuses.
+    {
+        Synth::EnvelopeState parked = { 6, 3, 1 };
+        TEST(! Synth::apply_quick_release(quick, &parked));
+        TEST(parked.reverse == 1);
+        TEST(! Synth::envelope_note_off(quick, &parked));
+        TEST(parked.point == 3 && parked.tick == 6);
+        TEST(parked.reverse == 0);
+    }
+
+    // T4.5: a stale reverse flag on an envelope without ping-pong is cleared.
+    {
+        Synth::EnvelopeDescriptor plain = quick;
+        plain.flags                     = 0;
+        Synth::EnvelopeState stale      = { 3, 1, 1 };
+        TEST(! Synth::envelope_note_off(plain, &stale));
+        TEST(stale.point == 1 && stale.tick == 3 && stale.reverse == 0);
+    }
+
+    // C3.3: Quick Release on jumps from any position to a location on the slope after the
+    // last sustain point.  Expected locations (fixture values 0x4000, 0xC000, 0x8000,
+    // 0x3000, 0 at ticks 0, 2, 4, 6, 8; the scan starts at the segment from point 2):
+    // - start of the attack, level 0x4000: the segment 0x8000 -> 0x3000 spans it at ratio 0.8,
+    //   tick 5.6 rounds to 6, which is point 3
+    // - tick 1, level 0x8000: equals the span end value, the location is point 2
+    // - tick 3, level 0xA000: the segment is entirely below, the stop is its first point
+    // - on the span end: the target is the current position, so no move
+    // - tick 5 of the segment, level 0x5800: ratio 0.5, tick 5, the current location
+    // - tick 7 of the tail, level 0x1800: the first segment is skipped (both above), the
+    //   second spans it at ratio 0.5, tick 7, the current location
+    {
+        struct JumpCase {
+            Synth::EnvelopeState start;
+            uint32_t             point;
+            uint32_t             tick;
+            bool                 moves;
+        };
+
+        // EnvelopeState is { tick, point, reverse }.
+        const JumpCase cases[] = {
+            { { 0, 0, 0 }, 3, 6, true },  { { 1, 0, 0 }, 2, 4, true },  { { 3, 1, 0 }, 2, 4, true },
+            { { 4, 2, 0 }, 2, 4, false }, { { 5, 2, 0 }, 2, 5, false }, { { 7, 3, 0 }, 3, 7, false },
+            { { 3, 1, 1 }, 2, 4, true }, // backward ping-pong position
+        };
+        for (const JumpCase& jump_case : cases) {
+            const Synth::EnvelopeState target = Synth::quick_release_target(quick, jump_case.start);
+            TEST(target.point == jump_case.point && target.tick == jump_case.tick);
+
+            Synth::EnvelopeState state        = jump_case.start;
+            const float          level_before = Synth::eval_envelope_at(quick, state);
+            const bool           moved        = Synth::envelope_note_off(quick, &state);
+            TEST(state.reverse == 0);
+            TEST(moved == jump_case.moves);
+            if (jump_case.moves) {
+                TEST(state.point == jump_case.point && state.tick == jump_case.tick);
+                // The jump never raises the level.
+                TEST(Synth::eval_envelope_at(quick, state) <= level_before + 0.0001f);
+                // One released eval returns the level of the location and advances forward.
+                const float expected_value = Synth::eval_envelope_at(quick, state);
+                TEST(approx(Synth::eval_envelope(quick, &state, false), expected_value, 0.0001f));
+            }
+            else {
+                TEST(state.point == jump_case.start.point && state.tick == jump_case.start.tick);
+            }
+
+            // T6.5: the same position with the flag clear never jumps.
+            Synth::EnvelopeDescriptor no_jump = quick;
+            no_jump.flags                     = 0;
+            Synth::EnvelopeState untouched    = jump_case.start;
+            TEST(! Synth::envelope_note_off(no_jump, &untouched));
+            TEST(untouched.point == jump_case.start.point && untouched.tick == jump_case.start.tick);
+            TEST(untouched.reverse == 0);
+        }
+    }
+
+    // T6.4: the final point is the fallback location when every segment after the sustain
+    // end lies above the current value (mid-attack); late in the tail the location is
+    // behind the position, so nothing moves.
+    {
+        Synth::EnvelopeDescriptor rising = quick;
+        rising.points[0]                 = { 0, 0x1000 };
+        rising.points[2]                 = { 4, 0x8000 };
+        rising.points[3]                 = { 6, 0xE000 };
+        rising.points[4]                 = { 8, 0x8000 };
+
+        Synth::EnvelopeState state = { 1, 0, 0 };
+        TEST(Synth::envelope_note_off(rising, &state));
+        TEST(state.point == 4 && state.tick == 8 && state.reverse == 0);
+
+        Synth::EnvelopeState late = { 7, 3, 0 };
+        TEST(! Synth::envelope_note_off(rising, &late));
+        TEST(late.point == 3 && late.tick == 7 && late.reverse == 0);
+    }
+
+    // T6.6: the inverted and flat ranges pick the same target as apply_quick_release.
+    {
+        Synth::EnvelopeDescriptor inverted  = {};
+        inverted.num_points                 = 4;
+        inverted.sustain_first_point        = 2;
+        inverted.sustain_last_point         = 2;
+        inverted.min_value                  = 1.0f;
+        inverted.min_max_delta              = -1.0f / 65535.0f;
+        inverted.flags                      = Synth::envelope_quick_release;
+        inverted.points[0]                  = { 0, 0x8000 };
+        inverted.points[1]                  = { 2, 0x4000 };
+        inverted.points[2]                  = { 4, 0xC000 };
+        inverted.points[3]                  = { 6, 0x2000 };
+        Synth::EnvelopeState note_off_state = { 0, 0, 0 };
+        Synth::EnvelopeState apply_state    = { 0, 0, 0 };
+        TEST(Synth::envelope_note_off(inverted, &note_off_state));
+        TEST(Synth::apply_quick_release(inverted, &apply_state));
+        TEST(note_off_state.point == 2 && note_off_state.tick == 5);
+        TEST(note_off_state.point == apply_state.point && note_off_state.tick == apply_state.tick);
+
+        Synth::EnvelopeDescriptor flat     = inverted;
+        flat.min_value                     = 0.5f;
+        flat.min_max_delta                 = 0.0f;
+        Synth::EnvelopeState flat_note_off = { 0, 0, 0 };
+        Synth::EnvelopeState flat_apply    = { 0, 0, 0 };
+        TEST(Synth::envelope_note_off(flat, &flat_note_off));
+        TEST(Synth::apply_quick_release(flat, &flat_apply));
+        TEST(flat_note_off.point == 2 && flat_note_off.tick == 4);
+        TEST(flat_note_off.point == flat_apply.point && flat_note_off.tick == flat_apply.tick);
+    }
+}
+
+// The in-place restart seed (EnvelopeState::old_value).  A restarted envelope continues from
+// the level of the previous envelope instead of dropping to its first point.  Zero means no
+// seed, so a fresh note keeps the exact legacy evaluation.
+static void check_envelope_restart_seed_regressions()
+{
+    // Three points, no sustain span: 0 -> 1 over four ticks -> 0 over four ticks.
+    Synth::EnvelopeDescriptor env = {};
+    env.num_points                = 3;
+    env.sustain_first_point       = 2;
+    env.sustain_last_point        = 2;
+    env.min_value                 = 0.0f;
+    env.min_max_delta             = 1.0f / 65536.0f;
+    env.points[0]                 = { 0, 0 };
+    env.points[1]                 = { 4, 0x8000 };
+    env.points[2]                 = { 8, 0 };
+
+    // A fresh note (old_value zero) evaluates exactly as the legacy code did.  The expected
+    // values and positions are hand-derived literals, not produced by the code under test: the
+    // value at tick t is the integer interpolation of the point values (0, 0x8000, 0) scaled
+    // by 1/65536, and the state advances one tick per step until it parks on the sustain
+    // point.
+    {
+        const float    expected_value[10] = { 0.0f, 0.125f, 0.25f, 0.375f, 0.5f, 0.375f, 0.25f, 0.125f, 0.0f, 0.0f };
+        const uint16_t expected_point[10] = { 0, 0, 0, 1, 1, 1, 1, 2, 2, 2 };
+        const uint16_t expected_tick[10]  = { 1, 2, 3, 4, 5, 6, 7, 8, 8, 8 };
+
+        Synth::EnvelopeState fresh = {};
+        TEST(Synth::eval_envelope_at(env, fresh) == 0.0f);
+        for (uint32_t step = 0; step < 10; step++) {
+            const float value = Synth::eval_envelope(env, &fresh, true);
+            TEST(value == expected_value[step]);
+            TEST(fresh.point == expected_point[step]);
+            TEST(fresh.tick == expected_tick[step]);
+            TEST(fresh.old_value == 0.0f);
+        }
+
+        // An envelope which holds on its first point reports the stored value, not a seed.
+        Synth::EnvelopeDescriptor hold  = env;
+        hold.sustain_first_point        = 0;
+        hold.sustain_last_point         = 0;
+        hold.points[0]                  = { 0, 0x4000 };
+        Synth::EnvelopeState hold_state = {};
+        TEST(Synth::eval_envelope_at(hold, hold_state) == 0.25f);
+        TEST(Synth::eval_envelope(hold, &hold_state, true) == 0.25f);
+        TEST(hold_state.point == 0 && hold_state.tick == 0);
+    }
+
+    // A seeded restart reports the carried level at its start and ramps from it to the
+    // next point (0.5 at tick 4) through the first segment.
+    {
+        Synth::EnvelopeState seeded = {};
+        seeded.old_value            = 0.25f;
+        TEST(approx(Synth::eval_envelope_at(env, seeded), 0.25f, 1.0e-6f));
+
+        const float expected[5] = { 0.25f, 0.3125f, 0.375f, 0.4375f, 0.5f };
+        for (uint32_t step = 0; step < 5; step++) {
+            const float value = Synth::eval_envelope(env, &seeded, true);
+            TEST(approx(value, expected[step], 1.0e-6f));
+        }
+        // Past the first segment the seed is no longer consulted: the state behaves as without
+        // one.  The stored seed itself is left alone.
+        TEST(seeded.point == 1 && seeded.tick == 5);
+        TEST(seeded.old_value == 0.25f);
+        TEST(approx(Synth::eval_envelope_at(env, seeded), 0.5f - 0.5f / 4.0f, 1.0e-3f));
+    }
+
+    // The pair the engine step writes: value at the restart level, prev_value one tick
+    // ahead.  Both approximate the carried level.
+    {
+        Synth::EnvelopeState seeded = {};
+        seeded.old_value            = 0.25f;
+        const float value           = Synth::eval_envelope(env, &seeded, true);
+        const float prev_value      = Synth::eval_envelope_at(env, seeded);
+        TEST(approx(value, 0.25f, 1.0e-6f));
+        TEST(approx(prev_value, 0.3125f, 1.0e-6f));
+        TEST(prev_value - value < 0.07f);
+    }
+
+    // The dest stays continuous across a takeover: the configure-time onset value and the
+    // first post-restart advance both approximate base + scale * carried level.
+    {
+        Synth::ParamDescriptor descs[3]  = {};
+        Synth::Parameter       params[3] = {};
+        descs[1].kind                    = Synth::ParamKind::envelope;
+        descs[1].envelope                = env;
+        params[1].envelope.old_value     = 0.25f;
+        Synth::configure_plain(&descs[2], 0.125f, 1, 2.0f, 0, Synth::SourceOp::add, nullptr, 0);
+
+        TEST(approx(Synth::param_onset_value(params, descs, 2), 0.125f + 2.0f * 0.25f, 1.0e-6f));
+
+        // One engine step: the pre-pass advances the envelope, then the dest propagates.
+        params[1].value      = Synth::eval_envelope(descs[1].envelope, &params[1].envelope, true);
+        params[1].prev_value = Synth::eval_envelope_at(descs[1].envelope, params[1].envelope);
+        Synth::propagate_parameters(params, descs, 3);
+        TEST(approx(params[2].value, 0.125f + 2.0f * 0.25f, 0.2f));
+        TEST(params[2].value > 0.125f + 2.0f * 0.2f); // far from the first point's zero
+
+        // A fresh note starts at the first point's value.
+        Synth::Parameter fresh[3] = {};
+        TEST(approx(Synth::param_onset_value(fresh, descs, 2), 0.125f, 1.0e-6f));
+    }
+
+    // The carried level applies to every envelope at its start, including one which sustains
+    // on its first point.  Release such an envelope into its tail, then restart it in place
+    // with the captured level: the restart reports that level, not the stored first point.
+    {
+        Synth::EnvelopeDescriptor hold = env;
+        hold.sustain_first_point       = 0;
+        hold.sustain_last_point        = 0;
+        hold.points[0]                 = { 0, 0x8000 };
+        hold.points[1]                 = { 4, 0x4000 };
+        hold.points[2]                 = { 8, 0 };
+
+        Synth::EnvelopeState state = {};
+        TEST(Synth::eval_envelope_at(hold, state) == 0.5f);
+        // Run the released tail (sustain off) to tick 6 of the second segment.
+        for (uint32_t step = 0; step < 6; step++) {
+            Synth::eval_envelope(hold, &state, false);
+        }
+        TEST(state.point == 1 && state.tick == 6);
+        const float captured = Synth::eval_envelope_at(hold, state);
+        TEST(captured == 0.125f);
+
+        // Takeover: the state restarts at the envelope start with the captured level.
+        Synth::EnvelopeState restarted = {};
+        restarted.old_value            = captured;
+        TEST(Synth::eval_envelope_at(hold, restarted) == captured);
+        TEST(Synth::eval_envelope(hold, &restarted, true) == captured);
+        TEST(restarted.point == 0 && restarted.tick == 0);
+    }
+
+    // A quick-release jump drops the seed.
+    {
+        Synth::EnvelopeDescriptor quick = env;
+        quick.flags                     = Synth::envelope_quick_release;
+        Synth::EnvelopeState state      = {};
+        state.old_value                 = 0.25f;
+        Synth::EnvelopeState jumped     = state;
+        jumped.tick                     = 2;
+        TEST(Synth::envelope_note_off(quick, &jumped));
+        TEST(jumped.old_value == 0.0f);
+    }
+}
+
+// Clean drop on exhaustion.  realtime_synth.cpp is not linked into this unit, so this
+// sim mirrors the allocation order of process_note_on and pins the policy; the source
+// pins in check_realtime_source_pins tie it to the production text.  It is NOT proof of
+// the live audio behavior (manual audio smoke).  The order is: read the existing voice,
+// allocate the voice, allocate the oscillators, and only then finish the old voice and
+// write the mapping.
+struct NoteOnSimOsc {
+    bool    used;
+    uint8_t voice_id;
+    uint8_t layer_idx;
+    uint8_t midi_channel;
+    uint8_t note;
+    float   volume;
+    float   old_volume;
+    float   phase;
+};
+
+struct NoteOnSimVoice {
+    bool    active;
+    bool    note_finished;
+    uint8_t channel;
+    uint8_t note;
+    uint8_t osc_count;
+    uint8_t osc_ids[4];
+};
+
+struct NoteOnSimState {
+    NoteOnSimVoice voices[4]; // slot 0 is the sentinel: 3 usable voices
+    NoteOnSimOsc   oscs[8];   // slot 0 is the sentinel: 7 usable oscillators
+    uint8_t        note_to_voice[16][128];
+};
+
+static bool note_on_sim(NoteOnSimState* state, uint32_t channel, uint32_t note, uint32_t layer_count)
+{
+    const uint32_t existing_voice = state->note_to_voice[channel][note];
+
+    uint32_t voice_idx = 0;
+    for (uint32_t idx = 1; idx < 4 && ! voice_idx; idx++) {
+        if (! state->voices[idx].active) {
+            voice_idx = idx;
+        }
+    }
+    if (! voice_idx) {
+        return false;
+    }
+
+    NoteOnSimVoice& voice = state->voices[voice_idx];
+    voice.active          = true;
+    voice.note_finished   = false;
+    voice.channel         = static_cast<uint8_t>(channel);
+    voice.note            = static_cast<uint8_t>(note);
+
+    uint32_t allocated = 0;
+    for (uint32_t idx = 1; idx < 8 && allocated < layer_count; idx++) {
+        if (! state->oscs[idx].used) {
+            state->oscs[idx].used     = true;
+            state->oscs[idx].voice_id = static_cast<uint8_t>(voice_idx);
+            voice.osc_ids[allocated]  = static_cast<uint8_t>(idx);
+            allocated++;
+        }
+    }
+    if (allocated < layer_count) {
+        for (uint32_t layer_idx = 0; layer_idx < allocated; layer_idx++) {
+            state->oscs[voice.osc_ids[layer_idx]].used     = false;
+            state->oscs[voice.osc_ids[layer_idx]].voice_id = 0;
+            voice.osc_ids[layer_idx]                       = 0;
+        }
+        voice.active    = false;
+        voice.osc_count = 0;
+        return false;
+    }
+    voice.osc_count = static_cast<uint8_t>(layer_count);
+    for (uint32_t layer_idx = 0; layer_idx < layer_count; layer_idx++) {
+        NoteOnSimOsc& osc = state->oscs[voice.osc_ids[layer_idx]];
+        osc.layer_idx     = static_cast<uint8_t>(layer_idx);
+        osc.midi_channel  = static_cast<uint8_t>(channel);
+        osc.note          = static_cast<uint8_t>(note);
+        osc.old_volume    = 0.0f;
+        osc.phase         = 0.0f;
+        osc.volume        = 0.0f;
+    }
+    if (existing_voice) {
+        state->voices[existing_voice].note_finished = true;
+    }
+    state->note_to_voice[channel][note] = static_cast<uint8_t>(voice_idx);
+    return true;
+}
+
+// Gives every live oscillator distinct nonzero state, so any change shows up.
+static void note_on_sim_mark(NoteOnSimState* state)
+{
+    for (uint32_t idx = 1; idx < 8; idx++) {
+        if (state->oscs[idx].used) {
+            state->oscs[idx].volume     = 0.1f * static_cast<float>(idx);
+            state->oscs[idx].old_volume = 0.05f * static_cast<float>(idx);
+            state->oscs[idx].phase      = 0.01f * static_cast<float>(idx + 1);
+        }
+    }
+}
+
+static void check_note_on_exhaustion_regressions()
+{
+    // T2.1: the voice pool is full.  A new note and a retrigger are both dropped, and
+    // the whole state stays byte-identical.
+    {
+        NoteOnSimState state;
+        memset(static_cast<void*>(&state), 0, sizeof(state));
+        TEST(note_on_sim(&state, 0, 60, 1));
+        TEST(note_on_sim(&state, 0, 62, 1));
+        TEST(note_on_sim(&state, 3, 64, 1));
+        note_on_sim_mark(&state);
+
+        NoteOnSimState snapshot;
+        memcpy(static_cast<void*>(&snapshot), &state, sizeof(state));
+
+        TEST(! note_on_sim(&state, 0, 65, 1)); // a different new note
+        TEST(memcmp(&state, &snapshot, sizeof(state)) == 0);
+
+        const uint32_t old_voice = state.note_to_voice[0][60];
+        TEST(old_voice != 0);
+        TEST(! note_on_sim(&state, 0, 60, 1)); // a retrigger of a playing note
+        TEST(memcmp(&state, &snapshot, sizeof(state)) == 0);
+        TEST(state.note_to_voice[0][60] == old_voice);
+        TEST(! state.voices[old_voice].note_finished);
+        TEST(state.oscs[state.voices[old_voice].osc_ids[0]].volume > 0.0f);
+    }
+
+    // T2.2: the oscillator pool runs out for a three-layer note while a voice is free.
+    // The playing voices, their oscillators and the mappings stay byte-identical.
+    for (uint32_t retrigger = 0; retrigger < 2; retrigger++) {
+        NoteOnSimState state;
+        memset(static_cast<void*>(&state), 0, sizeof(state));
+        TEST(note_on_sim(&state, 0, 60, 3));
+        TEST(note_on_sim(&state, 0, 62, 2)); // five of seven oscillators are in use
+        note_on_sim_mark(&state);
+
+        NoteOnSimState snapshot;
+        memcpy(static_cast<void*>(&snapshot), &state, sizeof(state));
+
+        const uint32_t new_note = retrigger ? 60 : 64;
+        TEST(! note_on_sim(&state, 0, new_note, 3));
+
+        TEST(memcmp(&state.voices[1], &snapshot.voices[1], 2 * sizeof(state.voices[1])) == 0);
+        TEST(memcmp(state.oscs, snapshot.oscs, sizeof(state.oscs)) == 0);
+        TEST(memcmp(state.note_to_voice, snapshot.note_to_voice, sizeof(state.note_to_voice)) == 0);
+
+        // The touched free voice returns to the pool.  The two partial claims are free.
+        TEST(! state.voices[3].active && state.voices[3].osc_count == 0);
+        for (uint32_t idx = 6; idx < 8; idx++) {
+            TEST(! state.oscs[idx].used && state.oscs[idx].voice_id == 0);
+        }
+        for (uint32_t layer_idx = 0; layer_idx < 3; layer_idx++) {
+            TEST(state.voices[3].osc_ids[layer_idx] == 0);
+        }
+
+        // The old note is still mapped and sounding.
+        const uint32_t old_voice = state.note_to_voice[0][new_note];
+        if (retrigger) {
+            TEST(old_voice == 1);
+            TEST(! state.voices[old_voice].note_finished);
+            TEST(state.voices[old_voice].active);
+            TEST(state.oscs[state.voices[old_voice].osc_ids[0]].volume > 0.0f);
+        }
+        else {
+            TEST(old_voice == 0);
+        }
+    }
+
+    // T2.3: on success the retrigger gets a distinct voice.  The old voice is finished
+    // only now, the mapping moves to the new voice, and the new oscillators start fresh.
+    {
+        NoteOnSimState state;
+        memset(static_cast<void*>(&state), 0, sizeof(state));
+        TEST(note_on_sim(&state, 0, 60, 2));
+        note_on_sim_mark(&state);
+        const uint32_t old_voice = state.note_to_voice[0][60];
+        TEST(old_voice == 1);
+
+        TEST(note_on_sim(&state, 0, 60, 2));
+        const uint32_t new_voice = state.note_to_voice[0][60];
+        TEST(new_voice != 0 && new_voice != old_voice);
+        TEST(state.voices[old_voice].note_finished);
+        TEST(state.voices[old_voice].active);
+        TEST(! state.voices[new_voice].note_finished);
+        for (uint32_t layer_idx = 0; layer_idx < 2; layer_idx++) {
+            const NoteOnSimOsc& osc = state.oscs[state.voices[new_voice].osc_ids[layer_idx]];
+            TEST(osc.old_volume == 0.0f && osc.phase == 0.0f);
+            TEST(osc.voice_id == new_voice);
+        }
+    }
+}
+
+// Voices dropdown (Instrument::voice_mode).  The codec, schema and source-pin checks run
+// against production code.  The allocation, reset and sweep sim mirrors process_note_on and
+// pins the policy; the source pins tie it to the production text.  It is NOT proof of the
+// live audio behavior (manual audio smoke).
+static void check_voice_mode_codec()
+{
+    const std::unique_ptr<ClipboardDecode> decoded_storage = std::make_unique<ClipboardDecode>();
+    ClipboardDecode&                       decoded         = *decoded_storage;
+
+    // Absent key: legacy documents decode to multiple, even into a pre-filled instrument.
+    static const char defaults_doc[] = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\"}]}";
+    memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
+    decoded.instr.voice_mode = 2;
+    TEST(decode_clipboard(&decoded, defaults_doc, max_portable_records));
+    TEST(decoded.instr.voice_mode == 0);
+
+    // Clipboard form: each spelled name decodes, and the encoder spells it back.
+    static const char* const                     names[3]     = { "multiple", "reuse per-note", "single" };
+    const std::unique_ptr<Synth::InstrumentBank> desc_storage = std::make_unique<Synth::InstrumentBank>();
+    Synth::InstrumentBank&                       desc_bank    = *desc_storage;
+    memset(static_cast<void*>(&desc_bank), 0, sizeof(desc_bank));
+    static char text[8192];
+    for (uint32_t mode = 0; mode < 3; mode++) {
+        char doc[256];
+        snprintf(doc,
+                 sizeof(doc),
+                 "{\"format\":\"synth-instrument-v1\",\"voices\":\"%s\",\"layers\":[{\"wave_a\":\"sine\"}]}",
+                 names[mode]);
+        memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
+        TEST(decode_clipboard(&decoded, doc, max_portable_records));
+        TEST(decoded.instr.voice_mode == mode);
+
+        const uint32_t len = Synth::encode_instrument_json(text, sizeof(text), &decoded.instr, &desc_bank);
+        TEST(len > 0);
+        if (mode == 0) {
+            TEST(strstr(text, "\"voices\"") == nullptr); // the default is omitted
+        }
+        else {
+            char expected[64];
+            snprintf(expected, sizeof(expected), "\"voices\":\"%s\"", names[mode]);
+            TEST(strstr(text, expected) != nullptr);
+        }
+        const std::unique_ptr<ClipboardDecode> again_decode_storage = std::make_unique<ClipboardDecode>();
+        ClipboardDecode&                       again                = *again_decode_storage;
+        memset(static_cast<void*>(&again), 0, sizeof(again));
+        TEST(Synth::decode_instrument_json(text,
+                                           len,
+                                           &again.instr,
+                                           again.envs,
+                                           &again.env_count,
+                                           again.lfos,
+                                           &again.lfo_count));
+        TEST(again.instr.voice_mode == mode);
+    }
+
+    // Clipboard and validated-bank domains decode the same key.
+    static const char single_doc[] =
+        "{\"format\":\"synth-instrument-v1\",\"voices\":\"single\",\"layers\":[{\"wave_a\":\"sine\"}]}";
+    const Synth::InstrumentJsonDomain domains[2] = { Synth::InstrumentJsonDomain::clipboard,
+                                                     Synth::InstrumentJsonDomain::validated_bank };
+    for (uint32_t d = 0; d < 2; d++) {
+        memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
+        TEST(Synth::decode_instrument_json_for_domain(single_doc,
+                                                      sizeof(single_doc) - 1,
+                                                      &decoded.instr,
+                                                      decoded.envs,
+                                                      &decoded.env_count,
+                                                      decoded.lfos,
+                                                      &decoded.lfo_count,
+                                                      decoded.layout,
+                                                      max_portable_records,
+                                                      &decoded.layout_count,
+                                                      domains[d]));
+        TEST(decoded.instr.voice_mode == 2);
+    }
+
+    // Rejections: an unknown name, a wrong-case name and non-string values.
+    static const char* const bad_values[] = { "\"poly\"", "\"Single\"", "1", "true", "null" };
+    for (const char* bad : bad_values) {
+        char doc[256];
+        snprintf(doc,
+                 sizeof(doc),
+                 "{\"format\":\"synth-instrument-v1\",\"voices\":%s,\"layers\":[{\"wave_a\":\"sine\"}]}",
+                 bad);
+        memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
+        TEST(! decode_clipboard(&decoded, doc, max_portable_records));
+    }
+
+    // An out-of-range stored mode cannot be spelled: the encoder fails.
+    Synth::Instrument bad_instr = decoded.instr;
+    bad_instr.voice_mode        = 3;
+    TEST(Synth::encode_instrument_json(text, sizeof(text), &bad_instr, &desc_bank) == 0);
+
+    // Pool (editor bank) form: round trip is byte-stable.
+    const std::unique_ptr<Synth::InstrumentEditorBank> pool_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       pool         = *pool_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> back_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       back         = *back_storage;
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&payload)[Synth::library_payload_max] = payload_storage->elements;
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> again_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&again_payload)[Synth::library_payload_max] = again_storage->elements;
+    build_named_fm_fixture(&pool);
+    for (uint32_t mode = 1; mode < 3; mode++) {
+        pool.bank.instruments.entries[0].voice_mode = static_cast<uint8_t>(mode);
+        const uint32_t len                          = Synth::encode_editor_bank_json(&pool, payload, sizeof(payload));
+        TEST(len > 0);
+        char expected[64];
+        snprintf(expected, sizeof(expected), "\"voices\":\"%s\"", names[mode]);
+        TEST(strstr(payload, expected) != nullptr);
+        TEST(Synth::decode_editor_bank_json(payload, len, &back));
+        TEST(back.bank.instruments.entries[0].voice_mode == mode);
+        const uint32_t again_len = Synth::encode_editor_bank_json(&back, again_payload, sizeof(again_payload));
+        // The fixture is not canonical, so stability is checked from the decoded bank on.
+        TEST(again_len > 0);
+        TEST(Synth::decode_editor_bank_json(again_payload, again_len, &back));
+        TEST(back.bank.instruments.entries[0].voice_mode == mode);
+        TEST(strstr(again_payload, expected) != nullptr);
+        // A canonical document re-encodes to the same bytes.
+        TEST(Synth::encode_editor_bank_json(&back, payload, sizeof(payload)) == again_len);
+        TEST(memcmp(payload, again_payload, again_len) == 0);
+    }
+    pool.bank.instruments.entries[0].voice_mode = 0;
+    uint32_t len                                = Synth::encode_editor_bank_json(&pool, payload, sizeof(payload));
+    TEST(len > 0 && strstr(payload, "\"voices\"") == nullptr);
+    pool.bank.instruments.entries[0].voice_mode = 3;
+    TEST(Synth::encode_editor_bank_json(&pool, payload, sizeof(payload)) == 0);
+
+    // Schema pin.
+    const char* const schema = load_source_file("doc/synth_instrument_schema.json");
+    TEST(schema != nullptr && strstr(schema, "\"voices\"") != nullptr);
+    TEST(schema != nullptr && strstr(schema, "\"enum\": [\"multiple\", \"reuse per-note\", \"single\"]") != nullptr);
+    TEST(schema != nullptr && strstr(schema, "\"default\": \"multiple\"") != nullptr);
+}
+
+// The oscillator fields mirror the note-on table of process_note_on.  The envelope fields
+// stand for the node-owned state (EnvelopeState and last_point_ticks), which note-on zeroes
+// through configure_target_modulation.  A takeover keeps the running signal state (phase,
+// mod_phase, old_volume, old_panning, the FIR history flag and the FIR engagement state) and
+// resets the note-dependent state.
+struct VoiceSimOsc {
+    bool     used;
+    bool     terminating;
+    bool     decaying;
+    bool     clear_fir_hist;
+    bool     fir_active;
+    uint8_t  voice_id;
+    uint8_t  layer_idx;
+    uint8_t  source_layer;
+    uint8_t  env_reverse;
+    uint16_t env_point;
+    uint16_t env_tick;
+    uint16_t last_point_ticks;
+    uint32_t decay_tick;
+    uint32_t noise_counter;
+    uint32_t note_seed;
+    uint32_t fir_taps_offs;
+    float    old_volume;
+    float    phase;
+    float    mod_phase;
+    float    old_panning;
+    float    decay_mult;
+    float    decay_factor;
+};
+
+struct VoiceSimVoice {
+    bool     active;
+    bool     releasing;
+    bool     sustained;
+    bool     note_finished;
+    uint8_t  channel;
+    uint8_t  note;
+    uint8_t  instrument;
+    uint8_t  osc_count;
+    uint8_t  osc_ids[4];
+    uint32_t release_sample;
+    uint32_t release_total_ticks;
+};
+
+struct VoiceSimState {
+    VoiceSimVoice voices[5]; // slot 0 is the sentinel: 4 usable voices
+    VoiceSimOsc   oscs[10];  // slot 0 is the sentinel: 9 usable oscillators
+    uint8_t       note_to_voice[4][128];
+    float         release_seconds;     // the instrument's Release (s); zero leaves the decay off
+    uint32_t      noise_start_counter; // mirrors the production noise_start_counter
+};
+
+constexpr uint32_t voice_sim_noise_stride = 0x9e3779b9u;
+
+// Per-layer instrument data the sim stands in for: layer 1 and 2 carry a filter, only layer 1
+// has a positive spread.  The base pan differs per layer.
+static bool voice_sim_layer_filtered(uint32_t layer)
+{
+    return layer == 1 || layer == 2;
+}
+
+static bool voice_sim_layer_fir_active(uint32_t layer)
+{
+    return layer == 1;
+}
+
+static float voice_sim_layer_pan(uint32_t layer)
+{
+    return 0.1f * static_cast<float>(layer + 1);
+}
+
+static uint32_t voice_sim_fir_offset(uint32_t osc_slot)
+{
+    return 100 + 4 * osc_slot;
+}
+
+// Mirrors voice_restartable_in_place: the voice must still hold every layer, in order.
+static bool voice_sim_restartable(const VoiceSimState& s, uint32_t voice_idx, uint32_t layers)
+{
+    const VoiceSimVoice& voice = s.voices[voice_idx];
+    if (voice.osc_count != layers) {
+        return false;
+    }
+    for (uint32_t i = 0; i < voice.osc_count; i++) {
+        if (s.oscs[voice.osc_ids[i]].source_layer != i) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The allocation order and the in-place restart path of process_note_on.  Returns false when
+// the note is dropped, and then the state is left exactly as it was (apart from the free voice
+// slot that was touched and returned).
+static bool voice_sim_note_on(VoiceSimState* s,
+                              uint32_t       mode,
+                              uint32_t       instrument,
+                              uint32_t       channel,
+                              uint32_t       note,
+                              uint32_t       layers,
+                              uint32_t       release_sample)
+{
+    const uint32_t existing = s->note_to_voice[channel][note];
+    uint32_t       reset    = 0;
+    if (mode == 1) {
+        if (existing && ! s->voices[existing].note_finished && s->voices[existing].instrument == instrument &&
+            voice_sim_restartable(*s, existing, layers)) {
+            reset = existing;
+        }
+    }
+    else if (mode == 2) {
+        for (uint32_t i = 1; i < 5 && ! reset; i++) {
+            if (s->voices[i].active && ! s->voices[i].note_finished && s->voices[i].instrument == instrument &&
+                voice_sim_restartable(*s, i, layers)) {
+                reset = i;
+            }
+        }
+    }
+
+    uint32_t prev_chan = 0;
+    uint32_t prev_note = 0;
+    uint32_t voice_idx = reset;
+    if (reset) {
+        // An in-place restart allocates nothing and cannot fail.
+        prev_chan = s->voices[reset].channel;
+        prev_note = s->voices[reset].note;
+    }
+    else {
+        for (uint32_t i = 1; i < 5 && ! voice_idx; i++) {
+            if (! s->voices[i].active) {
+                voice_idx = i;
+            }
+        }
+        if (! voice_idx) {
+            return false;
+        }
+    }
+
+    VoiceSimVoice& voice      = s->voices[voice_idx];
+    voice.channel             = static_cast<uint8_t>(channel);
+    voice.note                = static_cast<uint8_t>(note);
+    voice.instrument          = static_cast<uint8_t>(instrument);
+    voice.active              = true;
+    voice.releasing           = false;
+    voice.note_finished       = false;
+    voice.sustained           = false;
+    voice.release_sample      = release_sample;
+    voice.release_total_ticks = Synth::sustain_decay_ticks(s->release_seconds);
+
+    if (reset) {
+        assert(voice.osc_count == layers);
+    }
+    else {
+        uint32_t allocated = 0;
+        for (uint32_t i = 1; i < 10 && allocated < layers; i++) {
+            if (! s->oscs[i].used) {
+                s->oscs[i].used            = true;
+                s->oscs[i].voice_id        = static_cast<uint8_t>(voice_idx);
+                voice.osc_ids[allocated++] = static_cast<uint8_t>(i);
+            }
+        }
+        if (allocated < layers) {
+            for (uint32_t i = 0; i < allocated; i++) {
+                memset(static_cast<void*>(&s->oscs[voice.osc_ids[i]]), 0, sizeof(VoiceSimOsc));
+                voice.osc_ids[i] = 0;
+            }
+            voice.active    = false;
+            voice.osc_count = 0;
+            return false;
+        }
+        voice.osc_count = static_cast<uint8_t>(layers);
+    }
+
+    if (reset && (prev_chan != channel || prev_note != note) && s->note_to_voice[prev_chan][prev_note] == voice_idx) {
+        s->note_to_voice[prev_chan][prev_note] = 0;
+    }
+    if (mode == 2) {
+        for (uint32_t i = 1; i < 5; i++) {
+            VoiceSimVoice& swept = s->voices[i];
+            if (i != voice_idx && swept.active && ! swept.note_finished && swept.instrument == instrument) {
+                if (s->note_to_voice[swept.channel][swept.note] == i) {
+                    s->note_to_voice[swept.channel][swept.note] = 0;
+                }
+                swept.note_finished = true;
+            }
+        }
+    }
+    if (existing && existing != voice_idx) {
+        s->voices[existing].note_finished = true;
+    }
+    s->note_to_voice[channel][note] = static_cast<uint8_t>(voice_idx);
+
+    for (uint32_t layer = 0; layer < layers; layer++) {
+        VoiceSimOsc& osc = s->oscs[voice.osc_ids[layer]];
+        osc.layer_idx    = static_cast<uint8_t>(layer);
+        osc.source_layer = static_cast<uint8_t>(layer);
+        if (! reset) {
+            osc.phase       = 0.0f;
+            osc.mod_phase   = 0.0f;
+            osc.old_volume  = 0.0f;
+            osc.old_panning = voice_sim_layer_pan(layer);
+        }
+        osc.terminating  = false;
+        osc.decay_mult   = Synth::sustain_decay_per_tick(voice.release_total_ticks);
+        osc.decay_factor = 1.0f;
+        osc.decay_tick   = 0;
+        osc.decaying     = false;
+        s->noise_start_counter += voice_sim_noise_stride;
+        osc.noise_counter    = s->noise_start_counter;
+        osc.note_seed        = s->noise_start_counter;
+        osc.env_point        = 0;
+        osc.env_tick         = 0;
+        osc.env_reverse      = 0;
+        osc.last_point_ticks = 0;
+        // A restarted oscillator which already runs this filter keeps its history and engagement.
+        const bool keeps_filter = reset && (osc.fir_taps_offs != 0) == voice_sim_layer_filtered(layer);
+        if (voice_sim_layer_filtered(layer)) {
+            osc.fir_taps_offs = voice_sim_fir_offset(voice.osc_ids[layer]);
+            if (! keeps_filter) {
+                osc.clear_fir_hist = true;
+            }
+        }
+        else {
+            osc.fir_taps_offs  = 0;
+            osc.clear_fir_hist = false;
+        }
+        if (! keeps_filter) {
+            osc.fir_active = voice_sim_layer_fir_active(layer);
+        }
+    }
+    return true;
+}
+
+// Gives every live oscillator and voice distinctive state, so any carried field shows up.  The
+// values follow the reset table in the approved test specification.
+static void voice_sim_mark(VoiceSimState* s)
+{
+    for (uint32_t i = 1; i < 10; i++) {
+        VoiceSimOsc& osc = s->oscs[i];
+        if (osc.used) {
+            osc.old_volume       = 0.05f * static_cast<float>(i);
+            osc.phase            = 0.77f;
+            osc.mod_phase        = 0.66f;
+            osc.noise_counter    = 12345;
+            osc.note_seed        = 999;
+            osc.old_panning      = 0.9f;
+            osc.decay_factor     = 0.5f;
+            osc.decay_mult       = 0.25f;
+            osc.decay_tick       = 40;
+            osc.decaying         = true;
+            osc.terminating      = true;
+            osc.clear_fir_hist   = false;
+            osc.fir_active       = true;
+            osc.fir_taps_offs    = voice_sim_layer_filtered(osc.source_layer) ? 777u : 0u;
+            osc.env_point        = 5;
+            osc.env_tick         = 1;
+            osc.env_reverse      = 1;
+            osc.last_point_ticks = 3;
+        }
+    }
+    for (uint32_t i = 1; i < 5; i++) {
+        if (s->voices[i].active) {
+            s->voices[i].releasing           = true;
+            s->voices[i].sustained           = true;
+            s->voices[i].release_sample      = 5000;
+            s->voices[i].release_total_ticks = 999;
+        }
+    }
+}
+
+// A dropped note touches a free voice slot and gives it back.  The slot is not part of the
+// playing state, so the exhaustion comparisons blank it first.
+static void voice_sim_clear_free_voice(VoiceSimState* s, uint32_t voice_idx)
+{
+    TEST(! s->voices[voice_idx].active);
+    memset(static_cast<void*>(&s->voices[voice_idx]), 0, sizeof(VoiceSimVoice));
+}
+
+static uint32_t voice_sim_used_oscs(const VoiceSimState& s)
+{
+    uint32_t count = 0;
+    for (uint32_t i = 1; i < 10; i++) {
+        count += s.oscs[i].used ? 1 : 0;
+    }
+    return count;
+}
+
+static uint32_t voice_sim_live(const VoiceSimState& s, uint32_t instrument)
+{
+    uint32_t count = 0;
+    for (uint32_t i = 1; i < 5; i++) {
+        count += (s.voices[i].active && ! s.voices[i].note_finished && s.voices[i].instrument == instrument) ? 1 : 0;
+    }
+    return count;
+}
+
+static void check_voice_mode_sim()
+{
+    // Reuse per-note: the same note restarts in place.  The running signal state carries.
+    {
+        VoiceSimState s;
+        memset(static_cast<void*>(&s), 0, sizeof(s));
+        TEST(voice_sim_note_on(&s, 1, 0, 0, 60, 2, 0));
+        voice_sim_mark(&s);
+        const uint32_t voice = s.note_to_voice[0][60];
+        const float    seed0 = s.oscs[s.voices[voice].osc_ids[0]].old_volume;
+        const float    seed1 = s.oscs[s.voices[voice].osc_ids[1]].old_volume;
+        TEST(seed0 > 0.0f && seed1 > seed0);
+        TEST(voice_sim_note_on(&s, 1, 0, 0, 60, 2, 123));
+        TEST(s.note_to_voice[0][60] == voice);
+        TEST(voice_sim_live(s, 0) == 1);
+        const VoiceSimVoice& v = s.voices[voice];
+        TEST(v.active && ! v.releasing && ! v.sustained && ! v.note_finished && v.release_sample == 123);
+        TEST(v.osc_count == 2);
+        TEST(s.oscs[v.osc_ids[0]].old_volume == seed0 && s.oscs[v.osc_ids[1]].old_volume == seed1);
+        for (uint32_t layer = 0; layer < 2; layer++) {
+            const VoiceSimOsc& osc = s.oscs[v.osc_ids[layer]];
+            TEST(osc.phase == 0.77f && osc.mod_phase == 0.66f);
+            TEST(osc.decay_tick == 0 && ! osc.terminating && osc.voice_id == voice);
+        }
+    }
+
+    // Reuse per-note: a different note takes a new voice, and a different instrument is
+    // never reset.
+    {
+        VoiceSimState s;
+        memset(static_cast<void*>(&s), 0, sizeof(s));
+        TEST(voice_sim_note_on(&s, 1, 0, 0, 60, 1, 0));
+        voice_sim_mark(&s);
+        TEST(voice_sim_note_on(&s, 1, 0, 0, 62, 1, 0));
+        TEST(s.note_to_voice[0][60] == 1 && s.note_to_voice[0][62] == 2);
+        TEST(voice_sim_live(s, 0) == 2);
+        TEST(s.oscs[s.voices[1].osc_ids[0]].phase == 0.77f);
+        TEST(voice_sim_note_on(&s, 1, 3, 0, 60, 1, 0)); // key remapped to instrument 3
+        TEST(s.note_to_voice[0][60] == 3 && s.voices[1].note_finished);
+        TEST(s.oscs[s.voices[3].osc_ids[0]].old_volume == 0.0f);
+    }
+
+    // Reuse per-note with the oscillator pool full: the restart needs no oscillator, so it
+    // succeeds.  A restart whose layer count grew cannot restart in place; it needs a new
+    // voice and new oscillators, finds none, and the old note keeps playing untouched.
+    {
+        VoiceSimState s;
+        memset(static_cast<void*>(&s), 0, sizeof(s));
+        TEST(voice_sim_note_on(&s, 0, 0, 0, 60, 1, 0));
+        TEST(voice_sim_note_on(&s, 0, 1, 0, 61, 4, 0));
+        TEST(voice_sim_note_on(&s, 0, 1, 0, 62, 4, 0)); // 9 of 9 oscillators in use
+        voice_sim_mark(&s);
+        VoiceSimState snapshot;
+        memcpy(static_cast<void*>(&snapshot), &s, sizeof(s));
+        TEST(voice_sim_note_on(&s, 1, 0, 0, 60, 1, 0)); // same layer count: in place
+        TEST(s.note_to_voice[0][60] == 1 && voice_sim_used_oscs(s) == 9);
+        TEST(s.oscs[s.voices[1].osc_ids[0]].phase == 0.77f);
+        memcpy(static_cast<void*>(&snapshot), &s, sizeof(s));
+        TEST(! voice_sim_note_on(&s, 1, 0, 0, 60, 2, 0)); // the layer count grew to two
+        voice_sim_clear_free_voice(&s, 4);
+        voice_sim_clear_free_voice(&snapshot, 4);
+        TEST(memcmp(&s, &snapshot, sizeof(s)) == 0);
+    }
+
+    // A voice which lost a layer (the last live entry moved into the gap) cannot restart in
+    // place.  The note takes a new voice with fresh state and the old voice fades out.
+    {
+        VoiceSimState s;
+        memset(static_cast<void*>(&s), 0, sizeof(s));
+        TEST(voice_sim_note_on(&s, 1, 0, 0, 60, 3, 0));
+        VoiceSimVoice& v = s.voices[1];
+        for (uint32_t layer = 0; layer < 3; layer++) {
+            s.oscs[v.osc_ids[layer]].old_volume = 0.1f * static_cast<float>(layer + 1);
+            s.oscs[v.osc_ids[layer]].phase      = 0.5f;
+        }
+        const uint8_t gone = v.osc_ids[0];
+        memset(static_cast<void*>(&s.oscs[gone]), 0, sizeof(VoiceSimOsc));
+        v.osc_ids[0]                   = v.osc_ids[2];
+        v.osc_ids[2]                   = 0;
+        v.osc_count                    = 2;
+        s.oscs[v.osc_ids[0]].layer_idx = 0;
+        TEST(voice_sim_note_on(&s, 1, 0, 0, 60, 3, 0));
+        TEST(s.note_to_voice[0][60] == 2 && s.voices[1].note_finished && s.voices[1].active);
+        TEST(s.voices[2].osc_count == 3);
+        for (uint32_t layer = 0; layer < 3; layer++) {
+            TEST(s.oscs[s.voices[2].osc_ids[layer]].old_volume == 0.0f);
+            TEST(s.oscs[s.voices[2].osc_ids[layer]].phase == 0.0f);
+        }
+        TEST(s.voices[1].osc_count == 2 && s.oscs[s.voices[1].osc_ids[0]].old_volume == 0.3f);
+    }
+
+    // Single mode: four different notes leave exactly one live voice, on any channel.
+    {
+        VoiceSimState s;
+        memset(static_cast<void*>(&s), 0, sizeof(s));
+        const uint32_t channels[4] = { 0, 1, 0, 2 };
+        const uint32_t notes[4]    = { 60, 64, 67, 72 };
+        float          carried     = 0.0f;
+        for (uint32_t i = 0; i < 4; i++) {
+            TEST(voice_sim_note_on(&s, 2, 0, channels[i], notes[i], 1, 0));
+            TEST(voice_sim_live(s, 0) == 1);
+            TEST(s.note_to_voice[channels[i]][notes[i]] == 1);
+            if (i) {
+                TEST(s.note_to_voice[channels[i - 1]][notes[i - 1]] == 0);
+                TEST(s.oscs[s.voices[1].osc_ids[0]].old_volume == carried);
+            }
+            s.oscs[s.voices[1].osc_ids[0]].old_volume = 0.25f * static_cast<float>(i + 1);
+            carried                                   = 0.25f * static_cast<float>(i + 1);
+        }
+        // Another instrument is unaffected.
+        TEST(voice_sim_note_on(&s, 2, 5, 0, 50, 1, 0));
+        TEST(voice_sim_live(s, 0) == 1 && voice_sim_live(s, 5) == 1);
+    }
+
+    // Single mode sweep: other live voices of the instrument fade out.  A key which was
+    // remapped is not cleared by the sweep.
+    {
+        VoiceSimState s;
+        memset(static_cast<void*>(&s), 0, sizeof(s));
+        TEST(voice_sim_note_on(&s, 0, 0, 0, 60, 1, 0)); // voice 1
+        TEST(voice_sim_note_on(&s, 0, 0, 0, 62, 1, 0)); // voice 2
+        TEST(voice_sim_note_on(&s, 0, 0, 0, 64, 1, 0)); // voice 3
+        s.note_to_voice[0][64] = 0;                     // voice 3 lost its key
+        s.note_to_voice[0][65] = 3;                     // and some other voice owns a key
+        TEST(voice_sim_note_on(&s, 2, 0, 0, 67, 1, 0));
+        TEST(s.note_to_voice[0][67] == 1 && s.note_to_voice[0][60] == 0 && s.note_to_voice[0][62] == 0);
+        TEST(s.voices[2].note_finished && s.voices[3].note_finished && ! s.voices[1].note_finished);
+        TEST(s.note_to_voice[0][65] == 3); // the stale key of voice 3 stays; only equal keys clear
+        TEST(voice_sim_live(s, 0) == 1);
+        TEST(s.voices[2].active && s.voices[3].active); // swept voices fade, they are not cut
+    }
+
+    // Single mode: the takeover note's key held by another live voice of the instrument.
+    {
+        VoiceSimState s;
+        memset(static_cast<void*>(&s), 0, sizeof(s));
+        TEST(voice_sim_note_on(&s, 0, 0, 0, 60, 1, 0));
+        TEST(voice_sim_note_on(&s, 0, 0, 0, 62, 1, 0));
+        TEST(voice_sim_note_on(&s, 2, 0, 0, 62, 1, 0)); // same key as voice 2; voice 1 is lowest
+        TEST(s.note_to_voice[0][62] == 1 && s.voices[2].note_finished && ! s.voices[1].note_finished);
+        TEST(s.note_to_voice[0][60] == 0 && voice_sim_live(s, 0) == 1);
+    }
+
+    // Single mode with the oscillator pool full: a takeover with the same layer count needs no
+    // oscillator and succeeds.  A takeover which needs a new voice and finds no oscillator is
+    // dropped, and it leaves everything, including the sweep targets, alone.
+    {
+        VoiceSimState s;
+        memset(static_cast<void*>(&s), 0, sizeof(s));
+        TEST(voice_sim_note_on(&s, 0, 0, 0, 60, 1, 0));
+        TEST(voice_sim_note_on(&s, 0, 0, 0, 62, 4, 0));
+        TEST(voice_sim_note_on(&s, 0, 1, 0, 64, 4, 0)); // 9 of 9 oscillators in use
+        voice_sim_mark(&s);
+        TEST(voice_sim_note_on(&s, 2, 0, 0, 70, 1, 0)); // takes voice 1 in place; voice 2 fades
+        TEST(s.note_to_voice[0][70] == 1 && s.voices[2].note_finished && voice_sim_used_oscs(s) == 9);
+        VoiceSimState snapshot;
+        memcpy(static_cast<void*>(&snapshot), &s, sizeof(s));
+        TEST(! voice_sim_note_on(&s, 2, 0, 0, 71, 5, 0)); // layer count mismatch, no free oscillator
+        voice_sim_clear_free_voice(&s, 4);
+        voice_sim_clear_free_voice(&snapshot, 4);
+        TEST(memcmp(&s, &snapshot, sizeof(s)) == 0);
+    }
+
+    // Single mode with the voice pool full and no live voice of the instrument: clean drop.
+    {
+        VoiceSimState s;
+        memset(static_cast<void*>(&s), 0, sizeof(s));
+        for (uint32_t i = 0; i < 4; i++) {
+            TEST(voice_sim_note_on(&s, 0, 1, 0, 60 + i, 1, 0));
+        }
+        voice_sim_mark(&s);
+        VoiceSimState snapshot;
+        memcpy(static_cast<void*>(&snapshot), &s, sizeof(s));
+        TEST(! voice_sim_note_on(&s, 2, 0, 0, 80, 1, 0));
+        TEST(memcmp(&s, &snapshot, sizeof(s)) == 0);
+    }
+}
+
+// Note-off and termination models for the voice sim.  They mirror process_note_off with
+// begin_voice_release, and the free branch of update_modulation.
+static void voice_sim_note_off(VoiceSimState* s, bool pedal_down, uint32_t channel, uint32_t note)
+{
+    const uint32_t voice_idx = s->note_to_voice[channel][note];
+    if (! voice_idx) {
+        return;
+    }
+    if (pedal_down) {
+        s->voices[voice_idx].sustained = true;
+    }
+    else if (! s->voices[voice_idx].releasing) {
+        s->voices[voice_idx].releasing = true;
+    }
+}
+
+// The voice's last oscillator is gone: a note_finished voice leaves the mapping alone.
+static void voice_sim_terminate(VoiceSimState* s, uint32_t voice_idx)
+{
+    VoiceSimVoice& voice = s->voices[voice_idx];
+    for (uint32_t i = 0; i < voice.osc_count; i++) {
+        memset(static_cast<void*>(&s->oscs[voice.osc_ids[i]]), 0, sizeof(VoiceSimOsc));
+    }
+    if (! voice.note_finished) {
+        s->note_to_voice[voice.channel][voice.note] = 0;
+    }
+    voice.osc_count = 0;
+    memset(voice.osc_ids, 0, sizeof(voice.osc_ids));
+    voice.active = false;
+}
+
+// Every field of an in-place restarted voice.  The signal state (phase, mod_phase, old_volume,
+// old_panning, the FIR history flag and the FIR engagement state) equals the state before the
+// restart, and the oscillator slots did not move.  The note-dependent fields hold their fresh
+// note-on values.  Noise_before is the sim's noise_start_counter ahead of the note-on.
+static void voice_sim_expect_restart(const VoiceSimState& s,
+                                     const VoiceSimState& before,
+                                     uint32_t             voice_idx,
+                                     uint32_t             layers,
+                                     uint32_t             release_sample,
+                                     uint32_t             noise_before)
+{
+    const VoiceSimVoice& voice = s.voices[voice_idx];
+    TEST(voice.active && ! voice.releasing && ! voice.sustained && ! voice.note_finished);
+    TEST(voice.release_sample == release_sample);
+    TEST(voice.release_total_ticks == Synth::sustain_decay_ticks(s.release_seconds));
+    TEST(voice.osc_count == layers);
+    TEST(memcmp(voice.osc_ids, before.voices[voice_idx].osc_ids, sizeof(voice.osc_ids)) == 0);
+    for (uint32_t layer = 0; layer < layers; layer++) {
+        const uint32_t     slot = voice.osc_ids[layer];
+        const VoiceSimOsc& osc  = s.oscs[slot];
+        const VoiceSimOsc& old  = before.oscs[slot];
+        TEST(osc.used && osc.voice_id == voice_idx);
+        TEST(osc.layer_idx == layer && osc.source_layer == layer);
+        // Persisting signal state.
+        TEST(osc.phase == old.phase && osc.mod_phase == old.mod_phase);
+        TEST(osc.old_volume == old.old_volume && osc.old_panning == old.old_panning);
+        TEST(osc.clear_fir_hist == old.clear_fir_hist && osc.fir_active == old.fir_active);
+        // Note-dependent state.
+        TEST(! osc.terminating && ! osc.decaying);
+        TEST(osc.decay_tick == 0 && osc.decay_factor == 1.0f);
+        TEST(osc.decay_mult == Synth::sustain_decay_per_tick(voice.release_total_ticks));
+        const uint32_t expected_noise = noise_before + voice_sim_noise_stride * (layer + 1);
+        TEST(osc.noise_counter == expected_noise && osc.note_seed == expected_noise);
+        TEST(osc.env_point == 0 && osc.env_tick == 0 && osc.env_reverse == 0 && osc.last_point_ticks == 0);
+        TEST(osc.fir_taps_offs == (voice_sim_layer_filtered(layer) ? voice_sim_fir_offset(slot) : 0u));
+    }
+}
+
+static void check_voice_mode_reset_sim()
+{
+    // T11.1: every field of the old note is pre-loaded with a distinctive value.  After the
+    // restart, the signal state persists and every note-dependent field equals its fresh
+    // note-on value.  Both the same-note reuse and the single-mode takeover of another note
+    // take this path.
+    for (uint32_t mode = 1; mode < 3; mode++) {
+        VoiceSimState s;
+        memset(static_cast<void*>(&s), 0, sizeof(s));
+        s.release_seconds = 1.0f;
+        TEST(voice_sim_note_on(&s, mode, 0, 0, 60, 3, 0));
+        voice_sim_mark(&s);
+        const uint32_t voice = s.note_to_voice[0][60];
+        for (uint32_t layer = 0; layer < 3; layer++) {
+            TEST(s.oscs[s.voices[voice].osc_ids[layer]].old_volume > 0.0f);
+        }
+        VoiceSimState before;
+        memcpy(static_cast<void*>(&before), &s, sizeof(s));
+        const uint32_t noise_before = s.noise_start_counter;
+        const uint32_t note         = mode == 1 ? 60 : 64;
+        TEST(voice_sim_note_on(&s, mode, 0, 0, note, 3, 4321));
+        TEST(s.note_to_voice[0][note] == voice);
+        TEST(voice_sim_live(s, 0) == 1);
+        voice_sim_expect_restart(s, before, voice, 3, 4321, noise_before);
+        TEST(s.voices[voice].channel == 0 && s.voices[voice].note == note && s.voices[voice].instrument == 0);
+        TEST(voice_sim_used_oscs(s) == 3);
+        // The marked values themselves persisted (guards the comparison against a vacuous match).
+        for (uint32_t layer = 0; layer < 3; layer++) {
+            const VoiceSimOsc& osc = s.oscs[s.voices[voice].osc_ids[layer]];
+            TEST(osc.phase == 0.77f && osc.mod_phase == 0.66f && osc.old_panning == 0.9f);
+            TEST(osc.fir_active && ! osc.clear_fir_hist);
+        }
+    }
+
+    // T11.2: the restart keeps the oscillator slots, so the FIR offsets stay where they are and
+    // the history is not cleared.  A slot freed ahead of the old note's slots is not taken.
+    {
+        VoiceSimState s;
+        memset(static_cast<void*>(&s), 0, sizeof(s));
+        TEST(voice_sim_note_on(&s, 1, 0, 0, 62, 1, 0)); // voice 1 holds oscillator 1
+        TEST(voice_sim_note_on(&s, 1, 0, 0, 60, 3, 0)); // voice 2 holds oscillators 2..4
+        voice_sim_mark(&s);
+        voice_sim_terminate(&s, 1);
+        TEST(voice_sim_note_on(&s, 1, 0, 0, 60, 3, 0));
+        const VoiceSimVoice& v = s.voices[2];
+        TEST(v.osc_ids[0] == 2 && v.osc_ids[1] == 3 && v.osc_ids[2] == 4);
+        TEST(! s.oscs[1].used);
+        TEST(s.oscs[2].fir_taps_offs == 0 && ! s.oscs[2].clear_fir_hist);
+        TEST(s.oscs[3].fir_taps_offs == voice_sim_fir_offset(3) && ! s.oscs[3].clear_fir_hist && s.oscs[3].fir_active);
+        TEST(s.oscs[4].fir_taps_offs == voice_sim_fir_offset(4) && ! s.oscs[4].clear_fir_hist && s.oscs[4].fir_active);
+    }
+
+    // T9.1: the same note restarts from the attack, the sustain (decay not yet started and
+    // running) and the middle of the release.  The real decay functions fix the fresh values.
+    for (uint32_t position = 0; position < 4; position++) {
+        VoiceSimState s;
+        memset(static_cast<void*>(&s), 0, sizeof(s));
+        s.release_seconds = 2.0f;
+        TEST(voice_sim_note_on(&s, 1, 0, 0, 60, 2, 0));
+        TEST(voice_sim_note_on(&s, 1, 0, 0, 67, 1, 0)); // an unrelated voice stays alone
+        const uint32_t voice = s.note_to_voice[0][60];
+        VoiceSimVoice& v     = s.voices[voice];
+        for (uint32_t layer = 0; layer < 2; layer++) {
+            VoiceSimOsc& osc = s.oscs[v.osc_ids[layer]];
+            osc.old_volume   = 0.3f + 0.1f * static_cast<float>(layer);
+            osc.phase        = 0.4f;
+            osc.mod_phase    = 0.3f;
+            osc.env_reverse  = 0;
+            if (position == 0) { // attack, held
+                osc.env_point = 0;
+                osc.env_tick  = 3;
+            }
+            else if (position == 1) { // sustain, decay not started
+                osc.env_point = 2;
+                osc.env_tick  = 5;
+            }
+            else if (position == 2) { // sustain, decay running
+                osc.env_point    = 2;
+                osc.env_tick     = 5;
+                osc.decaying     = true;
+                osc.decay_tick   = 12;
+                osc.decay_factor = 0.8f;
+                osc.decay_mult   = Synth::sustain_decay_per_tick(Synth::sustain_decay_ticks(2.0f));
+            }
+            else { // released, mid-decay
+                v.releasing      = true;
+                osc.env_point    = 3;
+                osc.env_tick     = 6;
+                osc.decaying     = true;
+                osc.decay_tick   = 10;
+                osc.decay_factor = 0.7f;
+                osc.decay_mult   = Synth::sustain_decay_per_tick(Synth::sustain_decay_ticks(2.0f));
+            }
+        }
+        VoiceSimState before;
+        memcpy(static_cast<void*>(&before), &s, sizeof(s));
+        const uint32_t voices_before = voice_sim_live(s, 0);
+        const uint32_t noise_before  = s.noise_start_counter;
+        TEST(voice_sim_note_on(&s, 1, 0, 0, 60, 2, 9));
+        TEST(s.note_to_voice[0][60] == voice);
+        TEST(voice_sim_live(s, 0) == voices_before);
+        TEST(s.voices[voice].osc_count == 2 && voice_sim_used_oscs(s) == 3);
+        voice_sim_expect_restart(s, before, voice, 2, 9, noise_before);
+        // No dip: the restart's amplitude continues from the running level, never from zero.
+        TEST(s.oscs[s.voices[voice].osc_ids[0]].old_volume > 0.0f);
+        TEST(s.oscs[s.voices[voice].osc_ids[0]].phase == 0.4f && s.oscs[s.voices[voice].osc_ids[0]].mod_phase == 0.3f);
+    }
+
+    // T9.2: play, release, then re-press before the voice ends.  The seed is the decayed level.
+    {
+        VoiceSimState s;
+        memset(static_cast<void*>(&s), 0, sizeof(s));
+        s.release_seconds = 1.0f;
+        TEST(voice_sim_note_on(&s, 1, 0, 0, 60, 1, 0));
+        const uint32_t voice = s.note_to_voice[0][60];
+        VoiceSimOsc&   osc   = s.oscs[s.voices[voice].osc_ids[0]];
+        float          level = 0.5f;
+        osc.decaying         = true;
+        for (uint32_t tick = 0; tick < 8; tick++) {
+            level *= osc.decay_mult;
+            osc.decay_factor *= osc.decay_mult;
+            osc.decay_tick++;
+        }
+        osc.old_volume = level;
+        voice_sim_note_off(&s, false, 0, 60);
+        TEST(s.voices[voice].releasing);
+        TEST(level > 0.0f && level < 0.5f);
+        TEST(voice_sim_note_on(&s, 1, 0, 0, 60, 1, 0));
+        TEST(s.note_to_voice[0][60] == voice);
+        const VoiceSimOsc& fresh = s.oscs[s.voices[voice].osc_ids[0]];
+        TEST(fresh.old_volume == level && ! s.voices[voice].releasing);
+        TEST(fresh.decay_tick == 0 && fresh.decay_factor == 1.0f && ! fresh.decaying);
+    }
+
+    // T9.7: the layer count changes across the restart in both directions.  The old voice cannot
+    // restart in place, so the note takes a new voice with fresh state and the old voice fades.
+    {
+        const uint32_t before[2] = { 3, 1 };
+        const uint32_t after[2]  = { 1, 3 };
+        for (uint32_t i = 0; i < 2; i++) {
+            VoiceSimState s;
+            memset(static_cast<void*>(&s), 0, sizeof(s));
+            TEST(voice_sim_note_on(&s, 1, 0, 0, 60, before[i], 0));
+            voice_sim_mark(&s);
+            TEST(voice_sim_note_on(&s, 1, 0, 0, 60, after[i], 0));
+            TEST(s.note_to_voice[0][60] == 2);
+            TEST(s.voices[1].active && s.voices[1].note_finished && s.voices[1].osc_count == before[i]);
+            const VoiceSimVoice& v = s.voices[2];
+            TEST(v.osc_count == after[i] && voice_sim_used_oscs(s) == before[i] + after[i]);
+            for (uint32_t layer = 0; layer < after[i]; layer++) {
+                const VoiceSimOsc& osc = s.oscs[v.osc_ids[layer]];
+                TEST(osc.used && osc.voice_id == 2);
+                TEST(osc.old_volume == 0.0f && osc.phase == 0.0f && osc.mod_phase == 0.0f);
+            }
+            for (uint32_t layer = after[i]; layer < 4; layer++) {
+                TEST(v.osc_ids[layer] == 0);
+            }
+        }
+    }
+
+    // T8.1/T8.2: multiple mode keeps the clean-drop rule.  A retrigger gets a distinct voice
+    // with a zero seed, and a full voice pool drops the retrigger without a change.
+    {
+        VoiceSimState s;
+        memset(static_cast<void*>(&s), 0, sizeof(s));
+        TEST(voice_sim_note_on(&s, 0, 0, 0, 60, 1, 0));
+        voice_sim_mark(&s);
+        TEST(voice_sim_note_on(&s, 0, 0, 0, 60, 1, 0));
+        const uint32_t new_voice = s.note_to_voice[0][60];
+        TEST(new_voice == 2 && s.voices[1].note_finished && ! s.voices[2].note_finished);
+        TEST(s.oscs[s.voices[2].osc_ids[0]].old_volume == 0.0f);
+        TEST(voice_sim_note_on(&s, 0, 0, 0, 62, 1, 0));
+        TEST(voice_sim_note_on(&s, 0, 0, 0, 64, 1, 0));
+        voice_sim_mark(&s);
+        VoiceSimState snapshot;
+        memcpy(static_cast<void*>(&snapshot), &s, sizeof(s));
+        TEST(! voice_sim_note_on(&s, 0, 0, 0, 60, 1, 0));
+        TEST(! voice_sim_note_on(&s, 0, 0, 0, 70, 1, 0));
+        TEST(memcmp(&s, &snapshot, sizeof(s)) == 0);
+    }
+
+    // T10.2/T10.3: after a single-mode takeover the old key does nothing at note-off, with and
+    // without the sustain pedal, and the new key releases (or is held by the pedal) normally.
+    for (uint32_t pedal = 0; pedal < 2; pedal++) {
+        VoiceSimState s;
+        memset(static_cast<void*>(&s), 0, sizeof(s));
+        TEST(voice_sim_note_on(&s, 2, 0, 0, 60, 1, 0));
+        TEST(voice_sim_note_on(&s, 2, 0, 0, 64, 1, 0));
+        TEST(s.note_to_voice[0][60] == 0 && s.note_to_voice[0][64] == 1);
+        voice_sim_note_off(&s, pedal != 0, 0, 60);
+        TEST(! s.voices[1].releasing && ! s.voices[1].sustained);
+        voice_sim_note_off(&s, pedal != 0, 0, 64);
+        TEST(pedal ? (s.voices[1].sustained && ! s.voices[1].releasing)
+                   : (s.voices[1].releasing && ! s.voices[1].sustained));
+    }
+
+    // T10.7 (second part)/T10.8: a swept voice ends later.  Its termination must not clear a
+    // key which another note has taken since.
+    {
+        VoiceSimState s;
+        memset(static_cast<void*>(&s), 0, sizeof(s));
+        TEST(voice_sim_note_on(&s, 0, 0, 0, 60, 1, 0)); // voice 1
+        TEST(voice_sim_note_on(&s, 0, 0, 0, 62, 1, 0)); // voice 2
+        TEST(voice_sim_note_on(&s, 2, 0, 0, 67, 1, 0)); // takes voice 1, sweeps voice 2
+        TEST(s.voices[2].note_finished && s.note_to_voice[0][62] == 0);
+        TEST(voice_sim_note_on(&s, 0, 0, 0, 62, 1, 0)); // the swept key is played again
+        const uint32_t again = s.note_to_voice[0][62];
+        TEST(again == 3);
+        voice_sim_terminate(&s, 2);
+        TEST(s.note_to_voice[0][62] == again && ! s.voices[2].active);
+        // The slot of the ended voice is reused for another note on the same key.
+        TEST(voice_sim_note_on(&s, 0, 0, 0, 62, 1, 0));
+        TEST(s.note_to_voice[0][62] == 2 && s.voices[3].note_finished);
+        voice_sim_terminate(&s, 3);
+        TEST(s.note_to_voice[0][62] == 2);
+        voice_sim_terminate(&s, 2); // the unfinished voice clears its own key
+        TEST(s.note_to_voice[0][62] == 0);
+    }
+
+    // T10.9: another live voice holds the takeover key.  It fades, and the final mapping is the
+    // reset voice.  The other voice may belong to another instrument.
+    for (uint32_t other_instrument = 0; other_instrument < 2; other_instrument++) {
+        VoiceSimState s;
+        memset(static_cast<void*>(&s), 0, sizeof(s));
+        TEST(voice_sim_note_on(&s, 0, 0, 0, 60, 1, 0));                // voice 1, the lowest of the instrument
+        TEST(voice_sim_note_on(&s, 0, other_instrument, 0, 62, 1, 0)); // voice 2 owns the key
+        TEST(voice_sim_note_on(&s, 2, 0, 0, 62, 1, 0));
+        TEST(s.note_to_voice[0][62] == 1);
+        TEST(s.voices[2].note_finished && s.voices[2].active);
+        TEST(! s.voices[1].note_finished);
+        TEST(s.note_to_voice[0][60] == 0);
+        // The cross-instrument voice is not an instrument-0 voice, so only the key rule fades it.
+        TEST(voice_sim_live(s, 0) == 1);
+        TEST(voice_sim_live(s, 1) == 0);
+    }
+
+    // T10.13: scope.  Another instrument's voices are left alone, and the same instrument on a
+    // second MIDI channel is taken over.  This follows the approved per-instrument ruling.
+    {
+        VoiceSimState s;
+        memset(static_cast<void*>(&s), 0, sizeof(s));
+        TEST(voice_sim_note_on(&s, 2, 0, 0, 60, 1, 0)); // instrument X, channel 0
+        TEST(voice_sim_note_on(&s, 2, 1, 0, 64, 1, 0)); // instrument Y, channel 0
+        TEST(voice_sim_live(s, 0) == 1 && voice_sim_live(s, 1) == 1);
+        TEST(s.note_to_voice[0][60] == 1 && s.note_to_voice[0][64] == 2);
+        TEST(voice_sim_note_on(&s, 2, 0, 1, 67, 1, 0)); // instrument X, channel 1
+        TEST(s.note_to_voice[1][67] == 1 && s.note_to_voice[0][60] == 0);
+        TEST(voice_sim_live(s, 0) == 1 && voice_sim_live(s, 1) == 1);
+        TEST(s.note_to_voice[0][64] == 2 && ! s.voices[2].note_finished);
+        TEST(s.voices[1].channel == 1 && s.voices[1].note == 67);
+    }
+}
+
+static void check_voice_mode_source_pins()
+{
+    const char* const src = load_source_file("synth/realtime_synth.cpp");
+    TEST(src != nullptr);
+    if (! src) {
+        return;
+    }
+    const char* const src_end = src + strlen(src);
+
+    // Fields and constants.
+    const char* const voice_struct = strstr(src, "struct Voice {");
+    const char* const voice_end    = voice_struct ? strstr(voice_struct, "};") : nullptr;
+    TEST(voice_struct && voice_end);
+    if (voice_struct && voice_end) {
+        TEST(find_in_range(voice_struct, voice_end, "uint8_t note;") != nullptr);
+        TEST(find_in_range(voice_struct, voice_end, "uint8_t instrument;") != nullptr);
+    }
+    const char* const osc_struct = strstr(src, "struct RunningOscillator {");
+    const char* const osc_end    = osc_struct ? strstr(osc_struct, "\n};") : nullptr;
+    TEST(osc_struct && osc_end && find_in_range(osc_struct, osc_end, "uint8_t source_layer;") != nullptr);
+    TEST(find_in_range(src, src_end, "constexpr uint8_t voice_mode_reuse_per_note = 1;") != nullptr);
+    TEST(find_in_range(src, src_end, "constexpr uint8_t voice_mode_single = 2;") != nullptr);
+
+    const char* const note_on     = strstr(src, "static void process_note_on(");
+    const char* const note_on_end = note_on ? strstr(note_on + 1, "\nstatic ") : nullptr;
+    TEST(note_on && note_on_end);
+    if (! note_on || ! note_on_end) {
+        return;
+    }
+
+    // Mode selection: the reuse branch checks the instrument of the mapped voice, and the
+    // single branch scans for a live voice of the same instrument from index 1.
+    TEST(find_in_range(note_on, note_on_end, "instrument.voice_mode == voice_mode_reuse_per_note") != nullptr);
+    TEST(find_in_range(note_on, note_on_end, "voices[existing_voice].instrument == target_instrument") != nullptr);
+    TEST(find_in_range(note_on, note_on_end, "! voices[existing_voice].note_finished") != nullptr);
+    TEST(find_in_range(
+             note_on,
+             note_on_end,
+             "scan_voice.active && ! scan_voice.note_finished && scan_voice.instrument == target_instrument") !=
+         nullptr);
+    TEST(find_in_range(note_on, note_on_end, "uint32_t scan_idx = 1;") != nullptr);
+
+    // The restart is in place: no capacity check, no oscillator is freed, and the allocation is
+    // skipped for a restart.
+    TEST(find_in_range(note_on, note_on_end, "count_free_oscillators") == nullptr);
+    TEST(find_in_range(note_on, note_on_end, "free_oscillator(") == nullptr);
+    TEST(find_in_range(note_on, note_on_end, "layer_seeds") == nullptr);
+    TEST(find_in_range(note_on, note_on_end, "memset(previous.osc_ids") == nullptr);
+    TEST(find_in_range(src, src_end, "static bool voice_restartable_in_place(") != nullptr);
+    TEST(find_in_range(note_on, note_on_end, "voice_restartable_in_place(voices[existing_voice], layer_count)") !=
+         nullptr);
+    TEST(find_in_range(note_on, note_on_end, "voice_restartable_in_place(scan_voice, layer_count)") != nullptr);
+    const char* const alloc_skip = find_in_range(note_on, note_on_end, "assert(voice.osc_count == layer_count);");
+    const char* const alloc_call = find_in_range(note_on, note_on_end, "if (! allocate_oscillators(");
+    TEST(alloc_skip && alloc_call && alloc_skip < alloc_call);
+
+    // The running signal state is written only for a new note.  Its writes sit inside one
+    // guard on reset_voice, and no unconditional write of them remains.
+    const char* const guard     = find_in_range(note_on, note_on_end, "if (! reset_voice) {");
+    const char* const guard_end = guard ? find_in_range(guard, note_on_end, "osc.terminating  = false;") : nullptr;
+    TEST(guard && guard_end);
+    if (guard && guard_end) {
+        TEST(find_in_range(guard, guard_end, "osc.phase      = 0.0f;") != nullptr);
+        TEST(find_in_range(guard, guard_end, "osc.mod_phase  = 0.0f;") != nullptr);
+        TEST(find_in_range(guard, guard_end, "osc.old_volume = 0.0f;") != nullptr);
+        TEST(find_in_range(guard, guard_end, "osc.old_panning = layer.targets[mod_panning].base_value;") != nullptr);
+    }
+    TEST(find_in_range(note_on, note_on_end, "osc.source_layer = static_cast<uint8_t>(layer_idx);") != nullptr);
+    // Each of these writes occurs exactly once, inside the guard above.
+    if (guard && guard_end) {
+        const char* const phase_write = find_in_range(note_on, note_on_end, "osc.phase = 0.0f;");
+        const char* const mod_write   = find_in_range(note_on, note_on_end, "osc.mod_phase = 0.0f;");
+        TEST(phase_write && phase_write > guard && phase_write < guard_end);
+        TEST(mod_write && mod_write > guard && mod_write < guard_end);
+        TEST(find_in_range(phase_write + 1, note_on_end, "osc.phase = 0.0f;") == nullptr);
+        TEST(find_in_range(mod_write + 1, note_on_end, "osc.mod_phase = 0.0f;") == nullptr);
+    }
+    TEST(find_in_range(note_on, note_on_end, "osc.old_volume = layer_seeds") == nullptr);
+    TEST(find_in_range(note_on, note_on_end, "noise_start_counter += noise_start_stride;") != nullptr);
+    TEST(find_in_range(note_on, note_on_end, "osc.note_seed = noise_start_counter;") != nullptr);
+    TEST(find_in_range(note_on, note_on_end, "osc.decay_tick = 0;") != nullptr);
+    TEST(find_in_range(note_on, note_on_end, "osc.decaying = false;") != nullptr);
+    TEST(find_in_range(note_on, note_on_end, "voice.note = static_cast<uint8_t>(note);") != nullptr);
+    TEST(find_in_range(note_on, note_on_end, "voice.instrument = target_instrument;") != nullptr);
+
+    // The FIR history and engagement state persist when the restarted layer keeps its filter.
+    TEST(find_in_range(note_on, note_on_end, "const bool keeps_filter = reset_voice &&") != nullptr);
+    TEST(find_in_range(note_on, note_on_end, "if (! keeps_filter) {") != nullptr);
+
+    // The envelopes and the FIR restart through the shared note-on code, not a copy.
+    uint32_t configure_calls = 0;
+    for (const char* p = note_on; p < note_on_end;) {
+        const char* const hit = find_in_range(p, note_on_end, "configure_target_modulation(");
+        if (! hit) {
+            break;
+        }
+        configure_calls++;
+        p = hit + 1;
+    }
+    TEST(configure_calls == 1);
+
+    // The takeover carries each old envelope node's level into the restart: the capture sits
+    // before the first node is cleared (the single configure call), and the seed enters that
+    // call; configure_target_modulation writes it to the envelope state.
+    const char* const env_capture =
+        find_in_range(note_on,
+                      note_on_end,
+                      "env_seeds[previous_osc.source_layer][node.target] = parameters[env_node].prev_value;");
+    const char* const env_configure = find_in_range(note_on, note_on_end, "configure_target_modulation(");
+    TEST(env_capture && env_configure && env_capture < env_configure);
+    TEST(find_in_range(note_on, note_on_end, "env_seeds[layer_idx][node.target]") != nullptr);
+    TEST(find_in_range(src, src_end, "parameters[env_node].envelope.old_value = env_seed;") != nullptr);
+    TEST(find_in_range(note_on, note_on_end, "osc.clear_fir_hist = true;") != nullptr);
+
+    // The single-mode sweep runs only after the oscillators were allocated, ahead of the
+    // final mapping write, clears a key only while it still points at the swept voice, and
+    // only marks the voice finished.
+    const char* const osc_check = find_in_range(note_on, note_on_end, "if (! allocate_oscillators(");
+    const char* const sweep =
+        osc_check ? find_in_range(osc_check, note_on_end, "instrument.voice_mode == voice_mode_single") : nullptr;
+    const char* const final_map =
+        find_in_range(note_on, note_on_end, "note_to_voice[channel][note] = static_cast<uint8_t>(voice_idx);");
+    const char* const old_clear =
+        find_in_range(note_on, note_on_end, "note_to_voice[previous_channel][previous_note] = 0;");
+    TEST(osc_check && sweep && final_map && old_clear);
+    if (osc_check && sweep && final_map && old_clear) {
+        TEST(osc_check < old_clear && old_clear < sweep && sweep < final_map);
+        TEST(find_in_range(note_on, old_clear, "note_to_voice[previous_channel][previous_note] == voice_idx") !=
+             nullptr);
+        TEST(find_in_range(sweep, final_map, "note_to_voice[swept.channel][swept.note] == sweep_idx") != nullptr);
+        TEST(find_in_range(sweep, final_map, "swept.note_finished = true;") != nullptr);
+        TEST(find_in_range(sweep, final_map, "free_oscillator(") == nullptr);
+        TEST(find_in_range(sweep, final_map, "releasing") == nullptr);
     }
 }
 
@@ -37987,6 +39945,13 @@ int main()
             check_pad_json_codec();
             check_pad_tilt_json_codec();
             check_quick_release_regressions();
+            check_envelope_note_off_regressions();
+            check_envelope_restart_seed_regressions();
+            check_note_on_exhaustion_regressions();
+            check_voice_mode_codec();
+            check_voice_mode_sim();
+            check_voice_mode_reset_sim();
+            check_voice_mode_source_pins();
             // Ordering of the GUI paste command against the candidate helper.
             check_zone_paste_source_ordering();
             check_osc_add_source_contract();

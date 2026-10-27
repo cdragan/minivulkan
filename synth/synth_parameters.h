@@ -52,8 +52,8 @@ struct LFODescriptor {
 // Per-envelope behavior bits, stored in EnvelopeDescriptor::flags.
 enum : uint8_t {
     envelope_ping_pong     = 1 << 0, // Sustain span bounces between its ends (multi-point spans only)
-    envelope_quick_release = 1 << 1, // Note-off jumps forward to the first release-tail point at or below the current
-                                     // level; the final point is the fallback
+    envelope_quick_release = 1 << 1, // Note-off jumps forward to the first location on the release slope which
+                                     // reaches the current level; the final point is the fallback
 };
 
 struct EnvelopeDescriptor {
@@ -77,7 +77,9 @@ struct EnvelopeDescriptor {
 struct EnvelopeState {
     uint16_t tick;
     uint16_t point;
-    uint8_t  reverse; // Ping-pong direction: 0 = forward, 1 = backward
+    uint8_t  reverse;   // Ping-pong direction: 0 = forward, 1 = backward
+    float    old_value; // Carried level for an in-place restart: replaces the first point's value while the state is
+                        // in the first segment.  Zero means no seed (a fresh note).
 };
 
 enum class SourceOp : uint8_t {
@@ -153,24 +155,45 @@ float eval_envelope(const EnvelopeDescriptor& envelope, EnvelopeState* state, bo
 // Evaluates the envelope at the given state's position without modifying the state.
 float eval_envelope_at(const EnvelopeDescriptor& envelope, const EnvelopeState& state);
 
-// Quick-release target: the first point index >= sustain_last_point
-// (clamped into [0, num_points-1]) whose effective value is <= the envelope's
-// current effective value at the given state (effective = min_value + raw *
-// min_max_delta, the same arithmetic as eval_envelope_at).  The comparison is
-// on effective values because min_max_delta is not guaranteed nonnegative (a
-// negative delta reverses the effective-value order, a zero delta makes every
-// effective value equal, so the scan start wins).  The final point when no
-// point qualifies.  Pure: mutates nothing.
-uint16_t quick_release_target(const EnvelopeDescriptor& envelope, const EnvelopeState& state);
+// Quick-release target: the location on the release slope where the envelope
+// curve first reaches its current value at the given state.  The curve is
+// piecewise linear between control points, so the target is a location (a
+// point and a tick), not only a point.  The scan starts at the segment which
+// begins at sustain_last_point (clamped into [0, num_points-1]) and visits
+// segments {cur, cur + 1} while cur + 1 < num_points.  Values are effective
+// values (min_value + raw * min_max_delta, the same arithmetic as
+// eval_envelope_at), because min_max_delta may be negative or zero.  For each
+// segment, with the current effective value c:
+// - both point values greater than c: go on to the next segment
+// - both point values less than c: the target is the segment's first point
+// - otherwise (c between the two values, equality included): the target
+//   interpolates the segment's tick positions by the value ratio, rounded to
+//   the nearest tick (a ratio which reaches the second point resolves to that
+//   point)
+// When no segment stops the scan, the target is the final point.  The result
+// carries the target point and tick (reverse = 0, no seed).  Pure: mutates
+// nothing.
+EnvelopeState quick_release_target(const EnvelopeDescriptor& envelope, const EnvelopeState& state);
 
-// Applies the quick-release note-off jump in place: moves the state to
-// quick_release_target when that location is strictly ahead of the current
-// position ((point, tick) compared; already at the end -> no move), sets
-// the tick to the target point's position, and clears the reverse flag (the
-// state direction is forward after the jump).  The parked state is
-// exactly what the next eval_envelope step with sustain == false expects.
+// Applies the quick-release note-off jump in place: moves the state to the
+// location quick_release_target returns when that location is strictly ahead
+// of the current position ((point, tick) compared; the target on the current
+// point is ahead only when its tick is later; already at the end -> no move),
+// sets both the point and the tick (an interpolated tick is allowed), clears
+// the reverse flag (the state direction is forward after the jump) and drops
+// any restart seed.  The parked state is exactly what the next eval_envelope
+// step with sustain == false expects.
 // Returns true when moved.
 bool apply_quick_release(const EnvelopeDescriptor& envelope, EnvelopeState* state);
+
+// Applies the note-off rule to one envelope.  A ping-pong envelope that
+// traverses its sustain span backwards at note-off gets the forward direction
+// back (the reverse flag is cleared always, whatever the other flags are, and
+// the position is unchanged).  Then, only when the envelope_quick_release flag
+// is set, apply_quick_release jumps the envelope to its release target from
+// any position.  With the flag clear, the envelope plays to its end as before.
+// Returns true when the quick-release jump moved the state.
+bool envelope_note_off(const EnvelopeDescriptor& envelope, EnvelopeState* state);
 
 // Converts a MIDI note to frequency in Hz.
 // - midi_note       - input MIDI note (69 = A4 = 440 Hz when freq_mult is 1)

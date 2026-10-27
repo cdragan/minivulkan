@@ -177,9 +177,9 @@ OscDropCommand osc_drop_command = {};
 // the menu is open) and consumed by run_fx_canvas_command after render and
 // drain.  No heap allocations.
 struct FxDropCommand {
-    uint32_t    slot;     // the dragged effect's chain slot
+    uint32_t    slot;        // the dragged effect's chain slot
     uint32_t    anchor_slot; // the dragged row's slot index; the consumer decodes it band-aware
-    vmath::vec2 position; // the release point, snapped to the grid at click time
+    vmath::vec2 position;    // the release point, snapped to the grid at click time
 };
 
 FxDropCommand fx_drop_command = {};
@@ -811,18 +811,13 @@ static const char* fx_derived_title_label(const Sculptor::Graph& graph, const Sc
     else if (input.slot_idx >= Sculptor::fx_param_row(0)) {
         // Band-aware decode: a FIR band row's base is its band header,
         // not a legacy stride row.
-        const int32_t              slot      = Sculptor::fx_effect_slot_of(fx_mapping, input.node_idx);
-        Synth::EffectChainBinding& chain     = Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain);
-        uint32_t                   row_base  = 0;
+        const int32_t              slot           = Sculptor::fx_effect_slot_of(fx_mapping, input.node_idx);
+        Synth::EffectChainBinding& chain          = Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain);
+        uint32_t                   row_base       = 0;
         uint32_t                   row_field      = 0;
-        uint32_t                   fir_row        = 0;
         Synth::EffectParamBinding* unused_binding = nullptr; // The title needs only the row facts.
-        if (slot >= 0 && Sculptor::fx_decode_row_slot(chain.effects[slot],
-                                                      input.slot_idx,
-                                                      &unused_binding,
-                                                      &row_base,
-                                                      &row_field,
-                                                      &fir_row)) {
+        if (slot >= 0 &&
+            Sculptor::fx_decode_row_slot(chain.effects[slot], input.slot_idx, &unused_binding, &row_base, &row_field)) {
             base = row_base;
         }
     }
@@ -1041,14 +1036,10 @@ static bool fx_connection_validator(void*              user_data,
     Synth::EffectParamBinding* row_binding = nullptr;
     uint32_t                   row_base    = 0;
     uint32_t                   row_field   = 0;
-    uint32_t                   fir_row     = 0;
     Synth::EffectChainBinding& chain       = Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain);
-    const bool                 row_decoded = in_slot >= 0 && Sculptor::fx_decode_row_slot(chain.effects[in_slot],
-                                                                                          input.slot_idx,
-                                                                                          &row_binding,
-                                                                                          &row_base,
-                                                                                          &row_field,
-                                                                                          &fir_row);
+    const bool                 row_decoded =
+        in_slot >= 0 &&
+        Sculptor::fx_decode_row_slot(chain.effects[in_slot], input.slot_idx, &row_binding, &row_base, &row_field);
     // A parameter's LFO dot takes an LFO's Value wire: the wire is the
     // binding.
     if (row_decoded && row_field == 1) {
@@ -2885,11 +2876,11 @@ void Sculptor::SynthEditor::run_osc_canvas_command()
 // time, so the landing is grid-aligned.
 static void stash_fx_drop_command(uint32_t slot, uint32_t anchor_slot)
 {
-    fx_drop_command.slot     = slot;
+    fx_drop_command.slot        = slot;
     fx_drop_command.anchor_slot = anchor_slot;
-    const vmath::vec2 pos    = osc_graph.drop_menu_pos();
-    fx_drop_command.position = vmath::vec2(Sculptor::snap_to_grid(pos.x), Sculptor::snap_to_grid(pos.y));
-    fx_canvas_command        = fx_cmd_drop_add_lfo;
+    const vmath::vec2 pos       = osc_graph.drop_menu_pos();
+    fx_drop_command.position    = vmath::vec2(Sculptor::snap_to_grid(pos.x), Sculptor::snap_to_grid(pos.y));
+    fx_canvas_command           = fx_cmd_drop_add_lfo;
 }
 
 // The drop menu's items, classified once at click time against the live
@@ -3160,9 +3151,9 @@ void Sculptor::SynthEditor::run_fx_canvas_command()
             break;
         case fx_cmd_swap_next:
             do_fx_swap(node, 1);
+            break;
         case fx_cmd_rejoin_lane:
             do_fx_rejoin_lane(node);
-            break;
             break;
         case fx_cmd_copy: {
             if (! Sculptor::extract_effect_chain_document(&instr_bank,
@@ -3297,13 +3288,12 @@ void Sculptor::SynthEditor::do_fx_add_lfo(bool from_drop)
         // is the model guard (the menu's eligibility is view state).  The
         // row decode is band-aware (sculptor_effect_graph.h), so a FIR
         // band row's Add-LFO seeds the band binding the row projects.
-        Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(&candidate.bank, fx_mapping.chain);
+        Synth::EffectChainBinding& chain       = Sculptor::fx_graph_chain(&candidate.bank, fx_mapping.chain);
         const uint32_t             slot        = fx_drop_command.slot;
         const uint32_t             anchor_node = fx_mapping.effect_nodes[slot];
         Synth::EffectParamBinding* binding     = nullptr;
         uint32_t                   row_base    = 0;
         uint32_t                   row_field   = 0;
-        uint32_t                   fir_row     = 0;
         if (slot >= chain.num_effects || anchor_node == Sculptor::pool_no_slot ||
             ! osc_graph.node_occupied(anchor_node) ||
             fx_drop_command.anchor_slot >= osc_graph.node(anchor_node).slots.num_allocated ||
@@ -3311,8 +3301,7 @@ void Sculptor::SynthEditor::do_fx_add_lfo(bool from_drop)
                                            fx_drop_command.anchor_slot,
                                            &binding,
                                            &row_base,
-                                           &row_field,
-                                           &fir_row)) {
+                                           &row_field)) {
             Sculptor::notify_error("Synth: cannot add an LFO: the parameter row is gone");
             return;
         }
@@ -3434,6 +3423,10 @@ void Sculptor::SynthEditor::do_fx_rejoin_lane(uint32_t node_idx)
     refresh_projected_layout();
 }
 
+// Ordering invariant: menu commands run at the end of the frame, after
+// drags, and set fx_graph_reproject.  The graph re-projects before the next
+// frame's input processing, so no input sees the slot mapping this change
+// leaves stale.  The stale-mapping window is unreachable.
 void Sculptor::SynthEditor::do_fx_change_type(uint32_t node_idx, Synth::EffectType type)
 {
     const int32_t slot = Sculptor::fx_effect_slot_of(fx_mapping, node_idx);

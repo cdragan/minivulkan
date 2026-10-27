@@ -146,6 +146,8 @@ struct Instrument {
     float      layer_skew_semitones; // Random pitch skew drawn per layer (0 = none)
     float      release_seconds;      // Sustain decay length in seconds (0 = legacy hold/loop);
                                      // applies to the volume target only, runtime-interpreted
+    uint8_t    voice_mode;           // Voice allocation: 0 = multiple, 1 = reuse per-note, 2 = single;
+                                     // zero is the legacy behavior
 };
 
 // Keyboard zone table entry. start_note stores the zone's first note + 1 (1..128), so a

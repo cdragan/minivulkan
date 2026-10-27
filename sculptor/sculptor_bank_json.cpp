@@ -308,6 +308,9 @@ namespace {
 constexpr uint32_t    num_waves             = 7;
 constexpr const char* wave_names[num_waves] = { "none", "sine", "sawtooth", "pulse", "noise", "pad", "string" };
 
+constexpr uint32_t    num_voice_modes                   = 3;
+constexpr const char* voice_mode_names[num_voice_modes] = { "multiple", "reuse per-note", "single" };
+
 constexpr uint32_t    num_osc_modes                 = 4;
 constexpr const char* osc_mode_names[num_osc_modes] = { "blend", "fm", "sync", "ring_mod" };
 
@@ -337,7 +340,7 @@ constexpr const char* mod_target_names[Synth::num_mod_targets] = {
     "fir_band0_offset", "fir_band0_gain",  "fir_band1_offset", "fir_band1_spread",
     "fir_band1_gain",   "fir_band1_slope", "fir_band2_offset", "fir_band2_spread",
     "fir_band2_gain",   "fir_band2_slope", "fir_band3_offset", "fir_band3_spread",
-    "fir_band3_gain",   "fir_band3_slope", "string_damping", "string_release_damping",
+    "fir_band3_gain",   "fir_band3_slope", "string_damping",   "string_release_damping",
     "string_dispersion"
 };
 
@@ -695,6 +698,7 @@ static void enc_instrument(Out& o, const Synth::Instrument& instr)
     key_float_nonzero(o, "note_skew_semitones", instr.note_skew_semitones);
     key_float_nonzero(o, "layer_skew_semitones", instr.layer_skew_semitones);
     key_float_nonzero(o, "release_seconds", instr.release_seconds);
+    key_enum(o, "voices", voice_mode_names, num_voice_modes, instr.voice_mode);
     o.ch('}');
 }
 
@@ -2060,6 +2064,16 @@ static void want_enum(Walker& w, uint32_t i, const char* const* names, uint32_t 
     w.failed = true;
 }
 
+// Reads the instrument voice mode.  Only the three spelled names are valid.
+static void want_voice_mode(Walker& w, uint32_t i, uint8_t* out)
+{
+    uint32_t mode = 0;
+    want_enum(w, i, voice_mode_names, num_voice_modes, &mode);
+    if (! w.failed) {
+        *out = static_cast<uint8_t>(mode);
+    }
+}
+
 // Walks one object token, invoking handle(key_index, value_index) for every pair.
 // The grammar pass guarantees well-formed, duplicate-free pairs; handle dispatches
 // on keys.
@@ -2228,7 +2242,7 @@ static void decode_routing(Walker&               w,
             // other target keeps the generic free-level parsing.
             if (target == Synth::mod_string_damping || target == Synth::mod_string_release_damping ||
                 target == Synth::mod_string_dispersion)
-            want_bounded_real(w, val_idx, 0.0, 1.0, &routing.base_value);
+                want_bounded_real(w, val_idx, 0.0, 1.0, &routing.base_value);
             else if (target == Synth::mod_fir_spread)
                 want_bounded_real(w,
                                   val_idx,
@@ -2347,16 +2361,16 @@ static void apply_fir_band_absent_defaults(Synth::Oscillator&      osc,
 
 static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
 {
-    bool                    fm_ratio_routed                      = false;
-    bool                    slope_routed                         = false;
-    uint32_t                band_count                           = 1;
-    bool                    fir_bands_stated                     = false;
-    bool                    bank_touched[Synth::num_mod_targets] = {};
-    int32_t                 octave_offset                        = 0;
-    int32_t                 fir_slope                            = 100;
-    float                   pitch_offset                         = 0.0f;
-    float                   string_brightness = 1.0f; // absent means full brightness, not the zeroed bank memory
-    
+    bool     fm_ratio_routed                      = false;
+    bool     slope_routed                         = false;
+    uint32_t band_count                           = 1;
+    bool     fir_bands_stated                     = false;
+    bool     bank_touched[Synth::num_mod_targets] = {};
+    int32_t  octave_offset                        = 0;
+    int32_t  fir_slope                            = 100;
+    float    pitch_offset                         = 0.0f;
+    float    string_brightness                    = 1.0f; // absent means full brightness, not the zeroed bank memory
+
     float                   string_dispersion_sections = 4.0f;
     const Synth::FilterType fir_type                   = prescan_fir_type(w, obj);
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
@@ -2461,9 +2475,9 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
     if (fir_slope < 1 || fir_slope > 100) {
         w.failed = true;
     }
-    osc.fir_slope_percent          = static_cast<uint8_t>(fir_slope);
-    osc.string_brightness          = string_brightness;
-    
+    osc.fir_slope_percent = static_cast<uint8_t>(fir_slope);
+    osc.string_brightness = string_brightness;
+
     osc.string_dispersion_sections = string_dispersion_sections;
     osc.fir_type                   = fir_type;
     osc.fir_band_count             = static_cast<uint8_t>(band_count);
@@ -2530,6 +2544,9 @@ static void decode_instrument(Walker& w, uint32_t obj, Synth::Instrument& instr)
             want_float(w, val_idx, &instr.layer_skew_semitones);
         else if (key_eq(w, key_idx, "release_seconds")) {
             want_release_seconds(w, val_idx, &instr.release_seconds);
+        }
+        else if (key_eq(w, key_idx, "voices")) {
+            want_voice_mode(w, val_idx, &instr.voice_mode);
         }
         else
             unknown_field(w, key_idx);
@@ -3085,11 +3102,16 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
         // form, refuses through the unknown-field path instead of
         // decoding into a binding nothing stages.
         refuse_out_of_count_bands(w, fir_band_tokens, fir_band_key_ids, fir_band_count, have_fir_bands);
-        // In the legacy single-band form the key must carry state: the
-        // zeroed legacy block is not producible by the encoder (it omits
-        // the key), so it refuses through the unknown-field path, while an
-        // authored gain decodes into band 0 and re-encodes (the count-1
-        // encode rule).
+        if (w.failed)
+            return;
+        // Band 0's gain decodes once.  In the legacy single-band form the key
+        // must carry state: the zeroed legacy block is not producible by the
+        // encoder (it omits the key), so it refuses through the unknown-field
+        // path, while an authored gain decodes into band 0 and re-encodes (the
+        // count-1 encode rule).  A multi-band document (fir_bands stated)
+        // decodes straight into band 0 and takes the neutral 1.0 when the key is
+        // absent.  The legacy form keeps the zeroed gain binding so
+        // byte-comparable snapshots survive the round trip.
         if (fir_band0_gain_token && ! have_fir_bands) {
             Synth::EffectParamBinding gain0 = {};
             decode_binding(w, fir_band0_gain_token, gain0);
@@ -3097,15 +3119,11 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
                 unknown_field(w, fir_band0_gain_key);
                 w.failed = true;
             }
-            if (! w.failed)
-                slot.fir_bands.bands[0] = gain0;
+            if (w.failed)
+                return;
+            slot.fir_bands.bands[0] = gain0;
         }
-        if (w.failed)
-            return;
-        // Band 0's gain decodes the neutral 1.0 only when the document states fir_bands
-        // (a multi-band document); the legacy single-band form keeps the zeroed gain
-        // binding so byte-comparable snapshots survive the round trip.
-        if (fir_band0_gain_token)
+        else if (fir_band0_gain_token)
             decode_binding(w, fir_band0_gain_token, slot.fir_bands.bands[0]);
         else if (have_fir_bands)
             slot.fir_bands.bands[0].base_value = 1.0f;
@@ -3981,10 +3999,10 @@ static void canonicalize_editor_bank(Synth::InstrumentEditorBank* editor_bank)
         instr.release_seconds      = canonical_float(instr.release_seconds);
 
         for (uint32_t l = 0; l < instr.layer_count; l++) {
-            Synth::Oscillator& osc         = instr.layers[l];
-            osc.mod_ratio                  = canonical_float(osc.mod_ratio);
-            osc.string_brightness          = canonical_float(osc.string_brightness);
-            
+            Synth::Oscillator& osc = instr.layers[l];
+            osc.mod_ratio          = canonical_float(osc.mod_ratio);
+            osc.string_brightness  = canonical_float(osc.string_brightness);
+
             osc.string_dispersion_sections = canonical_float(osc.string_dispersion_sections);
             for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
                 Synth::TargetBinding& binding = osc.targets[t];
@@ -4515,14 +4533,14 @@ static void decode_layer_doc(Walker&                     w,
                              InstrumentDocState&         doc,
                              Synth::InstrumentJsonDomain domain)
 {
-    uint32_t                wave_a                              = 0;
-    bool                    wave_a_set                          = false;
-    uint32_t                wave_b                              = 0;
-    uint32_t                mode                                = 0;
-    float                   mod_ratio                           = 1.0f;
-    bool                    fm_ratio_set                        = false;
-    float                   string_brightness                   = 1.0f;
-    
+    uint32_t wave_a            = 0;
+    bool     wave_a_set        = false;
+    uint32_t wave_b            = 0;
+    uint32_t mode              = 0;
+    float    mod_ratio         = 1.0f;
+    bool     fm_ratio_set      = false;
+    float    string_brightness = 1.0f;
+
     float                   string_dispersion_sections          = 4.0f;
     bool                    doc_slope_routed                    = false;
     uint32_t                doc_band_count                      = 1;
@@ -4646,12 +4664,12 @@ static void decode_layer_doc(Walker&                     w,
         return;
     }
 
-    osc.osc_type[0]                = static_cast<Synth::WaveType>(wave_a);
-    osc.osc_type[1]                = static_cast<Synth::WaveType>(wave_b);
-    osc.osc_mode                   = static_cast<Synth::OscMode>(mode);
-    osc.mod_ratio                  = mod_ratio;
-    osc.string_brightness          = string_brightness;
-    
+    osc.osc_type[0]       = static_cast<Synth::WaveType>(wave_a);
+    osc.osc_type[1]       = static_cast<Synth::WaveType>(wave_b);
+    osc.osc_mode          = static_cast<Synth::OscMode>(mode);
+    osc.mod_ratio         = mod_ratio;
+    osc.string_brightness = string_brightness;
+
     osc.string_dispersion_sections = string_dispersion_sections;
     // Legacy documents state only the scalar ratio; when the document has
     // no fm_ratio block the target inherits it, clamped to the slider
@@ -5007,6 +5025,9 @@ bool Synth::decode_instrument_json_for_domain(const char*            text,
         else if (key_eq(w, key_idx, "release_seconds")) {
             want_release_seconds(w, val_idx, &doc.instr.release_seconds);
         }
+        else if (key_eq(w, key_idx, "voices")) {
+            want_voice_mode(w, val_idx, &doc.instr.voice_mode);
+        }
         else if (key_eq(w, key_idx, "layers")) {
             layers_seen = true;
             layer_count = static_cast<uint32_t>(w.toks[val_idx].size);
@@ -5317,6 +5338,7 @@ static uint32_t encode_instrument_json_for_domain(char*                         
     o.key("layer_skew_semitones");
     o.float_value(instr->layer_skew_semitones);
     key_float_nonzero(o, "release_seconds", instr->release_seconds);
+    key_enum(o, "voices", voice_mode_names, num_voice_modes, instr->voice_mode);
     o.key("layers");
     o.ch('[');
 
@@ -5375,9 +5397,9 @@ static uint32_t encode_instrument_json_for_domain(char*                         
             }
 
             if (mod_target == Synth::mod_string_dispersion && ! dispersion_routed(osc.targets[target])) {
-            continue; // the unmodulated value rides the plain "string_dispersion" number above
-        }
-        if ((mod_target == Synth::mod_string_damping || mod_target == Synth::mod_string_release_damping) &&
+                continue; // the unmodulated value rides the plain "string_dispersion" number above
+            }
+            if ((mod_target == Synth::mod_string_damping || mod_target == Synth::mod_string_release_damping) &&
 
                 routing_is_default(osc.targets[target]) && gen_is_default(osc.targets[target])) {
 

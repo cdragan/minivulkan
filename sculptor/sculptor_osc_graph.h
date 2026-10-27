@@ -239,7 +239,7 @@ struct OscGraphMapping {
     uint32_t input_source_slots[num_osc_graph_inputs];  // indexed by ModSource - 1
     uint32_t input_cc_slots[Synth::num_assignable_ccs]; // per assignable CC dot, pool_no_slot when absent
     uint32_t instrument_node;                           // "Instrument Parameters" node, pool_no_slot when unprojected
-    uint32_t instrument_slots[3]; // [0] note skew, [1] layer skew, [2] release; node's property slots
+    uint32_t instrument_slots[4]; // [0] note skew, [1] layer skew, [2] release, [3] voices; node's property slots
     uint32_t output_node;         // the oscillator sum node
     uint32_t output_layer_input_slot[Synth::max_layers];
     uint32_t osc_nodes[Synth::max_layers];

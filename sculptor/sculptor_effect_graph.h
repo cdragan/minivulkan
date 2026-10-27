@@ -258,7 +258,7 @@ bool fx_decode_row_slot(Synth::EffectSlotBinding&   effect,
                         Synth::EffectParamBinding** binding,
                         uint32_t*                   row_base,
                         uint32_t*                   field,
-                        uint32_t*                   fir_row);
+                        uint32_t*                   fir_row = nullptr);
 
 // Budget for one additional represented node, including owner roots and legacy pins.
 bool fx_can_add_node(const Synth::InstrumentEditorBank* source, uint32_t owner, const bool* pinned_lfos = nullptr);
