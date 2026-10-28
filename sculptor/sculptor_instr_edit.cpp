@@ -1116,8 +1116,7 @@ static bool fx_connection_validator(void*              user_data,
         // the target's connected run would rotate the run.
         if (in_slot >= 0 && output.node_idx != fx_mapping.input_node) {
             const int32_t                       source_slot = Sculptor::fx_effect_slot_of(fx_mapping, output.node_idx);
-            const Synth::EffectChainBinding&    chain   = Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain);
-            const Sculptor::EffectChainRouting& routing = instr_bank.effect_routing[fx_mapping.chain];
+            const Sculptor::EffectChainRouting& routing     = instr_bank.effect_routing[fx_mapping.chain];
             if (source_slot > in_slot &&
                 ! Sculptor::fx_slot_input_fed(chain, routing, static_cast<uint32_t>(in_slot)) &&
                 source_slot <

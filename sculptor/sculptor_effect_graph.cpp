@@ -3572,11 +3572,11 @@ bool Sculptor::change_effect_type_candidate(const Synth::InstrumentEditorBank* s
         }
         chain.effects[slot].fir_bands.band_count = static_cast<uint8_t>(band_count);
         for (uint32_t band = 0; band < band_count; ++band) {
-            Synth::EffectParamBinding* const out = &chain.effects[slot].fir_bands.bands[4 * band];
-            out[0].base_value                    = centers[band];
-            out[1].base_value                    = spreads[band];
-            out[2].base_value                    = 1.0f;
-            out[3]                               = previous.bindings[2];
+            Synth::EffectParamBinding* const band_out = &chain.effects[slot].fir_bands.bands[4 * band];
+            band_out[0].base_value                    = centers[band];
+            band_out[1].base_value                    = spreads[band];
+            band_out[2].base_value                    = 1.0f;
+            band_out[3]                               = previous.bindings[2];
         }
     }
     else if (previous.type == Synth::EffectType::fir_multiband && type == Synth::EffectType::fir) {

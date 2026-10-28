@@ -19,6 +19,9 @@ endif
 debug   ?= 1
 release ?= $(if $(filter 1,$(debug)),0,1)
 
+# Treat compiler warnings as errors on Linux and macOS, set to 0 to disable
+strict ?= 1
+
 # Enable spirv optimization, disable for debugging purposes
 spirv_opt ?= 1
 
@@ -389,6 +392,9 @@ ifeq ($(UNAME), Windows)
 else
     WFLAGS += -Wall -Wextra -Wno-unused-parameter -Wunused -Wno-missing-field-initializers
     WFLAGS += -Wshadow -Wformat=2 -Wconversion -Wdouble-promotion
+    ifeq ($(strict),1)
+        WFLAGS += -Werror
+    endif
 
     CFLAGS += -fvisibility=hidden
     CFLAGS += -fPIC

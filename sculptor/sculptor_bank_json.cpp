@@ -3413,11 +3413,12 @@ static void decode_effect_routing(Walker& walker, uint32_t token, Sculptor::Effe
             // The array may precede the effects key in document order, so
             // only the capacity bound is checked here; the retained length
             // is compared with the decoded effect count after the walk.
-            if (walker.toks[val_idx].type != JSMN_ARRAY || walker.toks[val_idx].size > Synth::max_chain_effects) {
+            if (walker.toks[val_idx].type != JSMN_ARRAY ||
+                static_cast<uint32_t>(walker.toks[val_idx].size) > Synth::max_chain_effects) {
                 walker.failed = true;
                 return;
             }
-            *out_len = walker.toks[val_idx].size;
+            *out_len = static_cast<uint32_t>(walker.toks[val_idx].size);
             walk_array(walker, val_idx, Synth::max_chain_effects, [&](uint32_t element, uint32_t slot) {
                 want_u8(walker, element, Sculptor::effect_out_output, &out->out[slot]);
             });

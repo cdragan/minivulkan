@@ -10089,11 +10089,11 @@ static void fx_add_lfo_modeled_regressions()
         // measured lane x, never a stride place.
         TEST(canvas.graph_layout_count == 2);
         for (uint32_t i = 0; i < 2; ++i) {
-            const Synth::GraphNodeLayout& record = canvas.graph_layout[i];
-            TEST(record.kind == 4);
-            TEST(record.channel == 0);
-            TEST(record.x != 320.0f && record.x != 880.0f);
-            TEST(record.y == 320.0f);
+            const Synth::GraphNodeLayout& layout_entry = canvas.graph_layout[i];
+            TEST(layout_entry.kind == 4);
+            TEST(layout_entry.channel == 0);
+            TEST(layout_entry.x != 320.0f && layout_entry.x != 880.0f);
+            TEST(layout_entry.y == 320.0f);
         }
         TEST(strcmp(canvas.graph_layout[0].name, "LFO 1") == 0);
         TEST(strcmp(canvas.graph_layout[1].name, "LFO 2") == 0);
@@ -10116,9 +10116,9 @@ static void fx_add_lfo_modeled_regressions()
         widths[mapping.lfo_nodes[0]]    = 80.0f;
         widths[mapping.lfo_nodes[1]]    = 96.0f;
         for (uint32_t i = 0; i < 2; ++i) {
-            const Synth::GraphNodeLayout& record = canvas.graph_layout[i];
-            graph.set_node_layout(mapping.lfo_nodes[i], vmath::vec2(record.x, record.y), 0, 0);
-            TEST(graph.node(mapping.lfo_nodes[i]).position.x == record.x);
+            const Synth::GraphNodeLayout& layout_entry = canvas.graph_layout[i];
+            graph.set_node_layout(mapping.lfo_nodes[i], vmath::vec2(layout_entry.x, layout_entry.y), 0, 0);
+            TEST(graph.node(mapping.lfo_nodes[i]).position.x == layout_entry.x);
         }
         TEST(Sculptor::fx_arrange_auto_lane(&graph, mapping, widths));
         TEST(graph.node(mapping.effect_nodes[0]).position.x == 64.0f + 32.0f);
