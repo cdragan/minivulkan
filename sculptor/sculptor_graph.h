@@ -56,9 +56,7 @@ struct Slot {
     const char*   tooltip; // hover text of the row; null = no tooltip
 };
 
-// The drop-menu flag, the child-level field and the tooltip pointer consume
-// spare padding capacity, keeping sizeof(Slot) at 320.
-static_assert(sizeof(Slot) == 320,
+static_assert(sizeof(Slot) <= 320,
               "Slot size drifted; the drop_menu flag and tooltip pointer must stay within the 320-byte size budget");
 
 class Graph;

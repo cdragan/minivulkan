@@ -578,7 +578,7 @@ static int write_library_file(const char* const                        path,
     }
 
     if (ok) {
-        RecordHeader record;
+        RecordHeader record = {};
         snprintf(record.category, sizeof(record.category), "%s", category);
         snprintf(record.name, sizeof(record.name), "%s", name);
         record.payload_size   = 0;
