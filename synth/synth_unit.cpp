@@ -1566,8 +1566,29 @@ static void check_zone_paste_source_guard_self_tests()
 const std::unique_ptr<FixedArray<char, 256 * 1024>> source_file_storage =
     std::make_unique<FixedArray<char, 256 * 1024>>();
 
+// The cache keeps one copy per path for the lifetime of the process. The
+// atexit hook releases the copies so LeakSanitizer stays quiet on Linux.
+const uint32_t loaded_source_cache_capacity = 64;
+const char*    loaded_source_paths[loaded_source_cache_capacity]  = {};
+const char*    loaded_source_texts[loaded_source_cache_capacity]  = {};
+uint32_t       loaded_source_count                                = 0;
+
+static void free_source_file_cache()
+{
+    for (uint32_t index = 0; index < loaded_source_count; ++index) {
+        free(const_cast<char*>(loaded_source_texts[index]));
+    }
+    loaded_source_count = 0;
+}
+
 static const char* load_source_file(const char* path)
 {
+    for (uint32_t index = 0; index < loaded_source_count; ++index) {
+        if (strcmp(loaded_source_paths[index], path) == 0) {
+            return loaded_source_texts[index];
+        }
+    }
+
     char (&src)[256 * 1024] = source_file_storage->elements;
     FILE* const file        = fopen(path, "rb");
     TEST(file != nullptr);
@@ -1581,7 +1602,25 @@ static const char* load_source_file(const char* path)
         return nullptr;
     }
     src[got] = 0;
-    return strdup(src);
+
+    TEST(loaded_source_count < loaded_source_cache_capacity);
+    if (loaded_source_count == loaded_source_cache_capacity) {
+        return nullptr;
+    }
+
+    char* const copy = strdup(src);
+    TEST(copy != nullptr);
+    if (! copy) {
+        return nullptr;
+    }
+
+    if (loaded_source_count == 0) {
+        atexit(free_source_file_cache);
+    }
+    loaded_source_paths[loaded_source_count] = path;
+    loaded_source_texts[loaded_source_count] = copy;
+    ++loaded_source_count;
+    return copy;
 }
 
 // The balanced-brace body of the definition whose text starts at `decl`:
