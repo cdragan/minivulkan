@@ -7,6 +7,7 @@
 
 #include "../core/rng.h"
 #include "../core/vecfloat.h" // vmath::sincos for the LFO reference formula below
+#include "../core/vmath.h"
 #include "../sculptor/sculptor_bank_json.h"
 #include "../sculptor/sculptor_effect_graph.h"
 #include "../sculptor/sculptor_graph.h"
@@ -15841,7 +15842,7 @@ static void fir_test_check_span_shape(const FirCoeffMirror& mirror, uint32_t spa
         // Window-tap symmetry survives binary32 argument rounding only
         // within a last-ulp slack; a wrong center breaks it by orders of
         // magnitude.
-        TEST(fabs(left - right) <= 2e-6f * fmaxf(1.0f, fmaxf(fabsf(left), fabsf(right))));
+        TEST(fabsf(left - right) <= 2e-6f * fmaxf(1.0f, fmaxf(fabsf(left), fabsf(right))));
     }
 }
 
@@ -16203,13 +16204,13 @@ static void check_chan_combine_volume_ramp()
         // A degenerate mix(v, v, a) may wobble by a last ulp in binary32,
         // so the held steps assert continuity within an ulp-scale slack.
         for (uint32_t x = 0; x < work_group_size; x++) {
-            TEST(fabs(mixf(target, target, full_step(x)) - target) <= 1e-6f); // held note
+            TEST(fabsf(mixf(target, target, full_step(x)) - target) <= 1e-6f); // held note
         }
         const float next_target = 0.4f;
         TEST(mixf(target, next_target, full_step(0)) == target);
         TEST(mixf(target, next_target, full_step(work_group_size - 1)) == next_target);
         for (uint32_t x = 0; x < work_group_size; x++) {
-            TEST(fabs(mixf(next_target, next_target, full_step(x)) - next_target) <= 1e-6f);
+            TEST(fabsf(mixf(next_target, next_target, full_step(x)) - next_target) <= 1e-6f);
         }
     }
 
@@ -24401,13 +24402,15 @@ static void check_string_param_json_bounds()
     {
         const std::unique_ptr<ClipboardDecode> with_pick    = std::make_unique<ClipboardDecode>();
         const std::unique_ptr<ClipboardDecode> without_pick = std::make_unique<ClipboardDecode>();
-        memset(without_pick.get(), 0, sizeof(ClipboardDecode));
+        // The decode target is a plain decode buffer; zero every byte exactly as
+        // before. The unsigned char pointer avoids the class-memaccess warning.
+        memset(reinterpret_cast<unsigned char*>(without_pick.get()), 0, sizeof(ClipboardDecode));
         TEST(string_clip_decode("{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\","
                                 "\"string_brightness\":0.5,\"string_dispersion\":0.25}]}",
                                 without_pick.get()));
         static const char* const pick_values[] = { "0.75", "2.0", "-0.1" };
         for (const char* value : pick_values) {
-            memset(with_pick.get(), 0, sizeof(ClipboardDecode));
+            memset(reinterpret_cast<unsigned char*>(with_pick.get()), 0, sizeof(ClipboardDecode));
             snprintf(doc,
                      sizeof(doc),
                      "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\",\"string_pick\":%s,"
@@ -26349,7 +26352,7 @@ static void check_string_fm_layout_characterization()
     double       max_ulp_bound = 0.0;
     for (const float f0 : f0s) {
         const double len = 44100.0 / static_cast<double>(f0);
-        const double w   = 2.0 * M_PI / len;
+        const double w   = 2.0 * vmath::pi_double / len;
         // Peak slope per sample of the source: sum of k * amplitude_k * w.
         const double slope = w * (1.0 + 2.0 * 0.5 + 3.0 * 0.25);
         memset(legacy_ring, 0, sizeof(legacy_ring));
@@ -26567,7 +26570,7 @@ static void string_disp_oracle(double f0, double dispersion, double damping, dou
     const double fs  = 44100.0;
     const double len = fs / f0;
     const double c   = 0.1 + 0.3 * damping;
-    const double w0  = 2.0 * M_PI * f0 / fs;
+    const double w0  = 2.0 * vmath::pi_double * f0 / fs;
     // Own single-section path and Newton solve of r^3 - r = strength * dispersion / w0^3, with the same fallback to no
     // section when less than 3 samples of loop delay would remain.
     double count = 1.0;
@@ -26599,9 +26602,9 @@ static void string_disp_oracle(double f0, double dispersion, double damping, dou
             const double w = 0.5 * (lo + hi);
             const double lag =
                 whole * w + atan2(c * sin(w), 1.0 - c * cos(w)) + allpass_lag(a, w) + count * allpass_lag(ad, w);
-            (lag < 2.0 * M_PI * k ? lo : hi) = w;
+            (lag < 2.0 * vmath::pi_double * k ? lo : hi) = w;
         }
-        partials[k] = 0.5 * (lo + hi) * fs / (2.0 * M_PI);
+        partials[k] = 0.5 * (lo + hi) * fs / (2.0 * vmath::pi_double);
     }
 }
 
@@ -26960,7 +26963,7 @@ static void check_string_dispersion_modulation()
     constexpr uint32_t blocks        = string_test_samples / 256;
     const auto         dispersion_at = [](uint32_t block) {
         const double t = static_cast<double>(block) * 256.0 / 44100.0;
-        return static_cast<float>(0.5 + 0.45 * sin(2.0 * M_PI * t / 4.0));
+        return static_cast<float>(0.5 + 0.45 * sin(2.0 * vmath::pi_double * t / 4.0));
     };
     memset(&string_test_mirror, 0, sizeof(string_test_mirror));
     string_mirror_init(&string_test_mirror, f0, 0.0f, 4321, 1.0f, dispersion_at(0));
@@ -27269,11 +27272,13 @@ int main()
     osc_instrument_node_layout_regressions();
     osc_cc_regressions();
     // silent unless failing, and failures report on stderr, so stdout is discarded.
+    // The result is captured because glibc marks freopen with warn_unused_result.
 #ifdef _WIN32
-    freopen("NUL", "w", stdout);
+    const bool silenced = freopen("NUL", "w", stdout) != nullptr;
 #else
-    freopen("/dev/null", "w", stdout);
+    const bool silenced = freopen("/dev/null", "w", stdout) != nullptr;
 #endif
+    (void)silenced;
 
     // A4 = 440 Hz
     TEST(approx(Synth::note_to_frequency(69, 0.0f, 1), 440.0f, 0.01f));
@@ -31296,7 +31301,8 @@ int main()
         TEST(Synth::save_library_record(junk_path, "C", "N", &bank, 0) != 0);
         FILE* const check   = fopen(junk_path, "rb");
         char        buf[20] = {};
-        fread(buf, 1, 20, check);
+        const size_t read_count = fread(buf, 1, 20, check);
+        (void)read_count;
         fclose(check);
         TEST(memcmp(buf, "not a library at all", 20) == 0);
         remove(junk_path);

@@ -803,7 +803,8 @@ int main()
         const vmath::float4 v7{ -1, -2, -3, -4 };
 
         const auto check = [](float f, bool is_true) -> bool {
-            const uint32_t u = *reinterpret_cast<uint32_t*>(&f);
+            uint32_t u;
+            memcpy(&u, &f, sizeof(u));
             if (is_true)
                 return u == ~0U;
             else

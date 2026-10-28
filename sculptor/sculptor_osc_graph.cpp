@@ -4131,7 +4131,7 @@ static bool layout_model_valid(const Synth::Instrument&         instrument,
     if (envelope_count > Synth::max_envelopes || lfo_count > Synth::max_lfos || (! envelopes && envelope_count) ||
         (! lfos && lfo_count))
         return false;
-    memset(&clipboard_model_bank, 0, sizeof(clipboard_model_bank));
+    memset(reinterpret_cast<unsigned char*>(&clipboard_model_bank), 0, sizeof(clipboard_model_bank));
     for (uint32_t index = 0; index < envelope_count; ++index) {
         const uint32_t slot                          = clipboard_model_bank.envelopes.allocate();
         clipboard_model_bank.envelopes.entries[slot] = envelopes[index];
@@ -4490,7 +4490,7 @@ static uint32_t playback_osc_index(const uint8_t source_row[Synth::max_layers], 
         if (source_row[slot] == 0) {
             continue;
         }
-        if (source_row[slot] - 1 == ordinal) {
+        if (static_cast<uint32_t>(source_row[slot] - 1) == ordinal) {
             return rank;
         }
         ++rank;
