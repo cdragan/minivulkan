@@ -42,6 +42,7 @@ constexpr uint32_t max_voices = 64; // Max notes are playing
 
 using Synth::max_layers; // Max layers (oscillators) per note
 using Synth::num_fir_taps;
+using Synth::osc_mode_hard_sync;
 
 // Number of samples which have been rendered since playback started.
 uint32_t rendered_samples;
@@ -387,6 +388,7 @@ struct ShaderParams {
         float string_release_damping; // Effective release damping 0.025..1.667: 0.05 / T60 in s, curved from the knob
         float string_brightness;      // String pluck brightness 0..1, used by the note-on excitation
         float string_dispersion;      // String dispersion 0..1, 0 = off
+        uint32_t string_chain;        // Note seed which started the string chain, kept across string takeovers
     };
 
     // synth_chan_combine shader (binding 0); the master-mix pass reuses the
@@ -422,7 +424,7 @@ struct ShaderParams {
         uint32_t in_sound_offs;
     };
 
-    static_assert(sizeof(Oscillator) == 88);
+    static_assert(sizeof(Oscillator) == 92);
 
     static constexpr uint32_t max_param_range = sizeof(Oscillator) * 256;
 };
@@ -603,6 +605,7 @@ struct RunningOscillator {
     float    string_brightness;      // String pluck brightness 0..1, copied from the layer at note-on
     float    string_dispersion;      // String dispersion 0..1, resolved each step
     uint32_t string_state_offs;      // String state region offset in bytes, fixed per slot
+    uint32_t string_chain;           // Note seed of the first note of the current string chain on this slot
     float    osc_mix;                // Mix between osc_type[0] and osc_type[1] (0..1)
     float    fm_index;               // FM modulation depth
 
@@ -1609,6 +1612,11 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         osc.note               = note;
         osc.freq_mult          = 1;
 
+        // The slot's previous layer fields are read before they are overwritten: a takeover out of a
+        // string keeps the chain, so the shader adds the new pluck to the ringing string.
+        const bool chain_continues = reset_voice && osc.osc_type[0] == WaveType::string_wave &&
+                                     ! (osc.osc_type[1] != WaveType::no_wave && osc.osc_mode == osc_mode_hard_sync);
+
         const Oscillator& layer = instrument.layers[layer_idx];
         osc.osc_type[0]         = layer.osc_type[0];
         osc.osc_type[1]         = layer.osc_type[1];
@@ -1653,6 +1661,9 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         noise_start_counter += noise_start_stride;
         osc.noise_counter = noise_start_counter;
         osc.note_seed     = noise_start_counter;
+        if (! chain_continues) {
+            osc.string_chain = osc.note_seed;
+        }
 
         // Expand each modulation target into its node triple at this oscillator's slot.
         const uint32_t osc_slot = voice.osc_ids[layer_idx];
@@ -2723,6 +2734,7 @@ static void render_audio_step()
         param.string_release_damping = Synth::string_release_damping_curve(oscillator.string_release_damping);
         param.string_brightness      = oscillator.string_brightness;
         param.string_dispersion      = oscillator.string_dispersion;
+        param.string_chain           = oscillator.string_chain;
 
         // Wrap the phases so float precision does not degrade on long notes.
         oscillator.phase += phase_step;

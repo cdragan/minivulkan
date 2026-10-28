@@ -55,6 +55,7 @@ struct OscillatorParams {
     float string_release_damping;     // Effective release damping 0.025..1.667: 0.05 / T60 in s, curved from the knob
     float string_brightness;          // String pluck brightness [0..1], 1 = unfiltered burst, applied at note-on
     float string_dispersion;          // String dispersion [0..1], 0 = off (the plain string, bit-identical)
+    uint  string_chain;               // Note seed which started the string chain; a takeover keeps it
 };
 
 layout(binding = 0) buffer data_buf { float data[]; };
@@ -215,6 +216,7 @@ const uint   string_header_words = 14;
 const float  string_min_freq     = 22.0;
 const float  string_dispersion_strength = 0.05863;
 shared float string_block_out[256];
+shared float string_burst[2048];
 shared uint  string_write_pos;
 shared float string_loop_length;
 
@@ -268,7 +270,7 @@ float string_ring_read(uint ring_offs, float loop_phase)
 // tuning allpass.  Its phase delay at f0 is subtracted from the loop delay so the pitch stays put,
 // while its delay falls with frequency, which lifts the partials.  Dispersion 0 skips all of it.
 // Header layout: 0 write pos, 1 prev lowpass, 2 prev allpass, 3 release gain, 4 loop length,
-// 5-6 seed tag, 7 dispersion section state, 8-13 unused.
+// 5-6 seed tag, 7 dispersion section state, 8-9 chain token (two-word integer), 10-13 unused.
 void string_pass(uint  base,
                  float f0,
                  float damping,
@@ -276,7 +278,8 @@ void string_pass(uint  base,
                  float brightness,
                  float dispersion,
                  bool  release,
-                 uint  note_seed)
+                 uint  note_seed,
+                 uint  chain_token)
 {
     const uint  lane        = gl_LocalInvocationID.x;
     const uint  ring_offs   = base + string_header_words;
@@ -334,6 +337,12 @@ void string_pass(uint  base,
     const float string_seed_tag_lo = float((note_seed & 0xFFFFu) + 1u);
     const float string_seed_tag_hi = float(note_seed >> 16);
     const bool  init               = ! (data[base + 5u] == string_seed_tag_lo && data[base + 6u] == string_seed_tag_hi);
+    // Chain token (header words 8 and 9), same two-word integer split as the seed tag.  A note which
+    // continues the chain of the string already in the region adds its burst to the ringing ring; any
+    // other note replaces it.  Zeroed or stale memory never matches, and NaN compares false.
+    const float string_chain_lo = float((chain_token & 0xFFFFu) + 1u);
+    const float string_chain_hi = float(chain_token >> 16);
+    const bool  additive        = init && data[base + 8u] == string_chain_lo && data[base + 9u] == string_chain_hi;
     uint        write_pos;
     float       string_prev_lowpass;
     float       string_prev_allpass;
@@ -346,12 +355,12 @@ void string_pass(uint  base,
             float sum = 0.0;
             for (uint i = 0u; i < delay_whole; i++) {
                 const float noise_value = float(pcg_hash(note_seed + i) & 0xFFFFu) / 32767.5 - 1.0;
-                data[ring_offs + i]     = noise_value;
+                string_burst[i]         = noise_value;
                 sum += noise_value;
             }
             const float mean = sum / float(delay_whole);
             for (uint k = 0u; k < delay_whole; k++) {
-                data[ring_offs + k] -= mean;
+                string_burst[k] -= mean;
             }
         }
         if (lane == 0u && brightness < 1.0) {
@@ -363,7 +372,7 @@ void string_pass(uint  base,
             float       tone_state = 0.0;
             float       energy_in  = 0.0;
             for (uint k = 0u; k < delay_whole; k++) {
-                const float sample_in = data[ring_offs + k];
+                const float sample_in = string_burst[k];
                 tone_state            = (1.0 - tone_coeff) * sample_in + tone_coeff * tone_state;
                 energy_in += sample_in * sample_in;
             }
@@ -371,8 +380,8 @@ void string_pass(uint  base,
             float tone_sum    = 0.0;
             float tone_energy = 0.0;
             for (uint k = 0u; k < delay_whole; k++) {
-                tone_state          = (1.0 - tone_coeff) * data[ring_offs + k] + tone_coeff * tone_state;
-                data[ring_offs + k] = tone_state;
+                tone_state          = (1.0 - tone_coeff) * string_burst[k] + tone_coeff * tone_state;
+                string_burst[k]     = tone_state;
                 tone_sum += tone_state;
                 tone_energy += tone_state * tone_state;
             }
@@ -380,18 +389,37 @@ void string_pass(uint  base,
             const float tone_var  = tone_energy - tone_sum * tone_mean;
             const float tone_gain = tone_var > 0.0 ? sqrt(energy_in / tone_var) : 1.0;
             for (uint k = 0u; k < delay_whole; k++) {
-                data[ring_offs + k] = (data[ring_offs + k] - tone_mean) * tone_gain;
+                string_burst[k] = (string_burst[k] - tone_mean) * tone_gain;
             }
         }
         if (lane == 0u) {
-            data[base + 5u]     = string_seed_tag_lo;
-            data[base + 6u]     = string_seed_tag_hi;
-            write_pos           = delay_whole;
-            string_prev_lowpass = 0.0;
-            string_prev_allpass = 0.0;
+            data[base + 5u] = string_seed_tag_lo;
+            data[base + 6u] = string_seed_tag_hi;
+            data[base + 8u] = string_chain_lo;
+            data[base + 9u] = string_chain_hi;
+            if (additive) {
+                // Add the burst onto the live window [write_pos - delay_whole, write_pos); the filter and
+                // dispersion state keep running, only the release gain restarts.
+                write_pos           = floatBitsToUint(data[base]);
+                string_prev_lowpass = data[base + 1u];
+                string_prev_allpass = data[base + 2u];
+                disp_state          = data[base + 7u];
+                for (uint i = 0u; i < delay_whole; i++) {
+                    data[ring_offs + (write_pos + i + (string_ring_size - delay_whole)) % string_ring_size] +=
+                        string_burst[i];
+                }
+            }
+            else {
+                for (uint i = 0u; i < delay_whole; i++) {
+                    data[ring_offs + i] = string_burst[i];
+                }
+                write_pos           = delay_whole;
+                string_prev_lowpass = 0.0;
+                string_prev_allpass = 0.0;
+                disp_state          = 0.0;
+                data[base + 7u]     = 0.0;
+            }
             string_release_gain = 1.0;
-            disp_state          = 0.0;
-            data[base + 7u]     = 0.0;
         }
     }
     else if (lane == 0u) {
@@ -486,7 +514,8 @@ void main()
                     param.string_brightness,
                     param.string_dispersion,
                     ((param.osc_pack >> 24) & 1u) != 0u,
-                    note_seed);
+                    note_seed,
+                    param.string_chain);
         // barrier() alone does not publish the data[] ring writes.
         memoryBarrierBuffer();
         memoryBarrierShared();

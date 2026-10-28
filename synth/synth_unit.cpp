@@ -242,6 +242,8 @@ struct StringMirror {
     float    t1;
     float    u1;
     float    e;
+    float    chain_lo; // Models shader header words 8-9: the chain token split in two integer-valued floats
+    float    chain_hi; // lo = float((token & 0xFFFF) + 1), hi = float(token >> 16); both 0 for a clean region
 };
 } // namespace
 
@@ -25533,30 +25535,31 @@ static StringScalars string_mirror_scalars(float f0, float damping, float releas
     return s;
 }
 
-// Note-on init: noise, mean pass, then the optional
-// circular one-pole tone stage (brightness < 1; 1 keeps the legacy excitation bit-identical).
-static void string_mirror_init(StringMirror* m,
-                               float         f0,
-                               float         damping,
-                               uint32_t      seed,
-                               float         brightness = 1.0f,
-                               float         dispersion = 0.0f)
+// Note-on burst: noise, mean pass, then the optional circular one-pole tone stage (brightness < 1; 1 keeps
+// the legacy excitation bit-identical).  Built into a scratch array, as the shader's shared burst array does.
+// Returns the delay length n (0 when the pitch is below the floor, nothing written).
+static uint32_t string_mirror_burst(float*   burst,
+                                    float    f0,
+                                    float    damping,
+                                    uint32_t seed,
+                                    float    brightness = 1.0f,
+                                    float    dispersion = 0.0f)
 {
     const StringScalars s = string_mirror_scalars(f0, damping, 0.0f, dispersion);
     if (s.silent) {
-        return;
+        return 0;
     }
     const uint32_t n = s.n;
     for (uint32_t i = 0; i < n; ++i) {
-        m->ring[i] = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
+        burst[i] = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
     }
     float sum = 0.0f;
     for (uint32_t k = 0; k < n; ++k) {
-        sum += m->ring[k];
+        sum += burst[k];
     }
     const float mean = sum / static_cast<float>(n);
     for (uint32_t k = 0; k < n; ++k) {
-        m->ring[k] -= mean;
+        burst[k] -= mean;
     }
     if (brightness < 1.0f) {
         // Same math as the shader: a zero-state lap gives the tail, which fixes the periodic
@@ -25565,7 +25568,7 @@ static void string_mirror_init(StringMirror* m,
         float       tone_state = 0.0f;
         float       energy_in  = 0.0f;
         for (uint32_t k = 0; k < n; ++k) {
-            const float sample_in = m->ring[k];
+            const float sample_in = burst[k];
             tone_state            = (1.0f - tone_coeff) * sample_in + tone_coeff * tone_state;
             energy_in += sample_in * sample_in;
         }
@@ -25573,8 +25576,8 @@ static void string_mirror_init(StringMirror* m,
         float tone_sum    = 0.0f;
         float tone_energy = 0.0f;
         for (uint32_t k = 0; k < n; ++k) {
-            tone_state = (1.0f - tone_coeff) * m->ring[k] + tone_coeff * tone_state;
-            m->ring[k] = tone_state;
+            tone_state = (1.0f - tone_coeff) * burst[k] + tone_coeff * tone_state;
+            burst[k]   = tone_state;
             tone_sum += tone_state;
             tone_energy += tone_state * tone_state;
         }
@@ -25582,8 +25585,28 @@ static void string_mirror_init(StringMirror* m,
         const float tone_var  = tone_energy - tone_sum * tone_mean;
         const float tone_gain = tone_var > 0.0f ? sqrtf(energy_in / tone_var) : 1.0f;
         for (uint32_t k = 0; k < n; ++k) {
-            m->ring[k] = (m->ring[k] - tone_mean) * tone_gain;
+            burst[k] = (burst[k] - tone_mean) * tone_gain;
         }
+    }
+    return n;
+}
+
+// Replace-style note-on init (the legacy behavior): the burst becomes the ring head and all running state
+// restarts.  The chain token words are left alone.
+static void string_mirror_init(StringMirror* m,
+                               float         f0,
+                               float         damping,
+                               uint32_t      seed,
+                               float         brightness = 1.0f,
+                               float         dispersion = 0.0f)
+{
+    static float   burst[string_ring_size];
+    const uint32_t n = string_mirror_burst(burst, f0, damping, seed, brightness, dispersion);
+    if (n == 0) {
+        return;
+    }
+    for (uint32_t i = 0; i < n; ++i) {
+        m->ring[i] = burst[i];
     }
     m->wr = n;
     m->t1 = 0.0f;
@@ -26493,7 +26516,7 @@ static void check_string_slot_grammar_pins()
     TEST(find_in_range(json_cpp, json_cpp + strlen(json_cpp), "\"string_pick\"") != nullptr);
     TEST(find_in_range(json_cpp, json_cpp + strlen(json_cpp), "\"string_brightness\"") != nullptr);
     TEST(find_in_range(runtime, runtime + strlen(runtime), "static_assert(num_osc_roles == 87)") != nullptr);
-    TEST(find_in_range(runtime, runtime + strlen(runtime), "static_assert(sizeof(Oscillator) == 88)") != nullptr);
+    TEST(find_in_range(runtime, runtime + strlen(runtime), "static_assert(sizeof(Oscillator) == 92)") != nullptr);
 }
 
 // Overdriven damping destinations clamp to [0, 1] at the host read, and the release
@@ -27243,6 +27266,930 @@ static void check_string_mirror_dispersion()
     }
 }
 
+// ---- Additive pluck: chain-token model (M2).  The mirror models header words 8-9 as the integer-valued
+// split of the slot's 32-bit chain token, exactly as the shader stores it: lo = (token & 0xFFFF) + 1 (the +1
+// keeps a zeroed word from matching), hi = token >> 16.  Both are exact floats below 2^24, never NaN.
+enum class ChainInit {
+    none,
+    replace,
+    additive
+};
+
+static float string_chain_lo(uint32_t token)
+{
+    return static_cast<float>((token & 0xFFFFu) + 1u);
+}
+
+static float string_chain_hi(uint32_t token)
+{
+    return static_cast<float>(token >> 16);
+}
+
+static uint32_t string_chain_join(float lo, float hi)
+{
+    return (static_cast<uint32_t>(hi) << 16) | (static_cast<uint32_t>(lo) - 1u);
+}
+
+static bool string_chain_matches(const StringMirror* m, uint32_t token)
+{
+    return m->chain_lo == string_chain_lo(token) && m->chain_hi == string_chain_hi(token);
+}
+
+// Shader init decision and body.  Nothing happens for a silent pitch or when the seed tag already matches.
+// Otherwise the burst is built; it is ADDED onto the live window when the stored chain words equal the
+// slot's token, and replaces the ring head otherwise.  Every init rewrites the tag and the chain words.
+static ChainInit string_mirror_chain_init(StringMirror* m,
+                                          uint32_t      token,
+                                          float         f0,
+                                          float         damping,
+                                          uint32_t      seed,
+                                          float         brightness,
+                                          float         dispersion)
+{
+    const StringScalars s = string_mirror_scalars(f0, damping, 0.0f, dispersion);
+    if (s.silent || (m->tagged && m->tag == seed)) {
+        return ChainInit::none;
+    }
+    static float   burst[string_ring_size];
+    const uint32_t n        = string_mirror_burst(burst, f0, damping, seed, brightness, dispersion);
+    const bool     additive = string_chain_matches(m, token);
+    if (additive) {
+        for (uint32_t i = 0; i < n; ++i) {
+            m->ring[(m->wr + i + (string_ring_size - n)) % string_ring_size] += burst[i];
+        }
+        m->e = 1.0f;
+    }
+    else {
+        for (uint32_t i = 0; i < n; ++i) {
+            m->ring[i] = burst[i];
+        }
+        m->wr = n;
+        m->t1 = 0.0f;
+        m->u1 = 0.0f;
+        m->e  = 1.0f;
+        for (uint32_t k = 0; k < string_max_sections; ++k) {
+            m->ds[k] = 0.0f;
+        }
+    }
+    m->tagged   = true;
+    m->tag      = seed;
+    m->chain_lo = string_chain_lo(token);
+    m->chain_hi = string_chain_hi(token);
+    return additive ? ChainInit::additive : ChainInit::replace;
+}
+
+// CPU token policy model (process_note_on): the slot's previous layer fields are read BEFORE they are
+// overwritten.  Evidence ceiling: this models the policy; the production pins are in the source-pin test.
+struct ChainSlot {
+    uint32_t        token;
+    Synth::WaveType type0;
+    Synth::WaveType type1;
+    uint32_t        mode;
+};
+
+static bool chain_slot_string_active(const ChainSlot* slot)
+{
+    return slot->type0 == Synth::WaveType::string_wave &&
+           ! (slot->type1 != Synth::WaveType::no_wave && slot->mode == Synth::osc_mode_hard_sync);
+}
+
+static void chain_slot_note_on(ChainSlot*      slot,
+                               bool            reset_voice,
+                               uint32_t        seed,
+                               Synth::WaveType type0,
+                               Synth::WaveType type1,
+                               uint32_t        mode)
+{
+    const bool chain_continues = reset_voice && chain_slot_string_active(slot);
+    slot->type0                = type0;
+    slot->type1                = type1;
+    slot->mode                 = mode;
+    if (! chain_continues) {
+        slot->token = seed;
+    }
+}
+
+static void chain_claim(ChainSlot* slot, uint32_t seed)
+{
+    chain_slot_note_on(slot,
+                       false,
+                       seed,
+                       Synth::WaveType::string_wave,
+                       Synth::WaveType::no_wave,
+                       Synth::osc_mode_blend);
+}
+
+static void chain_takeover(ChainSlot* slot, uint32_t seed)
+{
+    chain_slot_note_on(slot, true, seed, Synth::WaveType::string_wave, Synth::WaveType::no_wave, Synth::osc_mode_blend);
+}
+
+static constexpr float chain_damping    = 0.5f;
+static constexpr float chain_brightness = 0.6f;
+static constexpr float chain_dispersion = 0.4f;
+static constexpr float chain_f0         = 220.0f;
+
+// Seed of the k-th production layer note-on (noise_start_counter starts at 0, stride 0x9e3779b9).
+static uint32_t chain_seed(uint32_t k)
+{
+    return k * 0x9e3779b9u;
+}
+
+// Init only, as the shader does it when the layer is string-active (otherwise the pass is skipped).
+static ChainInit chain_init_only(StringMirror* m, const ChainSlot* slot, uint32_t seed, float f0 = chain_f0)
+{
+    if (! chain_slot_string_active(slot)) {
+        return ChainInit::none;
+    }
+    return string_mirror_chain_init(m, slot->token, f0, chain_damping, seed, chain_brightness, chain_dispersion);
+}
+
+// One whole dispatch: init when due, then 256 output samples.
+static ChainInit chain_dispatch(StringMirror*    m,
+                                const ChainSlot* slot,
+                                uint32_t         seed,
+                                float            f0      = chain_f0,
+                                bool             release = false,
+                                float*           out     = nullptr)
+{
+    static float scratch[256];
+    if (! chain_slot_string_active(slot)) {
+        return ChainInit::none;
+    }
+    const ChainInit result = chain_init_only(m, slot, seed, f0);
+    string_mirror_step(m, f0, chain_damping, 0.5f, release, out ? out : scratch, 256, chain_dispersion);
+    return result;
+}
+
+// Additive result is exactly ring + burst on the live window, the filter state and write position kept.
+static bool chain_additive_exact(const StringMirror* before, const StringMirror* after, const float* burst, uint32_t n)
+{
+    const uint32_t start = (before->wr + string_ring_size - n) % string_ring_size;
+    bool           ok    = true;
+    for (uint32_t idx = 0; idx < string_ring_size; ++idx) {
+        const uint32_t k        = (idx + string_ring_size - start) % string_ring_size;
+        const float    expected = k < n ? before->ring[idx] + burst[k] : before->ring[idx];
+        ok                      = ok && after->ring[idx] == expected;
+    }
+    ok = ok && after->wr == before->wr && after->t1 == before->t1 && after->u1 == before->u1 && after->e == 1.0f;
+    for (uint32_t k = 0; k < string_max_sections; ++k) {
+        ok = ok && after->ds[k] == before->ds[k];
+    }
+    return ok;
+}
+
+static uint32_t chain_burst(float* burst, uint32_t seed, float f0 = chain_f0)
+{
+    return string_mirror_burst(burst, f0, chain_damping, seed, chain_brightness, chain_dispersion);
+}
+
+// (a) Same-batch takeover chains.  Single mode and reuse-per-note share the slot policy: two shapes.
+static void check_string_chain_same_batch()
+{
+    static StringMirror m;
+    static StringMirror before;
+    static float        burst[string_ring_size];
+    for (uint32_t shape = 0; shape < 2; ++shape) {
+        memset(&m, 0, sizeof(m));
+        ChainSlot      slot = {};
+        const uint32_t a    = chain_seed(3 + shape);
+        chain_claim(&slot, a);
+        TEST(chain_dispatch(&m, &slot, a) == ChainInit::replace);
+        for (uint32_t b = 0; b < 3; ++b) {
+            chain_dispatch(&m, &slot, a);
+        }
+        chain_dispatch(&m, &slot, a, chain_f0, true);
+        TEST(string_chain_join(m.chain_lo, m.chain_hi) == a);
+        const uint32_t b = chain_seed(10);
+        const uint32_t c = chain_seed(11);
+        const uint32_t d = chain_seed(12);
+        chain_takeover(&slot, b);
+        chain_takeover(&slot, c);
+        TEST(slot.token == a);
+        before = m;
+        TEST(before.t1 != 0.0f && before.u1 != 0.0f && before.ds[0] != 0.0f && before.e < 1.0f);
+        const uint32_t n = chain_burst(burst, c);
+        TEST(chain_init_only(&m, &slot, c) == ChainInit::additive);
+        TEST(chain_additive_exact(&before, &m, burst, n));
+        TEST(m.tag == c && string_chain_join(m.chain_lo, m.chain_hi) == a);
+        chain_dispatch(&m, &slot, c);
+        chain_takeover(&slot, d);
+        TEST(slot.token == a);
+        TEST(chain_dispatch(&m, &slot, d) == ChainInit::additive);
+        TEST(m.tag == d);
+    }
+}
+
+// (b) Dirty recycled slot plus a fresh note which starts below the pitch floor.
+static void check_string_chain_recycled_slot()
+{
+    static StringMirror m;
+    static StringMirror dirty;
+    static StringMirror fresh;
+    static float        burst[string_ring_size];
+    memset(&m, 0, sizeof(m));
+    ChainSlot      slot = {};
+    const uint32_t x    = chain_seed(5);
+    chain_claim(&slot, x);
+    for (uint32_t b = 0; b < 6; ++b) {
+        chain_dispatch(&m, &slot, x);
+    }
+    dirty            = m;
+    const uint32_t a = chain_seed(6);
+    chain_claim(&slot, a);
+    TEST(slot.token == a && slot.token != x);
+    TEST(chain_dispatch(&m, &slot, a, 10.0f) == ChainInit::none);
+    TEST(memcmp(&dirty, &m, sizeof(m)) == 0);
+    const uint32_t b = chain_seed(7);
+    chain_takeover(&slot, b);
+    TEST(slot.token == a);
+    const uint32_t n = chain_burst(burst, b);
+    TEST(chain_init_only(&m, &slot, b) == ChainInit::replace);
+    for (uint32_t i = 0; i < n; ++i) {
+        TEST(m.ring[i] == burst[i]);
+    }
+    TEST(m.wr == n && m.t1 == 0.0f && m.u1 == 0.0f && m.e == 1.0f);
+    for (uint32_t k = 0; k < string_max_sections; ++k) {
+        TEST(m.ds[k] == 0.0f);
+    }
+    TEST(string_chain_join(m.chain_lo, m.chain_hi) == a);
+    // Same as the legacy replace over the same dirty ring: no prior tail inside the window.
+    fresh = dirty;
+    string_mirror_init(&fresh, chain_f0, chain_damping, b, chain_brightness, chain_dispersion);
+    TEST(memcmp(fresh.ring, m.ring, sizeof(fresh.ring)) == 0);
+}
+
+// (c) A chord note which is claimed and taken over before it ever renders.
+static void check_string_chain_never_rendered()
+{
+    static StringMirror m;
+    memset(&m, 0, sizeof(m));
+    ChainSlot slot = {};
+    chain_claim(&slot, chain_seed(20));
+    chain_takeover(&slot, chain_seed(21));
+    TEST(slot.token == chain_seed(20));
+    TEST(chain_dispatch(&m, &slot, chain_seed(21)) == ChainInit::replace);
+    // The same over a dirty region whose header carries another chain.
+    memset(&m, 0, sizeof(m));
+    ChainSlot other = {};
+    chain_claim(&other, chain_seed(2));
+    for (uint32_t b = 0; b < 2; ++b) {
+        chain_dispatch(&m, &other, chain_seed(2));
+    }
+    chain_claim(&other, chain_seed(30));
+    chain_takeover(&other, chain_seed(31));
+    TEST(chain_dispatch(&m, &other, chain_seed(31)) == ChainInit::replace);
+}
+
+// (d) Live-ring takeover which starts below the pitch floor, then comes into range.
+static void check_string_chain_below_floor_takeover()
+{
+    static StringMirror m;
+    static StringMirror before;
+    static StringMirror frozen;
+    static float        burst[string_ring_size];
+    memset(&m, 0, sizeof(m));
+    ChainSlot      slot = {};
+    const uint32_t a    = chain_seed(8);
+    chain_claim(&slot, a);
+    for (uint32_t b = 0; b < 4; ++b) {
+        chain_dispatch(&m, &slot, a);
+    }
+    const uint32_t b = chain_seed(9);
+    chain_takeover(&slot, b);
+    frozen = m;
+    TEST(chain_dispatch(&m, &slot, b, 15.0f) == ChainInit::none);
+    TEST(memcmp(&frozen, &m, sizeof(m)) == 0);
+    TEST(slot.token == a && m.tag == a && string_chain_join(m.chain_lo, m.chain_hi) == a);
+    before           = m;
+    const uint32_t n = chain_burst(burst, b);
+    TEST(chain_init_only(&m, &slot, b) == ChainInit::additive);
+    TEST(chain_additive_exact(&before, &m, burst, n));
+    TEST(m.t1 == before.t1 && m.u1 == before.u1 && m.ds[0] == before.ds[0]);
+}
+
+// (e) Type and hard-sync transitions: the ring is frozen while the layer is not string-active.
+static void check_string_chain_type_transitions()
+{
+    static StringMirror m;
+    static StringMirror frozen;
+    using Synth::WaveType;
+    for (uint32_t via = 0; via < 2; ++via) {
+        memset(&m, 0, sizeof(m));
+        ChainSlot      slot = {};
+        const uint32_t a    = chain_seed(40);
+        chain_claim(&slot, a);
+        for (uint32_t b = 0; b < 3; ++b) {
+            chain_dispatch(&m, &slot, a);
+        }
+        // string -> non-string-active layer (sine, or string in hard sync): the previous layer is
+        // string-active, so the token is kept, and the pass is skipped, so the header is frozen.
+        const uint32_t b = chain_seed(41);
+        if (via == 0) {
+            chain_slot_note_on(&slot, true, b, WaveType::sine_wave, WaveType::no_wave, Synth::osc_mode_blend);
+        }
+        else {
+            chain_slot_note_on(&slot, true, b, WaveType::string_wave, WaveType::sine_wave, Synth::osc_mode_hard_sync);
+        }
+        TEST(slot.token == a);
+        frozen = m;
+        TEST(chain_dispatch(&m, &slot, b) == ChainInit::none);
+        TEST(memcmp(&frozen, &m, sizeof(m)) == 0);
+        // Back to a string: the previous layer was not string-active, so the token restarts, and the
+        // frozen header chain (a) can no longer match.  A wrongly kept token would have matched.
+        const uint32_t c = chain_seed(42);
+        chain_takeover(&slot, c);
+        TEST(slot.token == c);
+        TEST(string_chain_matches(&m, a) && ! string_chain_matches(&m, slot.token));
+        TEST(chain_dispatch(&m, &slot, c) == ChainInit::replace);
+        TEST(string_chain_join(m.chain_lo, m.chain_hi) == c);
+    }
+    // string -> string keeps the token.
+    memset(&m, 0, sizeof(m));
+    ChainSlot slot = {};
+    chain_claim(&slot, chain_seed(50));
+    chain_dispatch(&m, &slot, chain_seed(50));
+    chain_takeover(&slot, chain_seed(51));
+    TEST(slot.token == chain_seed(50));
+    TEST(chain_dispatch(&m, &slot, chain_seed(51)) == ChainInit::additive);
+}
+
+// Token lifecycle: claim resets, a string-active takeover preserves, a takeover out of a layer which is
+// not string-active resets.
+static void check_string_chain_token_lifecycle()
+{
+    using Synth::WaveType;
+    ChainSlot slot = {};
+    chain_claim(&slot, chain_seed(1));
+    chain_takeover(&slot, chain_seed(2));
+    TEST(slot.token == chain_seed(1));
+    // A claim over a slot whose previous occupant held another token resets it.
+    chain_claim(&slot, chain_seed(3));
+    TEST(slot.token == chain_seed(3));
+    // A claim ignores the stale layer fields of a recycled slot (reset_voice false).
+    slot.type0 = WaveType::string_wave;
+    slot.type1 = WaveType::no_wave;
+    chain_claim(&slot, chain_seed(4));
+    TEST(slot.token == chain_seed(4));
+    // Takeover out of sine resets.
+    chain_slot_note_on(&slot, true, chain_seed(5), WaveType::sine_wave, WaveType::no_wave, Synth::osc_mode_blend);
+    TEST(slot.token == chain_seed(4));
+    chain_takeover(&slot, chain_seed(6));
+    TEST(slot.token == chain_seed(6));
+    // Takeover out of string in hard sync resets.
+    chain_slot_note_on(&slot,
+                       true,
+                       chain_seed(7),
+                       WaveType::string_wave,
+                       WaveType::sine_wave,
+                       Synth::osc_mode_hard_sync);
+    TEST(slot.token == chain_seed(6));
+    chain_takeover(&slot, chain_seed(8));
+    TEST(slot.token == chain_seed(8));
+    // A string with a second wave in blend mode is still string-active.
+    chain_slot_note_on(&slot, true, chain_seed(9), WaveType::string_wave, WaveType::sine_wave, Synth::osc_mode_blend);
+    TEST(slot.token == chain_seed(8));
+    chain_takeover(&slot, chain_seed(10));
+    TEST(slot.token == chain_seed(8));
+}
+
+// Seed uniqueness (a model assumption), stale header chains and the NaN-pattern production seed.
+static void check_string_chain_seed_uniqueness()
+{
+    static StringMirror m;
+    static StringMirror live;
+    static StringMirror snap;
+    static float        burst[string_ring_size];
+    constexpr uint32_t  run = 300;
+    for (uint32_t i = 1; i <= run; ++i) {
+        for (uint32_t j = i + 1; j <= run; ++j) {
+            TEST(chain_seed(i) != chain_seed(j));
+        }
+    }
+    // Stale chain: chain a inits, the slot is freed, another note claims the same dirty region.
+    memset(&m, 0, sizeof(m));
+    for (uint32_t k = 1; k <= 80; ++k) {
+        ChainSlot slot = {};
+        chain_claim(&slot, chain_seed(k));
+        TEST(chain_dispatch(&m, &slot, chain_seed(k)) == ChainInit::replace);
+        chain_takeover(&slot, chain_seed(1000 + k));
+        TEST(chain_dispatch(&m, &slot, chain_seed(1000 + k)) == ChainInit::additive);
+    }
+    // The 72nd seed is a NaN bit pattern as a float; the integer split keeps it exact.
+    const uint32_t nan_seed = chain_seed(72);
+    TEST(nan_seed == 0x7f9a3c08u);
+    TEST((nan_seed & 0x7f800000u) == 0x7f800000u);
+    TEST(string_chain_lo(nan_seed) == 15369.0f && string_chain_hi(nan_seed) == 32666.0f);
+    TEST(string_chain_lo(nan_seed) == string_chain_lo(nan_seed) &&
+         string_chain_hi(nan_seed) == string_chain_hi(nan_seed));
+    TEST(string_chain_join(string_chain_lo(nan_seed), string_chain_hi(nan_seed)) == nan_seed);
+    const uint32_t boundary[] = { 0u, 0xFFFFu, 0x10000u, 0xFFFFFFFFu, 0x7f800000u, 0xff800000u, 0x7fc00000u };
+    for (uint32_t token : boundary) {
+        const float lo = string_chain_lo(token);
+        const float hi = string_chain_hi(token);
+        TEST(lo == lo && hi == hi && lo >= 1.0f);
+        TEST(string_chain_join(lo, hi) == token);
+    }
+    for (uint32_t i = 0; i < 4096; ++i) {
+        const uint32_t patterns[] = { 0x7f800000u + i * 17u, 0xff800000u + i * 17u, 0x7fc00000u + i, 0x7f9a0000u + i };
+        for (uint32_t token : patterns) {
+            const float lo = string_chain_lo(token);
+            const float hi = string_chain_hi(token);
+            TEST(lo == lo && hi == hi);
+            TEST(string_chain_join(lo, hi) == token);
+        }
+    }
+    // Live-ring takeover with that seed as the chain token stays additive.
+    memset(&live, 0, sizeof(live));
+    ChainSlot slot = {};
+    chain_claim(&slot, nan_seed);
+    TEST(slot.token == nan_seed);
+    TEST(chain_dispatch(&live, &slot, nan_seed) == ChainInit::replace);
+    TEST(live.chain_lo == 15369.0f && live.chain_hi == 32666.0f);
+    for (uint32_t b = 0; b < 3; ++b) {
+        chain_dispatch(&live, &slot, nan_seed);
+    }
+    chain_takeover(&slot, chain_seed(73));
+    chain_takeover(&slot, chain_seed(74));
+    TEST(slot.token == nan_seed);
+    snap             = live;
+    const uint32_t n = chain_burst(burst, chain_seed(74));
+    TEST(chain_init_only(&live, &slot, chain_seed(74)) == ChainInit::additive);
+    TEST(chain_additive_exact(&snap, &live, burst, n));
+    TEST(live.chain_lo == 15369.0f && live.chain_hi == 32666.0f);
+    // A token differing in one half does not match and replaces.
+    const uint32_t near_tokens[] = { 0x7f9a3c09u, 0x7f9b3c08u };
+    for (uint32_t token : near_tokens) {
+        snap = live;
+        TEST(string_mirror_chain_init(&snap,
+                                      token,
+                                      chain_f0,
+                                      chain_damping,
+                                      chain_seed(75),
+                                      chain_brightness,
+                                      chain_dispersion) == ChainInit::replace);
+    }
+    // Sweep: each consecutive production seed is additive against its own header, replace against its
+    // neighbour's.
+    for (uint32_t k = 1; k <= 90; ++k) {
+        memset(&snap, 0, sizeof(snap));
+        ChainSlot owner = {};
+        chain_claim(&owner, chain_seed(k));
+        chain_dispatch(&snap, &owner, chain_seed(k));
+        live = snap;
+        TEST(string_mirror_chain_init(&live,
+                                      chain_seed(k),
+                                      chain_f0,
+                                      chain_damping,
+                                      chain_seed(2000 + k),
+                                      chain_brightness,
+                                      chain_dispersion) == ChainInit::additive);
+        live = snap;
+        TEST(string_mirror_chain_init(&live,
+                                      chain_seed(k + 1),
+                                      chain_f0,
+                                      chain_damping,
+                                      chain_seed(2000 + k),
+                                      chain_brightness,
+                                      chain_dispersion) == ChainInit::replace);
+        live = snap;
+        TEST(string_mirror_chain_init(&live,
+                                      chain_seed(k - 1),
+                                      chain_f0,
+                                      chain_damping,
+                                      chain_seed(2000 + k),
+                                      chain_brightness,
+                                      chain_dispersion) == ChainInit::replace);
+    }
+    // A clean region (zeroed words) never matches, whatever the token.
+    memset(&m, 0, sizeof(m));
+    TEST(! string_chain_matches(&m, 0u) && ! string_chain_matches(&m, 0xFFFFFFFFu) &&
+         ! string_chain_matches(&m, nan_seed));
+}
+
+// Skipped or discarded work: a pass which never runs changes nothing, and the later decision follows the
+// actual state with no CPU rollback.
+static void check_string_chain_skipped_work()
+{
+    static StringMirror m;
+    static StringMirror skipped;
+    static StringMirror direct;
+    memset(&m, 0, sizeof(m));
+    ChainSlot      slot = {};
+    const uint32_t a    = chain_seed(60);
+    chain_claim(&slot, a);
+    for (uint32_t b = 0; b < 3; ++b) {
+        chain_dispatch(&m, &slot, a);
+    }
+    const uint32_t b = chain_seed(61);
+    chain_takeover(&slot, b);
+    // Discarded batch: the pass is not called.  The state is the same object afterwards, and the
+    // decision made later equals the decision made directly.
+    skipped = m;
+    direct  = m;
+    TEST(memcmp(&skipped, &m, sizeof(m)) == 0);
+    TEST(chain_init_only(&skipped, &slot, b) == ChainInit::additive);
+    TEST(chain_init_only(&direct, &slot, b) == ChainInit::additive);
+    TEST(memcmp(&skipped, &direct, sizeof(skipped)) == 0);
+    // Stale: the chain differs from the token, so the later pass replaces.
+    ChainSlot stale = slot;
+    stale.token     = chain_seed(99);
+    skipped         = m;
+    TEST(chain_init_only(&skipped, &stale, b) == ChainInit::replace);
+    // Silent passes in between change nothing.
+    skipped = m;
+    TEST(chain_dispatch(&skipped, &slot, b, 5.0f) == ChainInit::none);
+    TEST(memcmp(&skipped, &m, sizeof(m)) == 0);
+    TEST(chain_init_only(&skipped, &slot, b) == ChainInit::additive);
+}
+
+// Frozen legacy oracle: expected values were produced by the unmodified replace algorithm (the pre-change
+// string_mirror_init, f0 / damping / brightness / dispersion / seed per row), recorded as literals.  Columns:
+// delay length n, FNV-1a of the n ring floats after init, FNV-1a of 8 dispatches of 256 output samples.
+static uint32_t string_oracle_fnv(const void* data, size_t bytes)
+{
+    const unsigned char* p = static_cast<const unsigned char*>(data);
+    uint32_t             h = 2166136261u;
+    for (size_t i = 0; i < bytes; ++i) {
+        h ^= p[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static void check_string_chain_legacy_oracle()
+{
+    struct Row {
+        float    f0, damping, brightness, dispersion;
+        uint32_t seed, n, ring_hash, out_hash;
+    };
+
+    static const Row rows[] = {
+        { 441.0f, 0.5f, 1.0f, 0.0f, 0x1234u, 98, 0xd6c5fcffu, 0x68eacc1fu },
+        { 110.0f, 0.300000012f, 1.0f, 0.0f, 0xcafef00du, 399, 0xd23ea529u, 0x8ce43b1bu },
+        { 220.0f, 0.5f, 0.5f, 0.0f, 0x4du, 199, 0xb3e18b47u, 0x482c2aa7u },
+        { 82.4100037f, 0.200000003f, 0.25f, 0.400000006f, 0xdeadbeefu, 509, 0x216ae908u, 0x85cfb720u },
+        { 880.0f, 0.800000012f, 1.0f, 0.600000024f, 0x7f9a3c08u, 45, 0x0b17ebaau, 0x20f5ce80u },
+        { 330.0f, 0.600000024f, 0.899999976f, 0.300000012f, 0x10000u, 126, 0x0e608697u, 0xc864e597u },
+    };
+    static StringMirror m;
+    static float        out[2048];
+    for (const Row& row : rows) {
+        for (uint32_t path = 0; path < 3; ++path) {
+            memset(&m, 0, sizeof(m));
+            if (path == 0) {
+                string_mirror_init(&m, row.f0, row.damping, row.seed, row.brightness, row.dispersion);
+            }
+            else if (path == 1) {
+                // Fresh note through the chain-aware init: stale chain words, so it replaces.
+                TEST(string_mirror_chain_init(&m,
+                                              0x55u,
+                                              row.f0,
+                                              row.damping,
+                                              row.seed,
+                                              row.brightness,
+                                              row.dispersion) == ChainInit::replace);
+            }
+            else {
+                // Zero ring with a matching chain: additive equals replace, sample for sample.
+                m.chain_lo = string_chain_lo(0x55u);
+                m.chain_hi = string_chain_hi(0x55u);
+                m.wr       = row.n;
+                TEST(string_mirror_chain_init(&m,
+                                              0x55u,
+                                              row.f0,
+                                              row.damping,
+                                              row.seed,
+                                              row.brightness,
+                                              row.dispersion) == ChainInit::additive);
+            }
+            TEST(string_mirror_scalars(row.f0, row.damping, 0.0f, row.dispersion).n == row.n);
+            TEST(m.wr == row.n);
+            TEST(string_oracle_fnv(m.ring, row.n * sizeof(float)) == row.ring_hash);
+            for (uint32_t b = 0; b < 8; ++b) {
+                string_mirror_step(&m, row.f0, row.damping, 0.0f, false, out + b * 256, 256, row.dispersion);
+            }
+            TEST(string_oracle_fnv(out, sizeof(out)) == row.out_hash);
+        }
+    }
+}
+
+// Widened ring index: with the write position at 0 the window wraps through zero.  The unwidened form
+// (write_pos + i - n in 32 bit unsigned) differs because 2^32 mod 2034 = 1372.
+static void check_string_chain_widened_index()
+{
+    static StringMirror m;
+    static float        burst[string_ring_size];
+    memset(&m, 0, sizeof(m));
+    const uint32_t n = chain_burst(burst, chain_seed(70));
+    TEST(n > 0 && n < string_ring_size);
+    m.chain_lo = string_chain_lo(0x77u);
+    m.chain_hi = string_chain_hi(0x77u);
+    m.wr       = 0;
+    TEST(string_mirror_chain_init(&m,
+                                  0x77u,
+                                  chain_f0,
+                                  chain_damping,
+                                  chain_seed(70),
+                                  chain_brightness,
+                                  chain_dispersion) == ChainInit::additive);
+    TEST(m.wr == 0);
+    for (uint32_t i = 0; i < n; ++i) {
+        TEST(m.ring[(0 + i + (string_ring_size - n)) % string_ring_size] == burst[i]);
+    }
+    for (uint32_t idx = 0; idx < string_ring_size - n; ++idx) {
+        TEST(m.ring[idx] == 0.0f);
+    }
+    const uint32_t unwidened = static_cast<uint32_t>(0u + 0u - n) % string_ring_size;
+    TEST(unwidened != (string_ring_size - n) % string_ring_size);
+    TEST((0x100000000ull % string_ring_size) == 1372);
+}
+
+// Ringing-string continuity: the first lap after an additive takeover is the old ring window plus the new
+// burst, exactly, and the boundary step stays within the stream's own steps plus the pluck.
+static void check_string_chain_ringing_continuity()
+{
+    static StringMirror m;
+    static StringMirror replace_m;
+    static StringMirror snap;
+    static float        pre[2048];
+    static float        post_add[512];
+    static float        post_rep[512];
+    static float        burst[string_ring_size];
+    memset(&m, 0, sizeof(m));
+    ChainSlot      slot = {};
+    const uint32_t a    = chain_seed(80);
+    chain_claim(&slot, a);
+    for (uint32_t b = 0; b < 8; ++b) {
+        chain_dispatch(&m, &slot, a, chain_f0, false, pre + b * 256);
+    }
+    snap             = m;
+    const uint32_t b = chain_seed(81);
+    chain_takeover(&slot, b);
+    const uint32_t n = chain_burst(burst, b);
+    TEST(n <= 512);
+    float old_peak = 0.0f;
+    float pluck    = 0.0f;
+    for (uint32_t i = 0; i < n; ++i) {
+        const float old = snap.ring[(snap.wr + i + (string_ring_size - n)) % string_ring_size];
+        old_peak        = fmaxf(old_peak, fabsf(old));
+        pluck           = fmaxf(pluck, fabsf(burst[i]));
+    }
+    TEST(old_peak > 0.0f && pluck > 0.0f);
+    replace_m       = m;
+    ChainSlot stale = slot;
+    stale.token     = chain_seed(999);
+    chain_dispatch(&m, &slot, b, chain_f0, false, post_add);
+    chain_dispatch(&replace_m, &stale, b, chain_f0, false, post_rep);
+    for (uint32_t i = 0; i < n; ++i) {
+        const float old = snap.ring[(snap.wr + i + (string_ring_size - n)) % string_ring_size];
+        TEST(post_add[i] == old + burst[i]);
+        TEST(post_rep[i] == burst[i]);
+    }
+    const float prior_step = string_max_step(pre, 1024, 2048);
+    TEST(fabsf(post_add[0] - pre[2047]) <= prior_step + pluck);
+    TEST(m.e <= 1.0f && m.tag == b && string_chain_join(m.chain_lo, m.chain_hi) == a);
+}
+
+// Number of whitespace-flexible occurrences of `needle` in [from,to).
+static uint32_t count_in_range(const char* from, const char* to, const char* needle)
+{
+    uint32_t count = 0;
+    for (const char* p = from; p < to; p++) {
+        if (pin_matches_at(p, to, needle)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// True when the text after `member` up to the end of its line holds nothing but a comment and the next
+// token is the closing brace of the struct, i.e. `member` is the trailing member.
+static bool pin_member_is_last(const char* member, const char* end)
+{
+    const char* p = member;
+    while (p < end && *p != '\n') {
+        ++p;
+    }
+    p = skip_source_space(p, end);
+    return p < end && *p == '}';
+}
+
+// True when no source line in [from,to) which mentions `marker` also mentions `forbidden`.
+static bool pin_no_line_with_both(const char* from, const char* to, const char* marker, const char* forbidden)
+{
+    const char* line = from;
+    while (line < to) {
+        const char* line_end = line;
+        while (line_end < to && *line_end != '\n') {
+            ++line_end;
+        }
+        if (find_in_range(line, line_end, marker) && find_in_range(line, line_end, forbidden)) {
+            return false;
+        }
+        line = line_end + 1;
+    }
+    return true;
+}
+
+// True when no vkCmdFillBuffer call in [from,to) mentions `word` between its name and its closing semicolon.
+static bool pin_no_fill_mentions(const char* from, const char* to, const char* word)
+{
+    const char* call = find_in_range(from, to, "vkCmdFillBuffer(");
+    while (call) {
+        const char* call_end = call;
+        while (call_end < to && *call_end != ';') {
+            ++call_end;
+        }
+        if (find_in_range(call, call_end, word)) {
+            return false;
+        }
+        call = find_in_range(call_end, to, "vkCmdFillBuffer(");
+    }
+    return true;
+}
+
+// Source pins for the chain token.
+static void check_string_chain_source_pins()
+{
+    const char* const runtime = load_source_file("synth/realtime_synth.cpp");
+    const char* const shader  = load_source_file("synth/synth_oscillator.comp.glsl");
+    TEST(runtime != nullptr && shader != nullptr);
+    if (! runtime || ! shader) {
+        return;
+    }
+    const char* const rt_end = runtime + strlen(runtime);
+    const char* const sh_end = shader + strlen(shader);
+    // Size pin and the two fields.
+    TEST(find_in_range(runtime, rt_end, "static_assert(sizeof(Oscillator) == 92)") != nullptr);
+    TEST(find_in_range(
+             runtime,
+             rt_end,
+             "float string_dispersion;      // String dispersion 0..1, 0 = off\n        uint32_t string_chain;") !=
+         nullptr);
+    TEST(find_in_range(runtime, rt_end, "uint32_t string_chain;") != nullptr);
+    // Policy: the predicate sits before the layer fields are overwritten, then the conditional set.
+    const char* const predicate =
+        find_in_range(runtime,
+                      rt_end,
+                      "const bool chain_continues = reset_voice && osc.osc_type[0] == WaveType::string_wave && "
+                      "! (osc.osc_type[1] != WaveType::no_wave && osc.osc_mode == osc_mode_hard_sync);");
+    const char* const type_set = find_in_range(runtime, rt_end, "osc.osc_type[0]         = layer.osc_type[0];");
+    TEST(predicate != nullptr && type_set != nullptr && predicate < type_set);
+    const char* const seed_set  = find_in_range(runtime, rt_end, "osc.note_seed     = noise_start_counter;");
+    const char* const chain_set = find_in_range(runtime, rt_end, "osc.string_chain = osc.note_seed;");
+    TEST(seed_set != nullptr && chain_set != nullptr && seed_set < chain_set);
+    TEST(find_in_range(runtime, rt_end, "param.string_chain = oscillator.string_chain;") != nullptr);
+    // Shader.
+    TEST(find_in_range(shader, sh_end, "uint  string_chain;") != nullptr ||
+         find_in_range(shader, sh_end, "uint string_chain;") != nullptr);
+    TEST(find_in_range(shader, sh_end, "uint  chain_token") != nullptr ||
+         find_in_range(shader, sh_end, "uint chain_token") != nullptr);
+    TEST(find_in_range(shader, sh_end, "float((chain_token & 0xFFFFu) + 1u)") != nullptr);
+    TEST(find_in_range(shader, sh_end, "float(chain_token >> 16)") != nullptr);
+    TEST(find_in_range(shader, sh_end, "data[base + 8u] == string_chain_lo && data[base + 9u] == string_chain_hi") !=
+         nullptr);
+    TEST(find_in_range(shader, sh_end, "data[base + 8u] = string_chain_lo") != nullptr);
+    TEST(find_in_range(shader, sh_end, "data[base + 9u] = string_chain_hi") != nullptr);
+    TEST(find_in_range(shader, sh_end, "8-9 chain token (two-word integer), 10-13 unused") != nullptr);
+    TEST(find_in_range(shader, sh_end, "25-31 spare (zero)") != nullptr);
+    // Item 12 (a): the chain assignment is conditional on the predicate and follows the seed assignment.
+    const char* const chain_if =
+        find_in_range(runtime, rt_end, "if (! chain_continues) { osc.string_chain = osc.note_seed; }");
+    TEST(chain_if != nullptr && seed_set != nullptr && seed_set < chain_if);
+    TEST(count_in_range(runtime, rt_end, "osc.string_chain =") == 1);
+    TEST(count_in_range(runtime, rt_end, "param.string_chain =") == 1);
+    // Item 2 / (e): the field sits in RunningOscillator right after string_state_offs, and the transport
+    // member is the trailing member of ShaderParams::Oscillator (offset 88 of 92) ahead of the size pin.
+    const char* const transport_field = find_in_range(runtime, rt_end, "uint32_t string_chain;");
+    const char* const size_pin        = find_in_range(runtime, rt_end, "static_assert(sizeof(Oscillator) == 92)");
+    TEST(transport_field != nullptr && size_pin != nullptr && transport_field < size_pin);
+    TEST(transport_field != nullptr && pin_member_is_last(transport_field, rt_end));
+    const char* const state_offs_field =
+        find_in_range(runtime,
+                      rt_end,
+                      "uint32_t string_state_offs;      // String state region offset in bytes, fixed per slot");
+    const char* const running_field =
+        transport_field ? find_in_range(transport_field + 1, rt_end, "uint32_t string_chain;") : nullptr;
+    TEST(state_offs_field != nullptr && running_field != nullptr && size_pin != nullptr && size_pin < running_field);
+    TEST(running_field != nullptr && state_offs_field != nullptr && running_field > state_offs_field);
+    TEST(state_offs_field != nullptr &&
+         find_in_range(state_offs_field,
+                       rt_end,
+                       "uint32_t string_state_offs;      // String state region offset in bytes, fixed per slot\n"
+                       "    uint32_t string_chain;") == state_offs_field);
+    TEST(count_in_range(runtime, rt_end, "uint32_t string_chain;") == 2);
+    const char* const shader_field = find_in_range(shader, sh_end, "uint string_chain;");
+    TEST(shader_field != nullptr && pin_member_is_last(shader_field, sh_end));
+    TEST(count_in_range(shader, sh_end, "uint string_chain;") == 1);
+    // (d): the parameter is forwarded at the string_pass call and received as the last argument.
+    TEST(find_in_range(shader, sh_end, "((param.osc_pack >> 24) & 1u) != 0u, note_seed, param.string_chain);") !=
+         nullptr);
+    TEST(find_in_range(shader, sh_end, "uint note_seed, uint chain_token)") != nullptr);
+    // (b): the additive decision is gated on init; (c): it is taken before any lane 0 header write.
+    const char* const additive_decl =
+        find_in_range(shader,
+                      sh_end,
+                      "const bool additive = init && data[base + 8u] == string_chain_lo && data[base + 9u] == "
+                      "string_chain_hi;");
+    const char* const init_block   = find_in_range(shader, sh_end, "if (init) {");
+    const char* const tag_lo_set   = find_in_range(shader, sh_end, "data[base + 5u] = string_seed_tag_lo;");
+    const char* const tag_hi_set   = find_in_range(shader, sh_end, "data[base + 6u] = string_seed_tag_hi;");
+    const char* const chain_lo_set = find_in_range(shader, sh_end, "data[base + 8u] = string_chain_lo;");
+    const char* const chain_hi_set = find_in_range(shader, sh_end, "data[base + 9u] = string_chain_hi;");
+    const char* const additive_if  = find_in_range(shader, sh_end, "if (additive) {");
+    const char* const replace_if   = additive_if ? find_in_range(additive_if, sh_end, "else {") : nullptr;
+    const char* const gain_reset   = find_in_range(shader, sh_end, "string_release_gain = 1.0;");
+    const char* const stored_path  = find_in_range(shader, sh_end, "else if (lane == 0u) {");
+    TEST(additive_decl != nullptr && init_block != nullptr && tag_lo_set != nullptr && tag_hi_set != nullptr);
+    TEST(chain_lo_set != nullptr && chain_hi_set != nullptr && additive_if != nullptr && replace_if != nullptr);
+    TEST(gain_reset != nullptr && stored_path != nullptr);
+    if (additive_decl && init_block && tag_lo_set && tag_hi_set && chain_lo_set && chain_hi_set && additive_if &&
+        replace_if && gain_reset && stored_path) {
+        TEST(additive_decl < init_block);
+        TEST(additive_decl < tag_lo_set && additive_decl < tag_hi_set);
+        TEST(additive_decl < chain_lo_set && additive_decl < chain_hi_set);
+        TEST(count_in_range(shader, sh_end, "const bool additive") == 1);
+        TEST(count_in_range(shader, sh_end, "additive") == 3);
+        // (j): the single init block rewrites words 5, 6, 8 and 9 once, ahead of the additive/replace split,
+        // so every init path rewrites the chain token.
+        TEST(count_in_range(shader, sh_end, "data[base + 8u] = string_chain_lo;") == 1);
+        TEST(count_in_range(shader, sh_end, "data[base + 9u] = string_chain_hi;") == 1);
+        TEST(count_in_range(shader, sh_end, "data[base + 8u] = ") == 1);
+        TEST(count_in_range(shader, sh_end, "data[base + 9u] = ") == 1);
+        TEST(init_block < chain_lo_set && chain_lo_set < chain_hi_set && chain_hi_set < additive_if);
+        TEST(init_block < tag_lo_set && tag_hi_set < additive_if);
+        // (i): the additive branch keeps the filter and dispersion state and adds onto the live window; the
+        // replace branch clears the state and refills; the release gain restarts after both, inside init.
+        TEST(additive_if < replace_if);
+        TEST(find_in_range(additive_if, replace_if, "write_pos = floatBitsToUint(data[base]);") != nullptr);
+        TEST(find_in_range(additive_if, replace_if, "string_prev_lowpass = data[base + 1u];") != nullptr);
+        TEST(find_in_range(additive_if, replace_if, "string_prev_allpass = data[base + 2u];") != nullptr);
+        TEST(find_in_range(additive_if, replace_if, "disp_state = data[base + 7u];") != nullptr);
+        TEST(find_in_range(additive_if,
+                           replace_if,
+                           "data[ring_offs + (write_pos + i + (string_ring_size - delay_whole)) % string_ring_size] "
+                           "+= string_burst[i];") != nullptr);
+        TEST(find_in_range(additive_if, replace_if, "0.0") == nullptr);
+        TEST(find_in_range(additive_if, replace_if, "write_pos = delay_whole") == nullptr);
+        TEST(find_in_range(additive_if, replace_if, "data[ring_offs + i] =") == nullptr);
+        TEST(find_in_range(additive_if, replace_if, "string_release_gain") == nullptr);
+        TEST(find_in_range(replace_if, stored_path, "data[ring_offs + i] = string_burst[i];") != nullptr);
+        TEST(find_in_range(replace_if, stored_path, "write_pos = delay_whole;") != nullptr);
+        TEST(find_in_range(replace_if, stored_path, "string_prev_lowpass = 0.0;") != nullptr);
+        TEST(find_in_range(replace_if, stored_path, "string_prev_allpass = 0.0;") != nullptr);
+        TEST(find_in_range(replace_if, stored_path, "disp_state = 0.0;") != nullptr);
+        TEST(gain_reset > replace_if && gain_reset < stored_path);
+        TEST(count_in_range(shader, sh_end, "string_release_gain = 1.0;") == 1);
+    }
+    // (f): the token is never reinterpreted as a float, in the shader or on the CPU.
+    const char* const chain_markers[] = { "chain_token", "string_chain", "chain_continues" };
+    for (const char* marker : chain_markers) {
+        TEST(pin_no_line_with_both(shader, sh_end, marker, "floatBitsToUint"));
+        TEST(pin_no_line_with_both(shader, sh_end, marker, "uintBitsToFloat"));
+        TEST(pin_no_line_with_both(runtime, rt_end, marker, "floatBitsToUint"));
+        TEST(pin_no_line_with_both(runtime, rt_end, marker, "uintBitsToFloat"));
+        // (h): no CPU frequency comparison feeds the token.
+        TEST(pin_no_line_with_both(runtime, rt_end, marker, "22.0"));
+        TEST(pin_no_line_with_both(runtime, rt_end, marker, "string_min_freq"));
+        TEST(pin_no_line_with_both(runtime, rt_end, marker, "phase_step"));
+        TEST(pin_no_line_with_both(runtime, rt_end, marker, "f0"));
+    }
+    TEST(find_in_range(runtime, rt_end, "22.0f") == nullptr);
+    TEST(find_in_range(runtime, rt_end, "string_min_freq") == nullptr);
+    // (g): no buffer fill touches the string region.
+    TEST(find_in_range(runtime, rt_end, "vkCmdFillBuffer(") != nullptr);
+    TEST(pin_no_fill_mentions(runtime, rt_end, "string"));
+    TEST(pin_no_fill_mentions(runtime, rt_end, "chain"));
+    // Absence of the withdrawn designs.
+    const char* const withdrawn[] = { "string_wave_live", "string_takeover_add",
+                                      "string_flip_set",  "string_rte_ok",
+                                      "RoundingModeRTE",  "spirv_execution_mode",
+                                      "float_control",    "shaderRoundingModeRTEFloat32",
+                                      "string_epoch",     "1u << 25" };
+    for (const char* word : withdrawn) {
+        TEST(strstr(runtime, word) == nullptr);
+        TEST(strstr(shader, word) == nullptr);
+    }
+    TEST(strstr(shader, "pick") == nullptr);
+}
+
+static void string_chain_m2_regressions()
+{
+    check_string_chain_same_batch();
+    check_string_chain_recycled_slot();
+    check_string_chain_never_rendered();
+    check_string_chain_below_floor_takeover();
+    check_string_chain_type_transitions();
+    check_string_chain_token_lifecycle();
+    check_string_chain_seed_uniqueness();
+    check_string_chain_skipped_work();
+    check_string_chain_legacy_oracle();
+    check_string_chain_widened_index();
+    check_string_chain_ringing_continuity();
+    check_string_chain_source_pins();
+}
+
 static void string_mirror_m2_regressions_b()
 {
     check_string_mirror_release_click_free();
@@ -27303,6 +28250,7 @@ int main()
     string_wave_m2_regressions();
     string_mirror_m2_regressions_a();
     string_mirror_m2_regressions_b();
+    string_chain_m2_regressions();
     child_row_projection_regressions();
     osc_layer_projection_regressions();
     osc_direct_modulator_regressions();
