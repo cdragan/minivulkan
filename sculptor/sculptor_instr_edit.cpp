@@ -123,9 +123,10 @@ Synth::InstrumentBank pending_bank;
 // the unsaved tail of an unfinished gesture; the next full save after the
 // gesture recovers the file.
 bool save_pending = false;
-// Auto-save writes only after a bank state the user actually chose: a good
-// load or an explicit save. After a failed load the default bank in memory
-// must never silently overwrite the file on disk.
+// A good load, an explicit save, or an absent file arms auto-save.  With no
+// user state on disk to protect, the first frames save the default bank.
+// A present-but-invalid or oversized file keeps auto-save disarmed so the
+// default bank never silently overwrites it.
 bool     bank_auto_save_armed = false;
 uint32_t frames_since_publish = 0;
 
@@ -1803,8 +1804,10 @@ static bool load_editor_bank(const char* path)
 
     const Synth::BankFileStatus status = Synth::load_editor_bank_file(path, &scratch);
 
-    if (status == Synth::BankFileStatus::absent)
+    if (status == Synth::BankFileStatus::absent) {
+        bank_auto_save_armed = true;
         return false;
+    }
 
     if (status == Synth::BankFileStatus::too_large) {
         Sculptor::notify_error("Synth: bank file too large to parse: %s", path);

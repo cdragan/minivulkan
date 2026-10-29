@@ -3,6 +3,7 @@
 
 #include "sculptor_instr_library.h"
 
+#include "../core/d_printf.h"
 #include "sculptor_atomic_file.h"
 #include "sculptor_bank_json.h"
 #include "sculptor_effect_graph.h"
@@ -558,6 +559,8 @@ static int write_library_file(const char* const                        path,
     if (! replace && num_kept + 1 > Synth::library_max_records)
         return EINVAL;
 
+    d_printf("Writing instrument library %s\n", path);
+
     char                           tmp_path[512];
     const std::variant<FILE*, int> staged = atomic_write_begin(path, tmp_path, sizeof(tmp_path));
     if (std::holds_alternative<int>(staged))
@@ -660,6 +663,8 @@ static int delete_library_records(const char* const               path,
             *out_status = Synth::library_valid;
         return 0;
     }
+
+    d_printf("Writing instrument library %s\n", path);
 
     char                           tmp_path[512];
     const std::variant<FILE*, int> staged = atomic_write_begin(path, tmp_path, sizeof(tmp_path));

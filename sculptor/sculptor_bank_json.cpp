@@ -5623,6 +5623,8 @@ int Synth::save_editor_bank_file(const char* path, const InstrumentEditorBank* b
     if (error)
         return error;
 
+    d_printf("Saving instrument bank %s\n", path);
+
     FILE* const file = fopen(path, "wb");
     if (! file)
         return errno;
