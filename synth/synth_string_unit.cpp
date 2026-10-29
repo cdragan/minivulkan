@@ -3492,46 +3492,290 @@ static void check_string_chain_skipped_work()
     TEST(chain_init_only(&skipped, &slot, b) == ChainInit::additive);
 }
 
-// Frozen legacy oracle: expected values were produced by the unmodified replace algorithm (the pre-change
-// string_mirror_init, f0 / damping / brightness / dispersion / seed per row), recorded as literals.  Columns:
-// delay length n, FNV-1a of the n ring floats after init, FNV-1a of 8 dispatches of 256 output samples.
-static uint32_t string_oracle_fnv(const void* data, size_t bytes)
+// Use separate double math and state.  Float rounding and libm results can differ between platforms.
+// These helpers cover the legacy replace algorithm, not the chain decision.
+struct StringOracleScalars {
+    double   c;
+    double   a;
+    double   g;
+    double   gr;
+    uint32_t n;
+    bool     silent;
+    double   disp_a;
+    uint32_t num_sections;
+    double   disp_delay;
+};
+
+struct StringOracleReference {
+    bool     tagged;
+    uint32_t tag;
+    double   ds[string_max_sections];
+    double   ring[string_ring_size];
+    uint32_t wr;
+    double   t1;
+    double   u1;
+    double   e;
+};
+
+static uint32_t string_oracle_pcg_hash(uint32_t state)
 {
-    const unsigned char* p = static_cast<const unsigned char*>(data);
-    uint32_t             h = 2166136261u;
-    for (size_t i = 0; i < bytes; ++i) {
-        h ^= p[i];
-        h *= 16777619u;
-    }
-    return h;
+    state               = state * 747796405u + 2891336453u;
+    const uint32_t word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
 }
 
+static double string_oracle_unit_clamp(double value)
+{
+    return value >= 0.0 ? (value <= 1.0 ? value : 1.0) : 0.0;
+}
+
+static double string_oracle_disp_ratio(double q)
+{
+    if (q <= 0.3849002) {
+        const double cos_arg = fmin(1.0, 2.598076 * q);
+        return 1.1547005 * cos(acos(cos_arg) * 0.33333334);
+    }
+    const double cardano = pow(q * 0.5 + sqrt(q * q * 0.25 - 0.037037037), 0.33333334);
+    return cardano + 0.33333334 / cardano;
+}
+
+static double string_oracle_disp_phase_delay(double coeff, double omega)
+{
+    return (2.0 / omega) * atan2((1.0 - coeff) * sin(0.5 * omega), (1.0 + coeff) * cos(0.5 * omega));
+}
+
+static StringOracleScalars string_oracle_scalars(double f0,
+                                                 double damping,
+                                                 double release_damping,
+                                                 double dispersion = 0.0)
+{
+    StringOracleScalars coefficients = {};
+    coefficients.silent              = ! (f0 >= 22.0);
+    if (coefficients.silent) {
+        return coefficients;
+    }
+    damping            = string_oracle_unit_clamp(damping);
+    double len         = 44100.0 / f0;
+    len                = len < 3.0 ? 3.0 : len;
+    coefficients.c     = 0.10 + 0.30 * damping;
+    const double tau   = coefficients.c / (1.0 - coefficients.c);
+    const double t60   = 20.0 * pow(0.25 / 20.0, damping);
+    const double omega = 6.2831853 * f0 / 44100.0;
+    const double mag =
+        (1.0 - coefficients.c) / sqrt(1.0 - 2.0 * coefficients.c * cos(omega) + coefficients.c * coefficients.c);
+    const double g    = pow(10.0, -3.0 * len / (44100.0 * t60)) / mag;
+    coefficients.g    = g < 0.9999 ? g : 0.9999;
+    double disp_delay = 0.0;
+    if (dispersion > 0.0) {
+        const double omega_q       = omega;
+        const double section_count = 1.0;
+        const double disp_q        = 0.05863 * dispersion / (section_count * (omega_q * omega_q * omega_q));
+        const double disp_r        = string_oracle_disp_ratio(disp_q);
+        const double section_a     = (1.0 - disp_r) / (1.0 + disp_r);
+        const double coeff         = section_a;
+        const double section_delay = string_oracle_disp_phase_delay(coeff, omega);
+        if (len - tau - section_delay >= 3.0) {
+            coefficients.disp_a       = coeff;
+            coefficients.num_sections = 1;
+            disp_delay                = section_delay;
+        }
+    }
+    coefficients.disp_delay = disp_delay;
+    const double delay      = len - tau - coefficients.disp_delay;
+    coefficients.n          = static_cast<uint32_t>(floor(delay - 1.0));
+    const double d          = delay - static_cast<double>(coefficients.n);
+    coefficients.a          = (1.0 - d) / (1.0 + d);
+    coefficients.gr         = pow(10.0, -release_damping * 3.0 * len / (44100.0 * 0.05));
+    return coefficients;
+}
+
+static uint32_t string_oracle_burst(double*  burst,
+                                    double   f0,
+                                    double   damping,
+                                    uint32_t seed,
+                                    double   brightness = 1.0,
+                                    double   dispersion = 0.0)
+{
+    const StringOracleScalars coefficients = string_oracle_scalars(f0, damping, 0.0, dispersion);
+    if (coefficients.silent) {
+        return 0;
+    }
+    const uint32_t n = coefficients.n;
+    for (uint32_t i = 0; i < n; ++i) {
+        burst[i] = static_cast<double>(string_oracle_pcg_hash(seed + i) & 0xFFFFu) / 32767.5 - 1.0;
+    }
+    double sum = 0.0;
+    for (uint32_t k = 0; k < n; ++k) {
+        sum += burst[k];
+    }
+    const double mean = sum / static_cast<double>(n);
+    for (uint32_t k = 0; k < n; ++k) {
+        burst[k] -= mean;
+    }
+    if (brightness < 1.0) {
+        // Same math as the shader: a zero-state lap gives the tail, which fixes the periodic
+        // wrap start state; then the filtered lap, re-centering and energy-matched rescale.
+        const double tone_coeff = 0.95 * (1.0 - string_oracle_unit_clamp(brightness));
+        double       tone_state = 0.0;
+        double       energy_in  = 0.0;
+        for (uint32_t k = 0; k < n; ++k) {
+            const double sample_in = burst[k];
+            tone_state             = (1.0 - tone_coeff) * sample_in + tone_coeff * tone_state;
+            energy_in += sample_in * sample_in;
+        }
+        tone_state /= 1.0 - pow(tone_coeff, static_cast<double>(n));
+        double tone_sum    = 0.0;
+        double tone_energy = 0.0;
+        for (uint32_t k = 0; k < n; ++k) {
+            tone_state = (1.0 - tone_coeff) * burst[k] + tone_coeff * tone_state;
+            burst[k]   = tone_state;
+            tone_sum += tone_state;
+            tone_energy += tone_state * tone_state;
+        }
+        const double tone_mean = tone_sum / static_cast<double>(n);
+        const double tone_var  = tone_energy - tone_sum * tone_mean;
+        const double tone_gain = tone_var > 0.0 ? sqrt(energy_in / tone_var) : 1.0;
+        for (uint32_t k = 0; k < n; ++k) {
+            burst[k] = (burst[k] - tone_mean) * tone_gain;
+        }
+    }
+    return n;
+}
+
+static void string_oracle_init(StringOracleReference* reference,
+                               double                 f0,
+                               double                 damping,
+                               uint32_t               seed,
+                               double                 brightness = 1.0,
+                               double                 dispersion = 0.0)
+{
+    static double  burst[string_ring_size];
+    const uint32_t n = string_oracle_burst(burst, f0, damping, seed, brightness, dispersion);
+    if (n == 0) {
+        return;
+    }
+    for (uint32_t i = 0; i < n; ++i) {
+        reference->ring[i] = burst[i];
+    }
+    reference->wr = n;
+    reference->t1 = 0.0;
+    reference->u1 = 0.0;
+    reference->e  = 1.0;
+    for (uint32_t k = 0; k < string_max_sections; ++k) {
+        reference->ds[k] = 0.0;
+    }
+    reference->tagged = true;
+    reference->tag    = seed;
+}
+
+static void string_oracle_step(StringOracleReference* reference,
+                               double                 f0,
+                               double                 damping,
+                               double                 release_damping,
+                               bool                   release,
+                               double*                out,
+                               uint32_t               count,
+                               double                 dispersion      = 0.0,
+                               bool                   perturb_damping = false)
+{
+    StringOracleScalars coefficients = string_oracle_scalars(f0, damping, release_damping, dispersion);
+    if (perturb_damping) {
+        coefficients.c *= 1.002;
+    }
+    if (coefficients.silent) {
+        for (uint32_t i = 0; i < count; ++i) {
+            out[i] = 0.0;
+        }
+        return;
+    }
+    const double kr     = 1.0 - exp(-1.0 / (44100.0 * 0.003));
+    const double target = release ? coefficients.gr : 1.0;
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t rd = reference->wr >= coefficients.n ? reference->wr - coefficients.n
+                                                            : reference->wr + string_ring_size - coefficients.n;
+        const double   x  = reference->ring[rd];
+        out[i]            = x;
+        reference->e += kr * (target - reference->e);
+        const double t       = (1.0 - coefficients.c) * x + coefficients.c * reference->t1;
+        const double u       = coefficients.a * t + reference->t1 - coefficients.a * reference->u1;
+        double       cascade = u;
+        for (uint32_t k = 0; k < coefficients.num_sections; ++k) {
+            const double section_out = coefficients.disp_a * cascade + reference->ds[k];
+            reference->ds[k]         = cascade - coefficients.disp_a * section_out;
+            cascade                  = section_out;
+        }
+        double v                       = cascade * (coefficients.g * reference->e);
+        v                              = fabs(v) < 8.0 ? v : 0.0;
+        reference->ring[reference->wr] = v;
+        reference->t1                  = t;
+        reference->u1                  = u;
+        reference->wr                  = reference->wr + 1 == string_ring_size ? 0 : reference->wr + 1;
+    }
+}
+
+// Compare all samples with one peak-relative bound.  Reject non-finite samples explicitly.
+struct StringOracleDeviation {
+    double peak  = 1.0e-12;
+    double error = 0.0;
+
+    void compare(const float* actual, const double* expected, uint32_t count)
+    {
+        for (uint32_t i = 0; i < count; ++i) {
+            const double sample = static_cast<double>(actual[i]);
+            TEST(isfinite(sample) && isfinite(expected[i]));
+            peak  = fmax(peak, fabs(expected[i]));
+            error = fmax(error, fabs(sample - expected[i]));
+        }
+    }
+};
+
+// Verify the float mirror against an independent double reference of the legacy algorithm.
+// Exact init-path agreement remains separate from the cross-platform rounding bound.
 static void check_string_chain_legacy_oracle()
 {
     struct Row {
-        float    f0, damping, brightness, dispersion;
-        uint32_t seed, n, ring_hash, out_hash;
+        float    f0;
+        float    damping;
+        float    brightness;
+        float    dispersion;
+        uint32_t seed;
+        uint32_t n;
     };
 
     static const Row rows[] = {
-        { 441.0f, 0.5f, 1.0f, 0.0f, 0x1234u, 98, 0xd6c5fcffu, 0x68eacc1fu },
-        { 110.0f, 0.300000012f, 1.0f, 0.0f, 0xcafef00du, 399, 0xd23ea529u, 0x8ce43b1bu },
-        { 220.0f, 0.5f, 0.5f, 0.0f, 0x4du, 199, 0xb3e18b47u, 0x482c2aa7u },
-        { 82.4100037f, 0.200000003f, 0.25f, 0.400000006f, 0xdeadbeefu, 509, 0x216ae908u, 0x85cfb720u },
-        { 880.0f, 0.800000012f, 1.0f, 0.600000024f, 0x7f9a3c08u, 45, 0x0b17ebaau, 0x20f5ce80u },
-        { 330.0f, 0.600000024f, 0.899999976f, 0.300000012f, 0x10000u, 126, 0x0e608697u, 0xc864e597u },
+        { 441.0f, 0.5f, 1.0f, 0.0f, 0x1234u, 98 },
+        { 110.0f, 0.300000012f, 1.0f, 0.0f, 0xcafef00du, 399 },
+        { 220.0f, 0.5f, 0.5f, 0.0f, 0x4du, 199 },
+        { 82.4100037f, 0.200000003f, 0.25f, 0.400000006f, 0xdeadbeefu, 509 },
+        { 880.0f, 0.800000012f, 1.0f, 0.600000024f, 0x7f9a3c08u, 45 },
+        { 330.0f, 0.600000024f, 0.899999976f, 0.300000012f, 0x10000u, 126 },
     };
-    static StringMirror m;
-    static float        out[2048];
+    // Measured peak-relative error was below 1.9e-5.  Allow over five times that rounding noise.
+    constexpr double             tolerance = 0.0001;
+    static StringMirror          mirror;
+    static StringOracleReference reference;
+    static StringOracleReference perturbed;
+    static float                 output[2048];
+    static float                 replace_ring[string_ring_size];
+    static float                 replace_output[2048];
+    static double                reference_output[256];
+    static double                perturbed_output[256];
     for (const Row& row : rows) {
+        const double f0         = static_cast<double>(row.f0);
+        const double damping    = static_cast<double>(row.damping);
+        const double brightness = static_cast<double>(row.brightness);
+        const double dispersion = static_cast<double>(row.dispersion);
+        TEST(string_oracle_scalars(f0, damping, 0.0, dispersion).n == row.n);
         for (uint32_t path = 0; path < 3; ++path) {
-            memset(&m, 0, sizeof(m));
+            memset(&mirror, 0, sizeof(mirror));
+            memset(&reference, 0, sizeof(reference));
             if (path == 0) {
-                string_mirror_init(&m, row.f0, row.damping, row.seed, row.brightness, row.dispersion);
+                string_mirror_init(&mirror, row.f0, row.damping, row.seed, row.brightness, row.dispersion);
+                memcpy(replace_ring, mirror.ring, sizeof(replace_ring));
             }
             else if (path == 1) {
-                // Fresh note through the chain-aware init: stale chain words, so it replaces.
-                TEST(string_mirror_chain_init(&m,
+                // Stale chain words select replace.
+                TEST(string_mirror_chain_init(&mirror,
                                               0x55u,
                                               row.f0,
                                               row.damping,
@@ -3540,11 +3784,11 @@ static void check_string_chain_legacy_oracle()
                                               row.dispersion) == ChainInit::replace);
             }
             else {
-                // Zero ring with a matching chain: additive equals replace, sample for sample.
-                m.chain_lo = string_chain_lo(0x55u);
-                m.chain_hi = string_chain_hi(0x55u);
-                m.wr       = row.n;
-                TEST(string_mirror_chain_init(&m,
+                // A zero ring with a matching chain selects additive.
+                mirror.chain_lo = string_chain_lo(0x55u);
+                mirror.chain_hi = string_chain_hi(0x55u);
+                mirror.wr       = row.n;
+                TEST(string_mirror_chain_init(&mirror,
                                               0x55u,
                                               row.f0,
                                               row.damping,
@@ -3553,12 +3797,36 @@ static void check_string_chain_legacy_oracle()
                                               row.dispersion) == ChainInit::additive);
             }
             TEST(string_mirror_scalars(row.f0, row.damping, 0.0f, row.dispersion).n == row.n);
-            TEST(m.wr == row.n);
-            TEST(string_oracle_fnv(m.ring, row.n * sizeof(float)) == row.ring_hash);
-            for (uint32_t b = 0; b < 8; ++b) {
-                string_mirror_step(&m, row.f0, row.damping, 0.0f, false, out + b * 256, 256, row.dispersion);
+            TEST(mirror.wr == row.n);
+            TEST(memcmp(mirror.ring, replace_ring, sizeof(replace_ring)) == 0);
+            string_oracle_init(&reference, f0, damping, row.seed, brightness, dispersion);
+            perturbed = reference;
+            StringOracleDeviation deviation;
+            StringOracleDeviation negative_control;
+            deviation.compare(mirror.ring, reference.ring, string_ring_size);
+            for (uint32_t dispatch = 0; dispatch < 8; ++dispatch) {
+                float* dispatch_output = output + dispatch * 256;
+                string_mirror_step(&mirror, row.f0, row.damping, 0.0f, false, dispatch_output, 256, row.dispersion);
+                string_oracle_step(&reference, f0, damping, 0.0, false, reference_output, 256, dispersion);
+                deviation.compare(dispatch_output, reference_output, 256);
+                deviation.compare(mirror.ring, reference.ring, string_ring_size);
+                if (&row == rows && path == 0) {
+                    // A 0.2 percent damping coefficient change must exceed the bound by at least ten times.
+                    string_oracle_step(&perturbed, f0, damping, 0.0, false, perturbed_output, 256, dispersion, true);
+                    negative_control.compare(dispatch_output, perturbed_output, 256);
+                    negative_control.compare(mirror.ring, perturbed.ring, string_ring_size);
+                }
             }
-            TEST(string_oracle_fnv(out, sizeof(out)) == row.out_hash);
+            TEST(deviation.error <= tolerance * deviation.peak);
+            if (&row == rows && path == 0) {
+                TEST(negative_control.error > 10.0 * tolerance * negative_control.peak);
+            }
+            if (path == 0) {
+                memcpy(replace_output, output, sizeof(output));
+            }
+            else {
+                TEST(memcmp(output, replace_output, sizeof(output)) == 0);
+            }
         }
     }
 }
