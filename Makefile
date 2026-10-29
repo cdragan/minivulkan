@@ -203,7 +203,7 @@ all_src_files += $(midi_test_sender_src_files)
 all_src_files += $(suballoc_unit_src_files)
 all_src_files += $(sculptor_graph_unit_src_files)
 all_src_files += $(sculptor_undo_unit_src_files)
-all_src_files += $(synth_unit_src_files)
+all_src_files += $(synth_unit_common_src_files) $(synth_core_unit_src_files) $(synth_runtime_unit_src_files) $(synth_effects_unit_src_files) $(synth_osc_unit_src_files) $(synth_fir_unit_src_files) $(synth_string_unit_src_files) $(synth_bank_unit_src_files) $(synth_clipboard_unit_src_files)
 all_src_files += $(midi_decode_unit_src_files)
 all_src_files += $(threed_src_files)
 all_src_files += $(threed_gui_src_files)
@@ -230,8 +230,14 @@ all_sculptor_graph_unit_src_files += thirdparty/imgui/src/imgui_tables.cpp
 all_sculptor_graph_unit_src_files += thirdparty/imgui/src/imgui_widgets.cpp
 all_sculptor_graph_unit_src_files += $(sculptor_graph_unit_src_files)
 
-all_synth_unit_src_files += $(lib_src_files)
-all_synth_unit_src_files += $(synth_unit_src_files)
+all_synth_core_unit_src_files += $(lib_src_files) $(synth_unit_common_src_files) $(synth_core_unit_src_files)
+all_synth_runtime_unit_src_files += $(lib_src_files) $(synth_unit_common_src_files) $(synth_runtime_unit_src_files)
+all_synth_effects_unit_src_files += $(lib_src_files) $(synth_unit_common_src_files) $(synth_effects_unit_src_files)
+all_synth_osc_unit_src_files += $(lib_src_files) $(synth_unit_common_src_files) $(synth_osc_unit_src_files)
+all_synth_fir_unit_src_files += $(lib_src_files) $(synth_unit_common_src_files) $(synth_fir_unit_src_files)
+all_synth_string_unit_src_files += $(lib_src_files) $(synth_unit_common_src_files) $(synth_string_unit_src_files)
+all_synth_bank_unit_src_files += $(lib_src_files) $(synth_unit_common_src_files) $(synth_bank_unit_src_files)
+all_synth_clipboard_unit_src_files += $(lib_src_files) $(synth_unit_common_src_files) $(synth_clipboard_unit_src_files)
 
 all_synth_modulation_unit_src_files += $(lib_src_files)
 all_synth_modulation_unit_src_files += $(synth_modulation_unit_src_files)
@@ -676,7 +682,7 @@ $(foreach file, $(sort $(filter %.cpp, $(all_src_files))), $(eval $(call ASM_RUL
 
 $(foreach file, $(filter-out $(imgui_src_files) $(libpng_src_files) $(zlib_src_files), $(all_src_files)), $(call TARGET_FILES, $(file))): CFLAGS += $(WFLAGS)
 
-$(foreach file, $(all_gui_src_files) $(imgui_src_files) $(all_sculptor_graph_unit_src_files) $(all_synth_unit_src_files), $(call TARGET_FILES, $(file))): CFLAGS += -DIMGUI_DISABLE_OBSOLETE_KEYIO -DIMGUI_DISABLE_OBSOLETE_FUNCTIONS -Ithirdparty/imgui/src
+$(foreach file, $(sort $(all_gui_src_files) $(imgui_src_files) $(all_sculptor_graph_unit_src_files) $(all_synth_core_unit_src_files) $(all_synth_runtime_unit_src_files) $(all_synth_effects_unit_src_files) $(all_synth_osc_unit_src_files) $(all_synth_fir_unit_src_files) $(all_synth_string_unit_src_files) $(all_synth_bank_unit_src_files) $(all_synth_clipboard_unit_src_files)), $(call TARGET_FILES, $(file))): CFLAGS += -DIMGUI_DISABLE_OBSOLETE_KEYIO -DIMGUI_DISABLE_OBSOLETE_FUNCTIONS -Ithirdparty/imgui/src
 
 $(call TARGET_FILES, load_png.cpp): CFLAGS += -Ithirdparty/libpng
 
@@ -792,7 +798,14 @@ tests += suballoc_unit
 tests += sculptor_graph_unit
 tests += sculptor_undo_unit
 ifneq ($(UNAME)_$(stdlib), Windows_0)
-tests += synth_unit
+tests += synth_core_unit
+tests += synth_runtime_unit
+tests += synth_effects_unit
+tests += synth_osc_unit
+tests += synth_fir_unit
+tests += synth_string_unit
+tests += synth_bank_unit
+tests += synth_clipboard_unit
 endif
 tests += midi_decode_unit
 
