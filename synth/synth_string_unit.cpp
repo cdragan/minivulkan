@@ -3722,7 +3722,7 @@ struct StringOracleDeviation {
     {
         for (uint32_t i = 0; i < count; ++i) {
             const double sample = static_cast<double>(actual[i]);
-            TEST(isfinite(sample) && isfinite(expected[i]));
+            TEST(std::isfinite(sample) && std::isfinite(expected[i]));
             peak  = fmax(peak, fabs(expected[i]));
             error = fmax(error, fabs(sample - expected[i]));
         }
