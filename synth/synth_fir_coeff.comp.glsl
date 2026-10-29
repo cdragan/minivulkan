@@ -20,7 +20,7 @@ struct FIRBand {
 
 struct FIRParams {
     uint     taps_offs;  // Offset of FIR filter's taps
-    uint     band_count; // Bands staged in bands[0..band_count-1], 1..4
+    uint     band_count; // Low 8 bits: staged bands, 1..4; bit 31: multiband align/flip
     FIRBand  bands[4];   // Inactive bands arrive zeroed and contribute nothing
 };
 
@@ -61,6 +61,15 @@ void main()
 {
     FIRParams staged = params[gl_WorkGroupID.x];
 
+    const bool mb_align_flip = (staged.band_count & 0x80000000u) != 0u;
+    const uint band_count    = staged.band_count & 0xFFu;
+    uint       mb_center     = 0u;
+    if (mb_align_flip) {
+        for (uint b = 0u; b < band_count; b++) {
+            mb_center = max(mb_center, (staged.bands[b].window_span - 1u) / 2u);
+        }
+    }
+
     // The accumulator starts clear: inactive bands and bands dropped by the
     // runtime contribute nothing, and the final store writes the sum.
     for (uint tap = gl_LocalInvocationID.x; tap < num_taps; tap += work_group_size) {
@@ -72,7 +81,7 @@ void main()
     // One kernel computation and reduction per band; the band's own
     // denominator normalizes its kernel before the gain-weighted accumulation,
     // so overlapping bands interfere as complex sums.
-    for (uint band_idx = 0; band_idx < staged.band_count; band_idx++) {
+    for (uint band_idx = 0; band_idx < band_count; band_idx++) {
         const FIRBand param          = staged.bands[band_idx];
         const uint   highpass_cutoff_freq = param.highpass_cutoff_freq;
         const uint   lowpass_cutoff_freq  = param.lowpass_cutoff_freq;
@@ -81,7 +90,7 @@ void main()
 
         const float lowpass_norm_cutoff  = float(lowpass_cutoff_freq)  / float(sampling_freq);
         const float highpass_norm_cutoff = float(highpass_cutoff_freq) / float(sampling_freq);
-        const uint  center               = (param.window_span - 1u) / 2u;
+        const uint  center               = mb_align_flip ? mb_center : (param.window_span - 1u) / 2u;
         const bool  passthrough          = param.lowpass_cutoff_freq == 0 && param.highpass_cutoff_freq == 0;
         const bool  bandpass             = param.highpass_cutoff_freq > 0 && param.highpass_cutoff_freq < param.lowpass_cutoff_freq;
         const float center_freq          = (float(highpass_cutoff_freq) + float(lowpass_cutoff_freq)) * 0.5;
@@ -109,7 +118,9 @@ void main()
 
                 // Band pass
                 if (highpass_cutoff_freq < lowpass_cutoff_freq) {
-                    value      = -value;
+                    if (! mb_align_flip) {
+                        value = -value;
+                    }
                     norm_value = hp_value;
                 }
                 // High pass or band stop

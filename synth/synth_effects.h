@@ -155,11 +155,15 @@ struct FirEffectCoeffBand {
     float    gain;                 // The band's normalized kernel scales with this
 };
 
+// Marks multiband entries for a common maximum band center and skipped bandpass
+// tap negation, so adjacent bands share delay and polarity when summed.
+constexpr uint32_t fir_multiband_align_flip = 0x80000000u;
+
 // One staged FIR coefficient entry: the coefficient shader's FIRParams record layout,
 // word for word (fir_coeff_entry_words words, no padding).
 struct FirEffectCoeffEntry {
     uint32_t           taps_offs;  // Offset of the FIR filter's taps
-    uint32_t           band_count; // Bands staged in bands[0..band_count - 1]
+    uint32_t           band_count; // Low 8 bits: staged bands, 1..4; bit 31: multiband align/flip
     FirEffectCoeffBand bands[max_fir_effect_bands];
 };
 

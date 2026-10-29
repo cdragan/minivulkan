@@ -17073,6 +17073,333 @@ static void m2_fir_kernel_mirror_regressions()
     }
 }
 
+// Issue 1 mirror: the flagged path keeps the shader's per-tap arithmetic and
+// reduction shape, but uses the shared center and positive bandpass polarity.
+static void fir_mb_align_band_mirror(uint32_t        lowpass_hz,
+                                     uint32_t        highpass_hz,
+                                     uint32_t        span,
+                                     uint32_t        work_group,
+                                     uint32_t        subgroup,
+                                     uint32_t        center,
+                                     FirCoeffMirror* out)
+{
+    constexpr uint32_t taps = Synth::num_fir_taps;
+    constexpr float    pi   = 3.141592653589793f;
+    const float        fs   = static_cast<float>(Synth::rt_sampling_rate);
+
+    const float lowpass_norm  = static_cast<float>(lowpass_hz) / fs;
+    const float highpass_norm = static_cast<float>(highpass_hz) / fs;
+    out->center_freq          = (static_cast<float>(highpass_hz) + static_cast<float>(lowpass_hz)) * 0.5f;
+    const float center_w      = 2.0f * pi * out->center_freq / fs;
+    const float half_span     = static_cast<float>(span) * 0.5f - 0.5f;
+    const float span_m1       = static_cast<float>(span - 1u);
+
+    for (uint32_t tap = 0; tap < taps; tap++) {
+        const float x = static_cast<float>(tap) - static_cast<float>(center);
+
+        float value = (x == 0.0f && lowpass_hz == 0 && highpass_hz == 0) ? 1.0f : 0.0f;
+        if (lowpass_hz > 0) {
+            value = (x == 0.0f) ? 2.0f * lowpass_norm : sinf(2.0f * pi * lowpass_norm * x) / (pi * x);
+        }
+
+        float norm_value = value;
+
+        if (highpass_hz > 0) {
+            const float hp_value = (x == 0.0f) ? 2.0f * highpass_norm : sinf(2.0f * pi * highpass_norm * x) / (pi * x);
+            value -= hp_value;
+            if (highpass_hz < lowpass_hz) {
+                norm_value = hp_value;
+            }
+            else if (x == 0.0f) {
+                value += 1.0f;
+                if (lowpass_hz == 0) {
+                    norm_value += 1.0f;
+                }
+            }
+        }
+
+        const float wpos    = x + half_span;
+        const bool  in_span = wpos >= 0.0f && wpos <= span_m1;
+        const float window =
+            in_span ? 0.42f - 0.5f * cosf((2.0f * pi * wpos) / span_m1) + 0.08f * cosf((4.0f * pi * wpos) / span_m1)
+                    : 0.0f;
+        value *= window;
+
+        out->coefficients[tap] = value;
+        out->norm_terms[tap]   = norm_value * window;
+        if (in_span && highpass_hz > 0 && highpass_hz < lowpass_hz) {
+            out->cos_terms[tap] = value * cosf(center_w * x);
+            out->sin_terms[tap] = value * sinf(center_w * x);
+        }
+        else {
+            out->cos_terms[tap] = 0.0f;
+            out->sin_terms[tap] = 0.0f;
+        }
+    }
+
+    out->old_denominator  = fir_test_subgroup_sum(out->norm_terms, work_group, subgroup);
+    const float cos_sum   = fir_test_subgroup_sum(out->cos_terms, work_group, subgroup);
+    const float sin_sum   = fir_test_subgroup_sum(out->sin_terms, work_group, subgroup);
+    out->band_denominator = fir_test_bandpass_denominator(cos_sum, sin_sum, out->old_denominator);
+}
+
+// Mirrors one entry's masked band count and gain-weighted kernel accumulation:
+// flagged entries share the maximum center and keep positive bandpass polarity;
+// unflagged entries use the unchanged legacy per-band mirror.
+static void fir_mb_align_entry_mirror(const Synth::FirEffectCoeffEntry& entry, float* stored)
+{
+    constexpr uint32_t flag    = 0x80000000u;
+    const bool         flagged = (entry.band_count & flag) != 0;
+    const uint32_t     count   = entry.band_count & 0xFFu;
+    TEST(count <= Synth::max_fir_effect_bands);
+    if (count > Synth::max_fir_effect_bands) {
+        return;
+    }
+    uint32_t center = 0;
+    for (uint32_t b = 0; b < count; b++) {
+        const uint32_t band_center = (entry.bands[b].window_span - 1u) / 2u;
+        if (band_center > center) {
+            center = band_center;
+        }
+    }
+    static FirCoeffMirror band;
+    memset(stored, 0, Synth::num_fir_taps * sizeof(float));
+    for (uint32_t b = 0; b < count; b++) {
+        const Synth::FirEffectCoeffBand& param = entry.bands[b];
+        if (flagged) {
+            fir_mb_align_band_mirror(param.lowpass_cutoff_freq,
+                                     param.highpass_cutoff_freq,
+                                     param.window_span,
+                                     256,
+                                     32,
+                                     center,
+                                     &band);
+        }
+        else {
+            fir_test_mirror(param.lowpass_cutoff_freq, param.highpass_cutoff_freq, param.window_span, 256, 32, &band);
+        }
+        for (uint32_t tap = 0; tap < Synth::num_fir_taps; tap++) {
+            stored[tap] += param.gain * band.coefficients[tap] / band.band_denominator;
+            TEST(std::isfinite(stored[tap]));
+        }
+    }
+}
+
+static void fir_mb_align_flip_regressions()
+{
+    TEST(Synth::fir_multiband_align_flip == 0x80000000u);
+    constexpr uint32_t flag = 0x80000000u;
+    TEST((0x80000003u & 0xFFu) == 3u);
+    TEST(sizeof(Synth::FirEffectCoeffEntry) == 18u * sizeof(uint32_t));
+
+    const char* const shader = load_source_file("synth/synth_fir_coeff.comp.glsl");
+    TEST(shader != nullptr);
+    if (shader) {
+        TEST(strstr(shader, "(staged.band_count & 0x80000000u) != 0u") != nullptr);
+        TEST(strstr(shader, "staged.band_count & 0xFFu") != nullptr);
+        TEST(strstr(shader, "< staged.band_count") == nullptr);
+        uint32_t band_loops = 0;
+        for (const char* hit = strstr(shader, "band_idx <"); hit; hit = strstr(hit + 1, "band_idx <")) {
+            TEST(strncmp(hit, "band_idx < band_count;", strlen("band_idx < band_count;")) == 0);
+            band_loops++;
+        }
+        TEST(band_loops == 1);
+        TEST(strstr(shader, "b < band_count;") != nullptr);
+        TEST(strstr(shader, "max(mb_center, (staged.bands[b].window_span - 1u) / 2u)") != nullptr);
+        TEST(strstr(shader, "mb_align_flip ? mb_center : (param.window_span - 1u) / 2u") != nullptr);
+        const char* gate  = strstr(shader, "if (! mb_align_flip)");
+        const char* open  = nullptr;
+        const char* close = nullptr;
+        TEST(gate != nullptr);
+        if (gate && source_body_range(gate, &open, &close)) {
+            TEST(find_in_range(open, close, "value = -value;") != nullptr);
+            TEST(find_in_range(open, close, "norm_value") == nullptr);
+            const char* norm        = strstr(close, "norm_value = hp_value;");
+            const char* next_branch = strstr(close, "else if (x == 0.0)");
+            TEST(norm && next_branch && norm < next_branch);
+        }
+    }
+
+    const char* const header = load_source_file("synth/synth_effects.h");
+    TEST(header != nullptr);
+    if (header) {
+        TEST(find_in_range(header,
+                           header + strlen(header),
+                           "constexpr uint32_t fir_multiband_align_flip = 0x80000000u;") != nullptr);
+    }
+    const char* const runtime = load_source_file("synth/realtime_synth.cpp");
+    TEST(runtime != nullptr);
+    if (runtime) {
+        const char* const staging = strstr(runtime, "// Stages one FIR effect's coefficient entry.");
+        const char* const decl    = staging ? strstr(staging, "static bool stage_effect_fir_entry(") : nullptr;
+        const char*       open    = nullptr;
+        const char*       close   = nullptr;
+        TEST(decl != nullptr);
+        if (decl && source_body_range(decl, &open, &close)) {
+            const char* const mb = find_in_range(open, close, "if (instance.type == Synth::EffectType::fir_multiband)");
+            const char*       mb_open  = nullptr;
+            const char*       mb_close = nullptr;
+            TEST(mb != nullptr);
+            if (mb && source_body_range(mb, &mb_open, &mb_close)) {
+                const char* success = find_in_range(mb_open, mb_close, "if (Synth::stage_fir_multiband_coeff_entry(");
+                const char* success_open  = nullptr;
+                const char* success_close = nullptr;
+                TEST(success != nullptr);
+                if (success && source_body_range(success, &success_open, &success_close)) {
+                    TEST(find_in_range(success_open,
+                                       success_close,
+                                       "entry->band_count |= Synth::fir_multiband_align_flip;") != nullptr);
+                    TEST(find_in_range(success_open, success_close, "return true;") != nullptr);
+                    TEST(find_in_range(success_close, mb_close, "return false;") != nullptr);
+                }
+                TEST(find_in_range(mb_close, close, "return Synth::stage_fir_effect_coeff_entry(") != nullptr);
+                TEST(find_in_range(mb_close, close, "fir_multiband_align_flip") == nullptr);
+            }
+        }
+        uint32_t uses = 0;
+        for (const char* hit = strstr(runtime, "fir_multiband_align_flip"); hit;
+             hit             = strstr(hit + 1, "fir_multiband_align_flip")) {
+            TEST(open && close && hit > open && hit < close);
+            TEST(hit >= runtime + 10 && strncmp(hit - 10, "|= Synth::", 10) == 0);
+            uses++;
+        }
+        TEST(uses == 1);
+        const char* const compute = strstr(runtime, "static void compute_fir_coefficients()");
+        const char* const effects = compute ? strstr(compute, "auto stage_effect_fir_coeffs") : nullptr;
+        TEST(compute && effects);
+        if (compute && effects) {
+            TEST(find_in_range(compute, effects, "fir_multiband_align_flip") == nullptr);
+            TEST(find_in_range(compute, effects, "param.band_count = num_bands;") != nullptr);
+            TEST(find_in_range(compute, effects, "param.band_count = 1;") != nullptr);
+        }
+    }
+
+    // The staging helpers must remain flag-free, even for compacted multiband
+    // output and a single active band. The runtime alone adds the flag.
+    for (uint8_t count = 1; count <= 4; count++) {
+        float params[Synth::num_fir_effect_band_params] = {};
+        params[0]                                       = 4000.0f;
+        params[1]                                       = 2000.0f;
+        params[2]                                       = 1.0f;
+        params[3]                                       = 100.0f;
+        Synth::FirEffectCoeffEntry entry                = {};
+        TEST(Synth::stage_fir_multiband_coeff_entry(0, count, params, &entry));
+        TEST(entry.band_count == 1 && (entry.band_count & flag) == 0);
+        TEST(Synth::stage_fir_effect_coeff_entry(0, count, 8000.0f, 0.0f, 100.0f, params, &entry));
+        TEST((entry.band_count & flag) == 0);
+        memset(params, 0, sizeof(params));
+        TEST(! Synth::stage_fir_multiband_coeff_entry(0, count, params, &entry));
+        TEST((entry.band_count & flag) == 0);
+    }
+
+    static float          actual[Synth::num_fir_taps];
+    static float          expected[Synth::num_fir_taps];
+    static float          low[Synth::num_fir_taps];
+    static float          pass[Synth::num_fir_taps];
+    static FirCoeffMirror band;
+    // Unflagged one-band entries reproduce the existing mirror byte for byte,
+    // across every branch, full and short spans. This is not GPU evidence.
+    const uint32_t cutoffs[][2] = { { 8000, 0 }, { 0, 8000 }, { 14000, 6891 }, { 4000, 8000 }, { 0, 0 } };
+    for (const auto& pair : cutoffs) {
+        for (const uint32_t span : { 11u, 513u, 1025u }) {
+            Synth::FirEffectCoeffEntry entry = {};
+            entry.band_count                 = 1;
+            entry.bands[0]                   = { pair[1], pair[0], span, 1.0f };
+            fir_mb_align_entry_mirror(entry, actual);
+            fir_test_mirror(pair[0], pair[1], span, 256, 32, &band);
+            fir_test_stored_response(band, 0.0, expected);
+            for (uint32_t tap = 0; tap < Synth::num_fir_taps; tap++) {
+                // Like the shader, accumulate into a zero-initialized buffer;
+                // this canonicalizes negative zero without changing tap values.
+                expected[tap] = 0.0f + expected[tap];
+            }
+            TEST(memcmp(actual, expected, sizeof(actual)) == 0);
+        }
+    }
+
+    // Oscillator-style unflagged entries retain each band's own center and
+    // legacy polarity, with exactly the old gain-weighted accumulation.
+    for (uint32_t count = 1; count <= 4; count++) {
+        Synth::FirEffectCoeffEntry multi = {};
+        multi.band_count                 = count;
+        memset(expected, 0, sizeof(expected));
+        for (uint32_t b = 0; b < count; b++) {
+            const uint32_t span = 11u + b * 256u;
+            multi.bands[b]      = { 4000u + b * 1000u, 8000u + b * 1000u, span, 0.25f };
+            fir_test_mirror(multi.bands[b].lowpass_cutoff_freq,
+                            multi.bands[b].highpass_cutoff_freq,
+                            span,
+                            256,
+                            32,
+                            &band);
+            for (uint32_t tap = 0; tap < Synth::num_fir_taps; tap++) {
+                expected[tap] += 0.25f * band.coefficients[tap] / band.band_denominator;
+            }
+        }
+        fir_mb_align_entry_mirror(multi, actual);
+        TEST(memcmp(actual, expected, sizeof(actual)) == 0);
+    }
+    // The low-byte count excludes the fourth band from both the center scan
+    // and accumulation. A poisoned fourth span must not shift the result.
+    {
+        Synth::FirEffectCoeffEntry multi = {};
+        multi.band_count                 = flag | 3u;
+        multi.bands[0]                   = { 0, 6891, 513, 1.0f };
+        multi.bands[1]                   = { 6891, 14000, 1025, 1.0f };
+        multi.bands[2]                   = { 0, 4000, 11, 0.0f };
+        fir_mb_align_entry_mirror(multi, expected);
+        multi.bands[3] = { 0, 8000, 0xFFFFFFFFu, 1.0f };
+        fir_mb_align_entry_mirror(multi, actual);
+        TEST(memcmp(actual, expected, sizeof(actual)) == 0);
+    }
+
+    // The shared edge is nearly an integer number of cycles over the old
+    // center difference (256 taps). The legacy opposite polarities cancel;
+    // common-center, positive kernels approach the ideal crossover sum 1.
+    Synth::FirEffectCoeffEntry entry = {};
+    entry.band_count                 = flag | 2u;
+    entry.bands[0]                   = { 0, 6891, 513, 1.0f };
+    entry.bands[1]                   = { 6891, 14000, 1025, 1.0f };
+    fir_mb_align_entry_mirror(entry, actual);
+    TEST(fabs(fir_test_response(actual, 6891.0) - 1.0) < 0.01);
+    entry.band_count = 2;
+    fir_mb_align_entry_mirror(entry, expected);
+    TEST(fir_test_response(expected, 6891.0) < 0.03);
+
+    // Isolate each band while retaining the other's span for the maximum.
+    entry.band_count    = flag | 2u;
+    entry.bands[1].gain = 0.0f;
+    fir_mb_align_entry_mirror(entry, low);
+    entry.bands[0].gain = 0.0f;
+    entry.bands[1].gain = 1.0f;
+    fir_mb_align_entry_mirror(entry, pass);
+    TEST(low[512] > 0.0f && pass[512] > 0.0f);
+    for (const float* kernel : { low, pass }) {
+        uint32_t peak = 0;
+        for (uint32_t tap = 0; tap < Synth::num_fir_taps; tap++) {
+            if (fabsf(kernel[tap]) > fabsf(kernel[peak])) {
+                peak = tap;
+            }
+        }
+        TEST(peak == 512);
+        for (uint32_t delta = 0; delta <= 512; delta++) {
+            TEST(fabsf(kernel[512 - delta] - kernel[512 + delta]) < 1e-6f);
+        }
+    }
+    const double ideals = fir_test_response(low, 6891.0) + fir_test_response(pass, 6891.0);
+    TEST(fabs(fir_test_response(actual, 6891.0) - ideals) < 1e-5);
+    // A single-band flagged bandpass also flips, without changing its center.
+    entry.band_count = flag | 1u;
+    entry.bands[0]   = { 6891, 14000, 513, 1.0f };
+    fir_mb_align_entry_mirror(entry, actual);
+    entry.band_count = 1;
+    fir_mb_align_entry_mirror(entry, expected);
+    TEST(actual[256] > 0.0f && expected[256] < 0.0f);
+    for (uint32_t tap = 0; tap < Synth::num_fir_taps; tap++) {
+        TEST(actual[tap] == -expected[tap]);
+    }
+}
+
 // ---- FIR effect multi-band staging, expansion, JSON and remap ----
 static void fir_effect_bands_regressions()
 {
@@ -28625,6 +28952,7 @@ int main()
     fir_effect_bands_regressions();
     fir_effect_band_editor_regressions();
     m4_fix3_wave_regressions();
+    fir_mb_align_flip_regressions();
     fir_multiband_staging_regressions();
     fir_multiband_projection_regressions();
     fir_band_lfo_reclaim_regressions();

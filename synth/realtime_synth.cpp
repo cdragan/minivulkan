@@ -359,7 +359,7 @@ struct ShaderParams {
         };
 
         uint32_t taps_offs;  // Offset of FIR filter's taps
-        uint32_t band_count; // Bands staged in bands[0..band_count-1], 1..4; band 0 covers the single-band form
+        uint32_t band_count; // Low 8 bits: staged bands, 1..4; bit 31: multiband align/flip
         Band     bands[4];
     };
 
@@ -2362,10 +2362,14 @@ static bool stage_effect_fir_entry(const EffectInstance& instance, Synth::FirEff
     // The multiband form derives every band's edges from its uniform
     // center/spread pair; the plain FIR keeps its bit-exact stored staging.
     if (instance.type == Synth::EffectType::fir_multiband) {
-        return Synth::stage_fir_multiband_coeff_entry(instance.state_offs / 4,
-                                                      instance.fir_bands.band_count,
-                                                      instance.fir_bands.params,
-                                                      entry);
+        if (Synth::stage_fir_multiband_coeff_entry(instance.state_offs / 4,
+                                                   instance.fir_bands.band_count,
+                                                   instance.fir_bands.params,
+                                                   entry)) {
+            entry->band_count |= Synth::fir_multiband_align_flip;
+            return true;
+        }
+        return false;
     }
     return Synth::stage_fir_effect_coeff_entry(instance.state_offs / 4,
                                                instance.fir_bands.band_count,
