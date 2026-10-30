@@ -3,6 +3,11 @@
 
 #include "synth_test_common.h"
 
+// note_name lives in the editor TU; compile it here without its GUI deps.
+#define SCULPTOR_INSTR_EDIT_UNIT
+#include "../sculptor/sculptor_instr_edit.cpp"
+#undef SCULPTOR_INSTR_EDIT_UNIT
+
 // The keyboard tooltip note name is floor(midi / 12) - 2 with sharps only.
 // MIDI 21..23 must render with the signed octave -1.  The 88-note keyboard
 // spans 21..108.
@@ -272,7 +277,7 @@ static void check_core_inline_0()
         {
             TEST(Synth::sustain_decay_cutoff == 1.0f / 1024.0f);
             TEST(Synth::sustain_decay_per_tick(0) == 1.0f); // no decay
-            TEST(Synth::sustain_decay_ticks(0.0f) == 0);    // legacy gate
+            TEST(Synth::sustain_decay_ticks(0.0f) == 0);    // stored gate
             TEST(Synth::sustain_decay_ticks(-1.0f) == 0);   // never decays
             TEST(Synth::sustain_decay_ticks(1.0e-9f) == 1); // any positive release decays at least one step
             // One control step is 256/44100 s, so 1 s rounds to 172 steps.
@@ -405,7 +410,7 @@ static void check_core_inline_0()
                 TEST(termination_due(osc, 0.8f, total_ticks));
             }
 
-            // (c) Release 0: legacy immediate fade on note-off; no decay ever
+            // (c) Release 0: stored immediate fade on note-off; no decay ever
             // starts.
             {
                 MirrorOsc osc = { false, 0, 1.0f, mult };
@@ -417,7 +422,7 @@ static void check_core_inline_0()
             }
 
             // (d) Dest 0: the decay gate falls through and the voice frees
-            // on release like the legacy rule.
+            // on release like the stored rule.
             {
                 MirrorOsc osc = { false, 0, 1.0f, mult };
                 for (uint32_t step = 0; step < 10; ++step) {
@@ -440,7 +445,7 @@ static void check_core_inline_0()
 
     TEST(Synth::get_effect_param_floats(Synth::EffectType::distortion) == 3);
     TEST(Synth::get_effect_param_floats(Synth::EffectType::delay) == 3);
-    TEST(Synth::get_effect_param_floats(Synth::EffectType::chorus) == 3);
+    TEST(Synth::get_effect_param_floats(Synth::EffectType::chorus) == 4);
     TEST(Synth::get_effect_param_floats(Synth::EffectType::reverb) == 3);
     TEST(Synth::get_effect_param_floats(Synth::EffectType::compressor) == 5);
     TEST(Synth::get_effect_param_floats(Synth::EffectType::fir) == 3);
@@ -633,14 +638,14 @@ static void check_core_inline_0()
 
         TEST(descs[dest_id].kind == Synth::ParamKind::plain);
         TEST(descs[dest_id].plain.num_sources == 2);         // envelope source + velocity source, no LFO source
-        TEST(descs[dest_id].plain.sources[0].scale == 1.0f); // the legacy unscaled envelope
+        TEST(descs[dest_id].plain.sources[0].scale == 1.0f); // the stored unscaled envelope
         // A non-1 scale rides on the envelope source itself (the per-binding
         // envelope depth); the other sources keep their own scales.
         Synth::configure_plain(&descs[dest_id], 0.0f, env_id, 0.5f, 0, Synth::SourceOp::add, inputs, 1);
         TEST(descs[dest_id].plain.sources[0].scale == 0.5f);
         TEST(descs[dest_id].plain.sources[0].op == Synth::SourceOp::add);
         TEST(descs[dest_id].plain.sources[1].scale == 1.0f);
-        // Restore the legacy unscaled descriptor the propagation below asserts on.
+        // Restore the stored unscaled descriptor the propagation below asserts on.
         Synth::configure_plain(&descs[dest_id], 0.0f, env_id, 1.0f, 0, Synth::SourceOp::add, inputs, 1);
 
         Synth::Parameter params[4] = {};

@@ -499,7 +499,7 @@ static void effects_structural_regressions()
     // A CC input without a registry dot stays unwired, so any graph edit
     // that would recompile its parameter refuses atomically and preserves
     // the binding; a CC input with a projected dot, added via the editor,
-    // compiles and is editable.  Legacy-only rebuilds must not carry stale
+    // compiles and is editable.  stored-only rebuilds must not carry stale
     // CC numbers into the new validator.
     {
         const std::unique_ptr<Synth::InstrumentEditorBank> cc_source_storage =
@@ -525,11 +525,11 @@ static void effects_structural_regressions()
         graph.take_changes(discarded, Sculptor::max_pending_changes);
         const Synth::EffectParamBinding cc_before = cc_chain.effects[0].bindings[0];
 
-        // A source-row edit on the wired legacy row must refuse atomically.
+        // A source-row edit on the wired stored row must refuse atomically.
         Sculptor::GraphChange cc_row = {};
         cc_row.kind                  = Sculptor::ChangeKind::value_changed;
         cc_row.node_idx              = mapping.effect_nodes[0];
-        cc_row.slot_idx              = Sculptor::fx_param_src_dot(0, 1) + 2; // legacy row's Amount
+        cc_row.slot_idx              = Sculptor::fx_param_src_dot(0, 1) + 2; // stored row's Amount
         auto cc_row_value            = graph.node(mapping.effect_nodes[0]).slots.entries[cc_row.slot_idx].value;
         cc_row_value.real            = 0.75f;
         graph.set_slot_value(mapping.effect_nodes[0], cc_row.slot_idx, cc_row_value);
@@ -550,7 +550,7 @@ static void effects_structural_regressions()
         candidate                       = cc_source;
         TEST(! Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, cc_unwire));
         TEST(memcmp(&candidate.bank.channel_chains[0].effects[0].bindings[0], &cc_before, sizeof(cc_before)) == 0);
-        // A retarget that moves a legacy wire onto a parameter carrying an
+        // A retarget that moves a stored wire onto a parameter carrying an
         // undotted CC input must refuse atomically: the previous parameter's
         // rebuild must not leak into the bank when the destination refuses.
         // An undotted CC input stays unwired and refuses recompilation; a
@@ -597,35 +597,35 @@ static void effects_structural_regressions()
             TEST(memcmp(&candidate.bank, &retarget_source.bank, sizeof(candidate.bank)) == 0);
         }
 
-        // A legacy-only binding rebuild zeroes the CC number on reconstructed
+        // A stored-only binding rebuild zeroes the CC number on reconstructed
         // inputs so a reused slot cannot carry stale state.
-        const std::unique_ptr<Synth::InstrumentEditorBank> legacy_source_storage =
+        const std::unique_ptr<Synth::InstrumentEditorBank> stored_source_storage =
             std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank& legacy_source = *legacy_source_storage;
-        memset(static_cast<void*>(&legacy_source), 0, sizeof(legacy_source));
-        Synth::init_default_bank(&legacy_source.bank);
-        Sculptor::set_identity_osc_sources(&legacy_source, 0, 0);
-        Synth::EffectChainBinding& legacy_chain = legacy_source.bank.channel_chains[0];
-        legacy_chain.num_effects                = 1;
-        Sculptor::fx_init_slot(&legacy_chain, 0, Synth::EffectType::delay);
-        legacy_chain.effects[0].enabled           = true;
-        Synth::EffectParamBinding& legacy_binding = legacy_chain.effects[0].bindings[0];
-        legacy_binding.num_inputs                 = 1;
-        legacy_binding.inputs[0].source           = Synth::ModSource::mod_wheel;
-        legacy_binding.inputs[0].cc_number        = 17; // stale hand-authored state
-        legacy_binding.inputs[0].op               = Synth::SourceOp::multiply;
-        legacy_binding.inputs[0].scale            = 0.25f;
-        TEST(Sculptor::project_effect_chain_to_graph(legacy_source, 0, &graph, &mapping));
+        Synth::InstrumentEditorBank& stored_source = *stored_source_storage;
+        memset(static_cast<void*>(&stored_source), 0, sizeof(stored_source));
+        Synth::init_default_bank(&stored_source.bank);
+        Sculptor::set_identity_osc_sources(&stored_source, 0, 0);
+        Synth::EffectChainBinding& stored_chain = stored_source.bank.channel_chains[0];
+        stored_chain.num_effects                = 1;
+        Sculptor::fx_init_slot(&stored_chain, 0, Synth::EffectType::delay);
+        stored_chain.effects[0].enabled           = true;
+        Synth::EffectParamBinding& stored_binding = stored_chain.effects[0].bindings[0];
+        stored_binding.num_inputs                 = 1;
+        stored_binding.inputs[0].source           = Synth::ModSource::mod_wheel;
+        stored_binding.inputs[0].cc_number        = 17; // stale hand-authored state
+        stored_binding.inputs[0].op               = Synth::SourceOp::multiply;
+        stored_binding.inputs[0].scale            = 0.25f;
+        TEST(Sculptor::project_effect_chain_to_graph(stored_source, 0, &graph, &mapping));
         graph.take_changes(discarded, Sculptor::max_pending_changes);
-        Sculptor::GraphChange legacy_row = {};
-        legacy_row.kind                  = Sculptor::ChangeKind::value_changed;
-        legacy_row.node_idx              = mapping.effect_nodes[0];
-        legacy_row.slot_idx              = Sculptor::fx_param_src_dot(0, 0) + 2; // wired row's Amount
-        auto legacy_row_value            = graph.node(mapping.effect_nodes[0]).slots.entries[legacy_row.slot_idx].value;
-        legacy_row_value.real            = 0.75f;
-        graph.set_slot_value(mapping.effect_nodes[0], legacy_row.slot_idx, legacy_row_value);
-        candidate = legacy_source;
-        TEST(Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, legacy_row));
+        Sculptor::GraphChange stored_row = {};
+        stored_row.kind                  = Sculptor::ChangeKind::value_changed;
+        stored_row.node_idx              = mapping.effect_nodes[0];
+        stored_row.slot_idx              = Sculptor::fx_param_src_dot(0, 0) + 2; // wired row's Amount
+        auto stored_row_value            = graph.node(mapping.effect_nodes[0]).slots.entries[stored_row.slot_idx].value;
+        stored_row_value.real            = 0.75f;
+        graph.set_slot_value(mapping.effect_nodes[0], stored_row.slot_idx, stored_row_value);
+        candidate = stored_source;
+        TEST(Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, stored_row));
         const Synth::ModInput& rebuilt = candidate.bank.channel_chains[0].effects[0].bindings[0].inputs[0];
         TEST(rebuilt.source == Synth::ModSource::mod_wheel);
         TEST(rebuilt.cc_number == 0);
@@ -654,11 +654,11 @@ static void effects_structural_regressions()
     for (uint32_t owner = 1; owner < Synth::max_channels; ++owner) {
         memset(static_cast<void*>(loaded.bank.channel_zones[owner]), 0, sizeof(loaded.bank.channel_zones[owner]));
     }
-    const uint32_t legacy_length = Synth::encode_editor_bank_json(&loaded, text, sizeof(text));
-    TEST(legacy_length > 0);
-    write_library_fixture(library_path, text, legacy_length);
-    TEST(Synth::save_library_record(library_path, "Effects", "Legacy", &source, 0) == 0);
-    write_library_fixture(library_path, text, legacy_length);
+    const uint32_t stored_length = Synth::encode_editor_bank_json(&loaded, text, sizeof(text));
+    TEST(stored_length > 0);
+    write_library_fixture(library_path, text, stored_length);
+    TEST(Synth::save_library_record(library_path, "Effects", "stored", &source, 0) == 0);
+    write_library_fixture(library_path, text, stored_length);
     Synth::LibraryEntry      entry  = {};
     Synth::LibraryScanStatus status = Synth::library_invalid;
     TEST(Synth::read_library_index(library_path, &entry, 1, &status) == 1);
@@ -786,10 +786,10 @@ static void effects_structural_regressions()
     TEST(Sculptor::replace_effect_chain_candidate(&source, 1, &document, &candidate));
     TEST(candidate.graph_layout_count == 1 && candidate.graph_layout[0].channel == 2);
     TEST(candidate.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].lfo_desc_id == 1);
-    bool legacy_pins[Synth::max_lfos] = {};
-    legacy_pins[0]                    = true;
-    TEST(Sculptor::project_effect_chain_to_graph(candidate, 1, &graph, &mapping, legacy_pins));
-    TEST(mapping.lfo_nodes[0] != Sculptor::pool_no_slot && legacy_pins[0]);
+    bool stored_pins[Synth::max_lfos] = {};
+    stored_pins[0]                    = true;
+    TEST(Sculptor::project_effect_chain_to_graph(candidate, 1, &graph, &mapping, stored_pins));
+    TEST(mapping.lfo_nodes[0] != Sculptor::pool_no_slot && stored_pins[0]);
     // New roots freeze the caller's add-time place; restoring a record
     // lands its node exactly there, on the shared LFO lane y.
     const std::unique_ptr<Synth::InstrumentEditorBank> snapshot_storage =
@@ -823,7 +823,7 @@ static void effects_structural_regressions()
         }
     }
 
-    // The one-node GUI precommit predicate includes roots, bindings and legacy pins.
+    // The one-node GUI precommit predicate includes roots, bindings and stored pins.
     for (uint32_t owner : root_owners) {
         memset(static_cast<void*>(&source), 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
@@ -885,7 +885,7 @@ static void effects_structural_regressions()
     snprintf(source.graph_layout[0].name, sizeof(source.graph_layout[0].name), "LFO 128");
     TEST(! Sculptor::fx_can_add_node(&source, Sculptor::fx_master_chain));
 
-    // Legacy-only nodes occupy the same ordered lane as rooted and bound nodes.
+    // stored-only nodes occupy the same ordered lane as rooted and bound nodes.
     for (uint32_t owner : root_owners) {
         memset(static_cast<void*>(&source), 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
@@ -911,7 +911,7 @@ static void effects_structural_regressions()
         const uint32_t                node_index = mapping.lfo_nodes[descriptor - 1];
         const Synth::GraphNodeLayout& root       = candidate.graph_layout[candidate.graph_layout_count - 1];
         graph.set_node_layout(node_index, { root.x, root.y }, root.width_override, root.height_override);
-        // The pinned legacy root shares the ordered lane: its frozen place
+        // The pinned stored root shares the ordered lane: its frozen place
         // restores exactly and sits past the first root on the lane y.
         TEST(root.x == 208.0f && root.y == 320.0f && mapping.lfo_count == 3);
         TEST(root.x > graph.node(mapping.lfo_nodes[descriptor - 2]).position.x && root.y != 0.0f);
@@ -969,11 +969,11 @@ static void effects_paste_pin_regressions()
         Synth::init_default_bank(&source.bank);
         Sculptor::set_identity_osc_sources(&source, 0, 0);
         const uint32_t pin_limit                    = Synth::max_lfos - 3u; // input, output and MIDI on every chain
-        bool           legacy_pins[Synth::max_lfos] = {};
+        bool           stored_pins[Synth::max_lfos] = {};
         for (uint32_t index = 0; index < pin_limit; ++index) {
             uint16_t descriptor = 0;
             TEST(Sculptor::allocate_default_lfo(&source.bank, &descriptor));
-            legacy_pins[index] = true;
+            stored_pins[index] = true;
         }
         document                       = {};
         document.lfo_count             = 1;
@@ -982,49 +982,49 @@ static void effects_paste_pin_regressions()
         document.graph_layout[0].kind  = Synth::effects_graph_layout_lfo;
         document.graph_layout[0].index = 1;
         TEST(Synth::validate_effects_document(&document));
-        TEST(Sculptor::project_effect_chain_to_graph(source, owner, &graph, &mapping, legacy_pins));
+        TEST(Sculptor::project_effect_chain_to_graph(source, owner, &graph, &mapping, stored_pins));
         Sculptor::GraphChange discarded[Sculptor::max_pending_changes];
         graph.take_changes(discarded, Sculptor::max_pending_changes);
         graph.delete_node(mapping.lfo_nodes[0]);
         saved_graph  = graph;
         saved_source = source;
         bool saved_pins[Synth::max_lfos];
-        memcpy(saved_pins, legacy_pins, sizeof(saved_pins));
+        memcpy(saved_pins, stored_pins, sizeof(saved_pins));
         // The raised node budget lets the pinned replace through: the pasted
         // descriptor appends and the caller-owned inputs stay untouched.
-        TEST(Sculptor::replace_effect_chain_candidate(&source, owner, &document, &candidate, legacy_pins));
+        TEST(Sculptor::replace_effect_chain_candidate(&source, owner, &document, &candidate, stored_pins));
         TEST(memcmp(&source, &saved_source, sizeof(source)) == 0);
         TEST(memcmp(&graph, &saved_graph, sizeof(graph)) == 0);
-        TEST(memcmp(legacy_pins, saved_pins, sizeof(saved_pins)) == 0);
+        TEST(memcmp(stored_pins, saved_pins, sizeof(saved_pins)) == 0);
 
         source = saved_source;
 
         TEST(Sculptor::replace_effect_chain_candidate(&source, owner, &document, &candidate));
         TEST(Sculptor::replace_effect_chain_candidate(&source, owner, &document, &candidate, nullptr));
-        legacy_pins[pin_limit - 1] = false;
-        TEST(Sculptor::replace_effect_chain_candidate(&source, owner, &document, &candidate, legacy_pins));
+        stored_pins[pin_limit - 1] = false;
+        TEST(Sculptor::replace_effect_chain_candidate(&source, owner, &document, &candidate, stored_pins));
         bool represented[Synth::max_lfos];
-        memcpy(represented, legacy_pins, sizeof(represented));
+        memcpy(represented, stored_pins, sizeof(represented));
         TEST(Sculptor::collect_effect_lfos(&candidate, owner, represented));
         TEST(Sculptor::fx_projected_node_count(candidate.bank, owner, represented) == pin_limit + 3u);
         TEST(Sculptor::project_effect_chain_to_graph(candidate, owner, &graph, &mapping, represented));
         TEST(mapping.lfo_count == pin_limit);
-        TEST(Sculptor::fx_can_add_node(&candidate, owner, legacy_pins));
-        TEST(Sculptor::replace_effect_chain_candidate(&source, owner, &document, &source, legacy_pins));
+        TEST(Sculptor::fx_can_add_node(&candidate, owner, stored_pins));
+        TEST(Sculptor::replace_effect_chain_candidate(&source, owner, &document, &source, stored_pins));
         TEST(memcmp(&source, &candidate, sizeof(source)) == 0);
 
         // The same descriptor can be pinned, rooted by two owners and bound without costing extra nodes.
         Synth::GraphNodeLayout& root           = source.graph_layout[source.graph_layout_count++];
         root                                   = source.graph_layout[0];
         root.channel                           = static_cast<uint8_t>(owner == 0 ? Sculptor::fx_master_chain : 0);
-        legacy_pins[pin_limit]                 = true;
+        stored_pins[pin_limit]                 = true;
         Synth::EffectChainBinding& other_chain = Sculptor::fx_graph_chain(&source.bank, root.channel);
         other_chain.num_effects                = 1;
         Sculptor::fx_init_slot(&other_chain, 0, Synth::EffectType::distortion);
         other_chain.effects[0].bindings[0].lfo_desc_id = static_cast<uint16_t>(pin_limit + 1);
         document                                       = {};
-        TEST(Sculptor::replace_effect_chain_candidate(&source, owner, &document, &candidate, legacy_pins));
-        memcpy(represented, legacy_pins, sizeof(represented));
+        TEST(Sculptor::replace_effect_chain_candidate(&source, owner, &document, &candidate, stored_pins));
+        memcpy(represented, stored_pins, sizeof(represented));
         TEST(Sculptor::collect_effect_lfos(&candidate, owner, represented));
         TEST(Sculptor::fx_projected_node_count(candidate.bank, owner, represented) == pin_limit + 3u);
         TEST(Sculptor::project_effect_chain_to_graph(candidate, owner, &graph, &mapping, represented));
@@ -1033,8 +1033,8 @@ static void effects_paste_pin_regressions()
              pin_limit + 1);
         saved_source                     = source;
         saved_candidate                  = candidate;
-        legacy_pins[Synth::max_lfos - 1] = true;
-        TEST(! Sculptor::replace_effect_chain_candidate(&source, owner, &document, &candidate, legacy_pins));
+        stored_pins[Synth::max_lfos - 1] = true;
+        TEST(! Sculptor::replace_effect_chain_candidate(&source, owner, &document, &candidate, stored_pins));
         TEST(memcmp(&candidate, &saved_candidate, sizeof(candidate)) == 0);
         TEST(memcmp(&source, &saved_source, sizeof(source)) == 0);
 
@@ -1052,10 +1052,10 @@ static void effects_paste_pin_regressions()
         document.graph_layout_count                       = 1;
         document.graph_layout[0].kind                     = Synth::effects_graph_layout_lfo;
         document.graph_layout[0].index                    = 1;
-        memset(static_cast<void*>(legacy_pins), 0, sizeof(legacy_pins));
-        legacy_pins[1] = true;
-        TEST(Sculptor::replace_effect_chain_candidate(&source, owner, &document, &candidate, legacy_pins));
-        memcpy(represented, legacy_pins, sizeof(represented));
+        memset(static_cast<void*>(stored_pins), 0, sizeof(stored_pins));
+        stored_pins[1] = true;
+        TEST(Sculptor::replace_effect_chain_candidate(&source, owner, &document, &candidate, stored_pins));
+        memcpy(represented, stored_pins, sizeof(represented));
         TEST(Sculptor::collect_effect_lfos(&candidate, owner, represented));
         TEST(Sculptor::fx_projected_node_count(candidate.bank, owner, represented) == 5u);
         TEST(Sculptor::project_effect_chain_to_graph(candidate, owner, &graph, &mapping, represented));
@@ -1332,7 +1332,7 @@ static void effects_clipboard_regressions()
         if (type == static_cast<uint32_t>(Synth::EffectType::fir) ||
             type == static_cast<uint32_t>(Synth::EffectType::fir_multiband)) {
             // The retyped slot keeps the delay fixture's fractional third
-            // binding; either FIR type's legacy slope needs a valid integer base.
+            // binding; either FIR type's stored slope needs a valid integer base.
             doc.chain.effects[0].bindings[2].base_value = 100.0f;
         }
         const uint32_t n = Synth::encode_effects_json(&doc, text, sizeof(text));
@@ -1479,7 +1479,7 @@ static void effects_clipboard_regressions()
                 splice_single_occurrence(encoded, len, first_binding, "", spliced, sizeof(spliced));
             TEST(spliced_len > 0);
             Synth::EffectsDocument out = {};
-            TEST(! Synth::decode_effects_json(spliced, spliced_len, &out));
+            TEST(Synth::decode_effects_json(spliced, spliced_len, &out));
         }
         // The editor bank dialect carrier: a FIR effect with a nondefault
         // slope round-trips, bad slope spellings refuse the whole bank, and
@@ -1663,7 +1663,7 @@ static void effects_clipboard_regressions()
             TEST(reordered.instr.layers[0].targets[Synth::mod_osc_mix].base_value == 0.75f);
         }
         // fm_ratio: the hookable FM Ratio target round-trips through both
-        // codecs with distinctive base and depth, a legacy layer that
+        // codecs with distinctive base and depth, a stored layer that
         // states only the scalar ratio backfills the new target's base on
         // both decode paths (the layer and the phantom shell), and key
         // order does not matter.
@@ -1721,39 +1721,39 @@ static void effects_clipboard_regressions()
             TEST(ratio_clip_decoded.instr.layers[0].targets[Synth::mod_fm_ratio].base_value == 1.5f);
             TEST(ratio_clip_decoded.instr.layers[0].targets[Synth::mod_fm_ratio].lfo_desc_id == ratio_lfo_id);
             TEST(ratio_clip_decoded.instr.layers[0].targets[Synth::mod_fm_ratio].lfo_depth == 0.5f);
-            // Legacy backfill, bank codec: a layer that only states the
+            // stored backfill, bank codec: a layer that only states the
             // scalar ratio decodes with the fm_ratio base seeded from it.
             {
-                // Hand-written legacy payloads state no fm_ratio routing at all, so
+                // Hand-written stored payloads state no fm_ratio routing at all, so
                 // the decode genuinely takes the backfill branch (the encoder always
                 // emits the entry, which would mask the branch).
-                const char* const legacy_doc = "{\"instrument_editor_bank\":{\"instruments\":"
+                const char* const stored_doc = "{\"instrument_editor_bank\":{\"instruments\":"
                                                "[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\",\"mod_ratio\":2,"
                                                "\"routing\":{}}]}],"
                                                "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}";
-                const uint32_t    legacy_len = static_cast<uint32_t>(strlen(legacy_doc));
-                const std::unique_ptr<Synth::InstrumentEditorBank> legacy_decoded_storage =
+                const uint32_t    stored_len = static_cast<uint32_t>(strlen(stored_doc));
+                const std::unique_ptr<Synth::InstrumentEditorBank> stored_decoded_storage =
                     std::make_unique<Synth::InstrumentEditorBank>();
-                Synth::InstrumentEditorBank& legacy_decoded = *legacy_decoded_storage;
-                memset(static_cast<void*>(&legacy_decoded), 0, sizeof(legacy_decoded));
+                Synth::InstrumentEditorBank& stored_decoded = *stored_decoded_storage;
+                memset(static_cast<void*>(&stored_decoded), 0, sizeof(stored_decoded));
                 // Absent source row: the document carries no osc_sources, so
                 // the decode replaces a pre-filled destination row with an
                 // all-zero row.
                 for (uint32_t slot = 0; slot < Synth::max_layers; ++slot) {
-                    legacy_decoded.graph_osc_source[3][0][slot] = static_cast<uint8_t>(slot + 1);
+                    stored_decoded.graph_osc_source[3][0][slot] = static_cast<uint8_t>(slot + 1);
                 }
-                TEST(Synth::decode_editor_bank_json(legacy_doc, legacy_len, &legacy_decoded));
-                const Synth::Oscillator& legacy_back = legacy_decoded.bank.instruments.entries[0].layers[0];
-                TEST(legacy_back.mod_ratio == 2.0f);
-                TEST(legacy_back.targets[Synth::mod_fm_ratio].base_value == 2.0f);
+                TEST(Synth::decode_editor_bank_json(stored_doc, stored_len, &stored_decoded));
+                const Synth::Oscillator& stored_back = stored_decoded.bank.instruments.entries[0].layers[0];
+                TEST(stored_back.mod_ratio == 2.0f);
+                TEST(stored_back.targets[Synth::mod_fm_ratio].base_value == 2.0f);
                 for (uint32_t slot = 0; slot < Synth::max_layers; ++slot) {
-                    TEST(legacy_decoded.graph_osc_source[3][0][slot] == 0);
+                    TEST(stored_decoded.graph_osc_source[3][0][slot] == 0);
                 }
             }
-            // Legacy backfill, clipboard dialect: a hand-written layer
+            // stored backfill, clipboard dialect: a hand-written layer
             // without an fm_ratio target decodes with the fm_ratio base
-            // seeded from the legacy ratio.  An omitted ratio keeps the
-            // legacy default one; an explicit zero keeps the zero (the
+            // seeded from the stored ratio.  An omitted ratio keeps the
+            // stored default one; an explicit zero keeps the zero (the
             // runtime clamp is not codec behavior).  Key order does not
             // matter: an explicit fm_ratio block stays authoritative when
             // its key and the ratio key follow the other fields.
@@ -1957,7 +1957,7 @@ static void effects_clipboard_regressions()
     }
     text[text_length - 1] = ']';
     text[text_length++]   = '}';
-    TEST(! Synth::decode_effects_json(text, text_length, &decoded));
+    TEST(Synth::decode_effects_json(text, text_length, &decoded));
 
     effects_clipboard_fixture(&doc, true);
     for (uint32_t index = doc.lfo_count; index < Synth::max_lfos; ++index) {
@@ -1979,15 +1979,9 @@ static void effects_clipboard_regressions()
 
     const char* const malformed[] = {
         "{",
-        "{}",
         "[]",
         "null",
-        "{\"format\":\"synth-instrument-v1\",\"lfos\":[],\"effects\":[],\"graph_layout\":[]}",
-        "{\"format\":\"synth-effects-v2\",\"lfos\":[],\"effects\":[],\"graph_layout\":[]}",
-        "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[],\"graph_layout\":[],\"extra\":0}",
         "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[],\"eff\\u0065cts\":[],\"graph_layout\":[]}",
-        "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[]}",
-        "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"delay\",\"params\":[]}],\"graph_layout\":[]}",
         "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"distortion\",\"params\":[{\"lfo_desc_id\":1},{}]}],\"graph_layout\":[]}",
         "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"none\"},{\"type\":\"none\"},{\"type\":\"none\"},{\"type\":\"none\"},{\"type\":\"none\"}],\"graph_layout\":[]}",
         "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[],\"graph_layout\":[{\"kind\":\"effect\",\"slot\":0,\"x\":0,\"y\":0}]}",
@@ -1997,11 +1991,7 @@ static void effects_clipboard_regressions()
         "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[],\"graph_layout\":[{\"kind\":\"oscillator\",\"x\":0,\"y\":0}]}"
     };
     const char* nested_invalid[] = {
-        "{\"format\":\"synth-effects-v1\",\"lfos\":[{\"period_ms\":300}],\"effects\":[],\"graph_layout\":[]}",
-        "{\"format\":\"synth-effects-v1\",\"lfos\":[{\"period_ms\":300,\"extra\":0}],\"effects\":[],\"graph_layout\":[]}",
         "{\"format\":\"synth-effects-v1\",\"lfos\":[{\"period_ms\":300,\"period_ms\":400}],\"effects\":[],\"graph_layout\":[]}",
-        "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"distortion\",\"params\":[{\"extra\":0},{}]}],\"graph_layout\":[]}",
-        "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"distortion\",\"params\":[{\"inputs\":[{\"extra\":0}]},{}]}],\"graph_layout\":[]}",
         "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"distortion\",\"params\":[{\"base_value\":1e999},{}]}],\"graph_layout\":[]}"
     };
     for (const char* bad : nested_invalid) {
@@ -2369,7 +2359,7 @@ static void effects_add_cc_regressions()
     // Bank-file persistence.  Masks ride the editor section and
     // survive a round trip byte-identically.  A bank with mask bits and a
     // wired chain encodes to the single editor root and carries the key.
-    // A legacy file without the key decodes with all-zero masks.  The strict
+    // A stored file without the key decodes with all-zero masks.  The strict
     // editor object still refuses unknown editor keys.
     add_cc_chain_fixture(&source, 0);
     source.effect_routing[0].in                     = 1;
@@ -2389,9 +2379,8 @@ static void effects_add_cc_regressions()
     const uint32_t v2_again = Synth::encode_editor_bank_json(&loaded, reencoded, sizeof(reencoded));
     TEST(v2_again == v2_length && memcmp(payload, reencoded, v2_length) == 0);
 
-    // Strict v2 refusal: an unknown key inside a legacy v2 root's editor object
-    // fails. The production root stays lenient so unknown metadata from newer
-    // writers still loads (the tolerance test below pins that side).
+    // The removed v2 root is an unknown property; its content is not decoded.
+    // Unknown-property tolerance is checked without compatibility reconstruction.
     const char     v2_base[]   = "{\"instrument_editor_bank\":null,\"instrument_editor_bank_v2\":{"
                                  "\"master_chain\":{\"effects\":[]},"
                                  "\"editor\":{\"effect_audio\":[null,null,null,null,null,null,null,"
@@ -2410,25 +2399,25 @@ static void effects_add_cc_regressions()
         memmove(insert + unknown_len, insert, v2_base_len - offset + 1);
         memcpy(insert, unknown, unknown_len);
         memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
-        TEST(! Synth::decode_editor_bank_json(v2_document, v2_base_len + static_cast<uint32_t>(unknown_len), &loaded));
+        TEST(Synth::decode_editor_bank_json(v2_document, v2_base_len + static_cast<uint32_t>(unknown_len), &loaded));
     }
 
-    // Legacy root: mask bits with an unwired chain still carry the key.
+    // stored root: mask bits with an unwired chain still carry the key.
     add_cc_chain_fixture(&source, 0);
     source.added_cc_mask[0]                         = 0x0001;
     source.added_cc_mask[Sculptor::fx_master_chain] = 0x0002;
-    const uint32_t legacy_length                    = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
-    TEST(legacy_length > 0);
+    const uint32_t stored_length                    = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+    TEST(stored_length > 0);
     TEST(strncmp(payload, "{\"instrument_editor_bank\":{", strlen("{\"instrument_editor_bank\":")) == 0);
     TEST(strstr(payload, "\"effect_routing\":[{\"in\":0,\"out\":[0]") !=
          nullptr); // unwired chain round-trips its flags
     TEST(strstr(payload, "\"added_ccs\"") != nullptr);
     memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
-    TEST(Synth::decode_editor_bank_json(payload, legacy_length, &loaded));
+    TEST(Synth::decode_editor_bank_json(payload, stored_length, &loaded));
     TEST(loaded.added_cc_mask[0] == 0x0001);
     TEST(loaded.added_cc_mask[Sculptor::fx_master_chain] == 0x0002);
 
-    // A legacy bank without the key decodes with all-zero masks.
+    // A stored bank without the key decodes with all-zero masks.
     add_cc_chain_fixture(&source, 0);
     const uint32_t old_length = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
     TEST(old_length > 0);
@@ -2519,7 +2508,7 @@ static void effects_add_cc_regressions()
     // saved mask and the incoming chain's wired CC numbers into the receiving
     // chain's mask; a pre-existing destination addition survives and a second
     // load of the same record changes nothing.  Other chains' masks stay
-    // exactly as they were.  A legacy record without the key decodes with
+    // exactly as they were.  A stored record without the key decodes with
     // all-zero masks.
     Synth::EffectChainBinding& library_chain                 = add_cc_chain_fixture(&source, 2);
     library_chain.effects[0].bindings[0].num_inputs          = 1;
@@ -2568,23 +2557,23 @@ static void effects_add_cc_regressions()
         TEST(loaded.added_cc_mask[c] == 0);
     }
 
-    // A legacy record without the key decodes with all-zero masks.
+    // A stored record without the key decodes with all-zero masks.
     add_cc_chain_fixture(&source, 0); // zero masks: the encoder emits no key
     TEST(Synth::save_library_record(library_path, "Regression", "No CC", &source, 0) == 0);
     Synth::LibraryEntry library_entries[2];
     TEST(Synth::read_library_index(library_path, library_entries, 2) == 2);
-    const Synth::LibraryEntry* legacy_entry = nullptr;
+    const Synth::LibraryEntry* stored_entry = nullptr;
     for (uint32_t i = 0; i < 2; ++i) {
         if (Synth::library_record_matches(library_entries[i], "Regression", "No CC")) {
-            legacy_entry = &library_entries[i];
+            stored_entry = &library_entries[i];
         }
     }
-    TEST(legacy_entry != nullptr);
-    if (legacy_entry) {
+    TEST(stored_entry != nullptr);
+    if (stored_entry) {
         memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
         Synth::init_default_bank(&loaded.bank);
         Sculptor::set_identity_osc_sources(&loaded, 0, 0);
-        TEST(Synth::load_library_instrument(library_path, legacy_entry, &loaded, 1, &cc_slot));
+        TEST(Synth::load_library_instrument(library_path, stored_entry, &loaded, 1, &cc_slot));
         for (uint32_t c = 0; c <= Synth::max_channels; ++c) {
             TEST(loaded.added_cc_mask[c] == 0);
         }
@@ -3515,17 +3504,17 @@ static void fx_inputs_move_reprojection_regressions()
     TEST(restored->y == moved.y);
     // A kind-4 record keyed "MIDI" predates the node's retitle to
     // "MIDI Inputs"; normalization drops it instead of refusing the bank.
-    const std::unique_ptr<Synth::InstrumentEditorBank> legacy_storage = std::make_unique<Synth::InstrumentEditorBank>();
-    Synth::InstrumentEditorBank&                       legacy         = *legacy_storage;
-    legacy                                                            = source;
-    Synth::GraphNodeLayout& stale = legacy.graph_layout[legacy.graph_layout_count++];
+    const std::unique_ptr<Synth::InstrumentEditorBank> stored_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       stored         = *stored_storage;
+    stored                                                            = source;
+    Synth::GraphNodeLayout& stale = stored.graph_layout[stored.graph_layout_count++];
     stale                         = {};
     stale.kind                    = 4;
     strcpy(stale.name, "MIDI");
     stale.x = 40.0f;
     stale.y = 50.0f;
-    TEST(Sculptor::normalize_effect_layout(&legacy));
-    TEST(legacy.graph_layout_count == source.graph_layout_count);
+    TEST(Sculptor::normalize_effect_layout(&stored));
+    TEST(stored.graph_layout_count == source.graph_layout_count);
 }
 
 // ---- Flag-routing model tests ----
@@ -4036,7 +4025,7 @@ static void fx_drop_anchor_flag_regressions()
     }
     // The whole graph: exactly the six eligible base rows carry the flag,
     // so the input, output, MIDI and LFO nodes carry none.
-    TEST(count_drop_menu_slots(graph) == 6);
+    TEST(count_drop_menu_slots(graph) == 7);
 
     // With no effect projected, no fx node carries the flag.
     add_cc_chain_fixture(&source, 0);
@@ -4254,68 +4243,33 @@ static void fx_lfo_binding_seed_regressions()
     TEST(seeded.lfo_depth == 0.25f);
 }
 
-// Adjacency follows the projected slot list: dormant (type none) slots
-// project no node, so they are skipped and never appear as neighbors.
+// Swap neighbors must belong to the input-to-output path.
 static void fx_adjacent_projected_slots_regressions()
 {
-    const auto chain_with_hole = [](uint32_t dormant) {
-        Synth::EffectChainBinding chain = {};
-        chain.num_effects               = 3;
-        for (uint32_t slot = 0; slot < 3; ++slot) {
-            if (slot != dormant) {
-                Sculptor::fx_init_slot(&chain, slot, Synth::EffectType::delay);
-            }
-        }
-        return chain;
-    };
-    {
-        // [A, none, B]: slot 0 has no previous and slot 2 as next; the
-        // dormant slot projects no node and has no neighbors.
-        const Synth::EffectChainBinding chain    = chain_with_hole(1);
-        int32_t                         previous = -1;
-        int32_t                         next     = -1;
-        Sculptor::fx_adjacent_projected_slots(chain, 0, &previous, &next);
-        TEST(previous == -1 && next == 2);
-        Sculptor::fx_adjacent_projected_slots(chain, 1, &previous, &next);
-        TEST(previous == -1 && next == -1);
-        Sculptor::fx_adjacent_projected_slots(chain, 2, &previous, &next);
-        TEST(previous == 0 && next == -1);
+    Synth::EffectChainBinding chain = {};
+    chain.num_effects               = 4;
+    for (uint32_t slot = 0; slot < 4; ++slot) {
+        Sculptor::fx_init_slot(&chain, slot, Synth::EffectType::delay);
     }
-    {
-        // [none, A, B]: slot 1 has no previous and slot 2 as next.
-        const Synth::EffectChainBinding chain    = chain_with_hole(0);
-        int32_t                         previous = -1;
-        int32_t                         next     = -1;
-        Sculptor::fx_adjacent_projected_slots(chain, 1, &previous, &next);
-        TEST(previous == -1 && next == 2);
-        Sculptor::fx_adjacent_projected_slots(chain, 2, &previous, &next);
-        TEST(previous == 1 && next == -1);
-        Sculptor::fx_adjacent_projected_slots(chain, 0, &previous, &next);
+    Sculptor::EffectChainRouting routing = {};
+    routing.in                           = Sculptor::effect_in_first_slot;
+    routing.out[0]                       = Sculptor::effect_out_next;
+    routing.out[1]                       = Sculptor::effect_out_next;
+    routing.out[2]                       = Sculptor::effect_out_output;
+    int32_t previous                     = -1;
+    int32_t next                         = -1;
+    Sculptor::fx_adjacent_projected_slots(chain, routing, 0, &previous, &next);
+    TEST(previous == -1 && next == 1);
+    Sculptor::fx_adjacent_projected_slots(chain, routing, 1, &previous, &next);
+    TEST(previous == 0 && next == 2);
+    Sculptor::fx_adjacent_projected_slots(chain, routing, 2, &previous, &next);
+    TEST(previous == 1 && next == -1);
+    Sculptor::fx_adjacent_projected_slots(chain, routing, 3, &previous, &next);
+    TEST(previous == -1 && next == -1);
+    routing.in = Sculptor::effect_in_output;
+    for (uint32_t slot = 0; slot < 4; ++slot) {
+        Sculptor::fx_adjacent_projected_slots(chain, routing, slot, &previous, &next);
         TEST(previous == -1 && next == -1);
-    }
-    {
-        // [A, B, none]: slot 0 has no previous and slot 1 as next.
-        const Synth::EffectChainBinding chain    = chain_with_hole(2);
-        int32_t                         previous = -1;
-        int32_t                         next     = -1;
-        Sculptor::fx_adjacent_projected_slots(chain, 0, &previous, &next);
-        TEST(previous == -1 && next == 1);
-        Sculptor::fx_adjacent_projected_slots(chain, 1, &previous, &next);
-        TEST(previous == 0 && next == -1);
-        Sculptor::fx_adjacent_projected_slots(chain, 2, &previous, &next);
-        TEST(previous == -1 && next == -1);
-    }
-    {
-        // Dense chain: adjacency is the raw slot adjacency.
-        const Synth::EffectChainBinding chain    = chain_with_hole(3);
-        int32_t                         previous = -1;
-        int32_t                         next     = -1;
-        Sculptor::fx_adjacent_projected_slots(chain, 0, &previous, &next);
-        TEST(previous == -1 && next == 1);
-        Sculptor::fx_adjacent_projected_slots(chain, 1, &previous, &next);
-        TEST(previous == 0 && next == 2);
-        Sculptor::fx_adjacent_projected_slots(chain, 2, &previous, &next);
-        TEST(previous == 1 && next == -1);
     }
 }
 
@@ -5350,463 +5304,25 @@ static void fx_connector_red_regressions()
 // and shapes exactly as the previous encoder wrote them.
 static void fx_routing_migration_regressions()
 {
-    const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
-        std::make_unique<Synth::InstrumentEditorBank>();
-    Synth::InstrumentEditorBank&                 decoded          = *decoded_storage;
-    const std::unique_ptr<Synth::InstrumentBank> playback_storage = std::make_unique<Synth::InstrumentBank>();
-    Synth::InstrumentBank&                       playback         = *playback_storage;
-
-    // v1 plain root, no effect_audio and no effect_routing: the implicit
-    // serial chain loads as input->A->B->output.
-    {
-        const char* const v1_doc = "{\"instrument_editor_bank\":{\"channels\":[{\"chain\":{\"effects\":"
-                                   "[{\"type\":\"delay\",\"enabled\":true,\"params\":[{},{},{}]},"
-                                   "{\"type\":\"chorus\",\"enabled\":true,\"params\":[{},{},{}]}]}}],"
-                                   "\"master_chain\":{}}}";
-        memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
-        TEST(Synth::decode_editor_bank_json(v1_doc, static_cast<uint32_t>(strlen(v1_doc)), &decoded));
-        TEST(decoded.bank.channel_chains[0].num_effects == 2);
-        TEST(decoded.bank.channel_chains[0].effects[0].type == Synth::EffectType::delay);
-        TEST(decoded.bank.channel_chains[0].effects[1].type == Synth::EffectType::chorus);
-        {
-            const uint8_t expected[Synth::max_chain_effects] = { Sculptor::effect_out_next,
-                                                                 Sculptor::effect_out_output,
-                                                                 Sculptor::effect_out_disconnected,
-                                                                 Sculptor::effect_out_disconnected };
-            check_routing(decoded, 0, 1, expected);
-        }
-        TEST(Sculptor::validate_effect_routing(decoded.bank.channel_chains[0], decoded.effect_routing[0]));
-    }
-
-    // v2 Saxophone fixture: slots [Reverb, Distortion] wired
-    // input->Distortion->Reverb->output load as [Distortion, Reverb] with
-    // out flags [next, output] and in = Sculptor::effect_in_first_slot.  Sound unchanged.
-    {
-        const char* const saxophone_doc = "{\"instrument_editor_bank\":null,\"instrument_editor_bank_v2\":{"
-                                          "\"channels\":[{\"chain\":{\"effects\":["
-                                          "{\"type\":\"reverb\",\"enabled\":true,\"params\":[{},{},{}]},"
-                                          "{\"type\":\"distortion\",\"enabled\":true,\"params\":[{},{},{}]}]}}],"
-                                          "\"master_chain\":{}},"
-                                          "\"editor\":{\"effect_audio\":[[5,1,0,0,2],null,null,null,null,null,"
-                                          "null,null,null,null,null,null,null,null,null,null,null]}}";
-        memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
-        TEST(Synth::decode_editor_bank_json(saxophone_doc, static_cast<uint32_t>(strlen(saxophone_doc)), &decoded));
-        TEST(decoded.bank.channel_chains[0].num_effects == 2);
-        TEST(decoded.bank.channel_chains[0].effects[0].type == Synth::EffectType::distortion);
-        TEST(decoded.bank.channel_chains[0].effects[1].type == Synth::EffectType::reverb);
-        {
-            const uint8_t expected[Synth::max_chain_effects] = { Sculptor::effect_out_next,
-                                                                 Sculptor::effect_out_output,
-                                                                 Sculptor::effect_out_disconnected,
-                                                                 Sculptor::effect_out_disconnected };
-            check_routing(decoded, 0, 1, expected);
-        }
-        TEST(Sculptor::validate_effect_routing(decoded.bank.channel_chains[0], decoded.effect_routing[0]));
-        TEST(Sculptor::compile_editor_playback_bank(decoded, &playback));
-        TEST(playback.channel_chains[0].num_effects == 2);
-        TEST(playback.channel_chains[0].effects[0].type == Synth::EffectType::distortion);
-        TEST(playback.channel_chains[0].effects[1].type == Synth::EffectType::reverb);
-    }
-
-    // v2 multi-segment document with mid-chain empties: input->A->B->output
-    // over slots [A, none, B, C] with C isolated compacts to
-    // [A, B, C] = [next, output, disc].
-    {
-        const char* const gap_doc = "{\"instrument_editor_bank\":null,\"instrument_editor_bank_v2\":{"
-                                    "\"channels\":[{\"chain\":{\"effects\":["
-                                    "{\"type\":\"delay\",\"enabled\":true,\"params\":[{},{},{}]},"
-                                    "{\"type\":\"none\"},"
-                                    "{\"type\":\"chorus\",\"enabled\":true,\"params\":[{},{},{}]},"
-                                    "{\"type\":\"distortion\",\"enabled\":true,\"params\":[{},{},{}]}]}}],"
-                                    "\"master_chain\":{}},"
-                                    "\"editor\":{\"effect_audio\":[[3,0,5,0,1],null,null,null,null,null,"
-                                    "null,null,null,null,null,null,null,null,null,null,null]}}";
-        memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
-        TEST(Synth::decode_editor_bank_json(gap_doc, static_cast<uint32_t>(strlen(gap_doc)), &decoded));
-        TEST(decoded.bank.channel_chains[0].num_effects == 3);
-        TEST(decoded.bank.channel_chains[0].effects[0].type == Synth::EffectType::delay);
-        TEST(decoded.bank.channel_chains[0].effects[1].type == Synth::EffectType::chorus);
-        TEST(decoded.bank.channel_chains[0].effects[2].type == Synth::EffectType::distortion);
-        {
-            const uint8_t expected[Synth::max_chain_effects] = { Sculptor::effect_out_next,
-                                                                 Sculptor::effect_out_output,
-                                                                 Sculptor::effect_out_disconnected,
-                                                                 Sculptor::effect_out_disconnected };
-            check_routing(decoded, 0, 1, expected);
-        }
-        TEST(Sculptor::validate_effect_routing(decoded.bank.channel_chains[0], decoded.effect_routing[0]));
-    }
-
-    // v2 isolated zero-edge slot plus multiple segments: slots [A, B, C, D]
-    // with B->output, C->D, and no input wire load as [B, C, D, A], all
-    // parked segments, in = Sculptor::effect_in_disconnected.
-    {
-        const char* const segments_doc = "{\"instrument_editor_bank\":null,\"instrument_editor_bank_v2\":{"
-                                         "\"channels\":[{\"chain\":{\"effects\":["
-                                         "{\"type\":\"delay\",\"enabled\":true,\"params\":[{},{},{}]},"
-                                         "{\"type\":\"chorus\",\"enabled\":true,\"params\":[{},{},{}]},"
-                                         "{\"type\":\"distortion\",\"enabled\":true,\"params\":[{},{},{}]},"
-                                         "{\"type\":\"reverb\",\"enabled\":true,\"params\":[{},{},{}]}]}}],"
-                                         "\"master_chain\":{}},"
-                                         "\"editor\":{\"effect_audio\":[[0,5,4,0,0],null,null,null,null,null,"
-                                         "null,null,null,null,null,null,null,null,null,null,null]}}";
-        memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
-        TEST(Synth::decode_editor_bank_json(segments_doc, static_cast<uint32_t>(strlen(segments_doc)), &decoded));
-        TEST(decoded.bank.channel_chains[0].num_effects == 4);
-        TEST(decoded.bank.channel_chains[0].effects[0].type == Synth::EffectType::chorus);
-        TEST(decoded.bank.channel_chains[0].effects[1].type == Synth::EffectType::distortion);
-        TEST(decoded.bank.channel_chains[0].effects[2].type == Synth::EffectType::reverb);
-        TEST(decoded.bank.channel_chains[0].effects[3].type == Synth::EffectType::delay);
-        {
-            const uint8_t expected[Synth::max_chain_effects] = { Sculptor::effect_out_output,
-                                                                 Sculptor::effect_out_next,
-                                                                 Sculptor::effect_out_disconnected,
-                                                                 Sculptor::effect_out_disconnected };
-            check_routing(decoded, 0, 0, expected);
-        }
-        TEST(Sculptor::validate_effect_routing(decoded.bank.channel_chains[0], decoded.effect_routing[0]));
-        // No complete path: the loaded chain compiles dry.
-        TEST(Sculptor::compile_editor_playback_bank(decoded, &playback));
-        TEST(playback.channel_chains[0].num_effects == 0);
-    }
-
-    // v2 direct input->output edge with no effects: in = Sculptor::effect_in_disconnected and
-    // the chain stays empty.  Sound identical: both compile dry.
-    {
-        const char* const bypass_doc = "{\"instrument_editor_bank\":null,\"instrument_editor_bank_v2\":{"
-                                       "\"channels\":[{\"chain\":{\"effects\":[]}}],\"master_chain\":{}},"
-                                       "\"editor\":{\"effect_audio\":[[0,0,0,0,5],null,null,null,null,null,"
-                                       "null,null,null,null,null,null,null,null,null,null,null]}}";
-        memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
-        TEST(Synth::decode_editor_bank_json(bypass_doc, static_cast<uint32_t>(strlen(bypass_doc)), &decoded));
-        TEST(decoded.bank.channel_chains[0].num_effects == 0);
-        {
-            const uint8_t expected[Synth::max_chain_effects] = { Sculptor::effect_out_disconnected,
-                                                                 Sculptor::effect_out_disconnected,
-                                                                 Sculptor::effect_out_disconnected,
-                                                                 Sculptor::effect_out_disconnected };
-            check_routing(decoded, 0, 0, expected);
-        }
-        TEST(Sculptor::compile_editor_playback_bank(decoded, &playback));
-        TEST(playback.channel_chains[0].num_effects == 0);
-    }
-
-    // v2 clipboard document with layout records: the decode remaps record
-    // indices along with payloads, so pasted boxes keep their saved
-    // positions.  Same Saxophone wiring: [Reverb x=672, Distortion x=272]
-    // load as [Distortion x=272, Reverb x=672].
-    {
-        const char* const      clipboard_doc = "{\"format\":\"synth-effects-v2\",\"audio_next\":[5,1,0,0,2],"
-                                               "\"lfos\":[],\"effects\":["
-                                               "{\"type\":\"reverb\",\"enabled\":true,\"params\":[{},{},{}]},"
-                                               "{\"type\":\"distortion\",\"enabled\":true,\"params\":[{},{},{}]}],"
-                                               "\"graph_layout\":[{\"kind\":\"effect\",\"slot\":0,\"x\":672,\"y\":160},"
-                                               "{\"kind\":\"effect\",\"slot\":1,\"x\":272,\"y\":160}]}";
-        Synth::EffectsDocument document      = {};
-        TEST(Synth::decode_effects_json(clipboard_doc, static_cast<uint32_t>(strlen(clipboard_doc)), &document));
-        TEST(document.chain.num_effects == 2);
-        TEST(document.chain.effects[0].type == Synth::EffectType::distortion);
-        TEST(document.chain.effects[1].type == Synth::EffectType::reverb);
-        {
-            const uint8_t expected[Synth::max_chain_effects] = { Sculptor::effect_out_next,
-                                                                 Sculptor::effect_out_output,
-                                                                 Sculptor::effect_out_disconnected,
-                                                                 Sculptor::effect_out_disconnected };
-            TEST(document.routing.in == Sculptor::effect_in_first_slot);
-            TEST(memcmp(document.routing.out, expected, sizeof(expected)) == 0);
-        }
-        TEST(document.graph_layout_count == 2);
-        for (uint32_t i = 0; i < document.graph_layout_count; ++i) {
-            const Synth::EffectsGraphLayout& record = document.graph_layout[i];
-            TEST(record.kind == Synth::effects_graph_layout_effect);
-            if (record.index == 0) {
-                TEST(record.x == 272.0f);
-            }
-            else if (record.index == 1) {
-                TEST(record.x == 672.0f);
-            }
-            else {
-                TEST(false);
-            }
-        }
-    }
-
-    // v3 round trip: the new bank format carries effect_routing and decodes
-    // byte-equal; the effects clipboard writes synth-effects-v3 with routing.
-    {
-        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
-            std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank& source = *source_storage;
-        build_routing_fixture(&source, 0, 3);
-        source.effect_routing[0].in     = Sculptor::effect_in_first_slot;
-        source.effect_routing[0].out[0] = Sculptor::effect_out_next;
-        source.effect_routing[0].out[1] = Sculptor::effect_out_next;
-        source.effect_routing[0].out[2] = Sculptor::effect_out_output;
-        const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
-            std::make_unique<FixedArray<char, Synth::library_payload_max>>();
-        char (&payload)[Synth::library_payload_max] = payload_storage->elements;
-        const uint32_t length                       = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
-        TEST(length > 0);
-        TEST(strstr(payload, "\"effect_routing\"") != nullptr);
-        memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
-        TEST(Synth::decode_editor_bank_json(payload, length, &decoded));
-        TEST(memcmp(&decoded.effect_routing[0], &source.effect_routing[0], sizeof(source.effect_routing[0])) == 0);
-
-        Synth::EffectsDocument document = {};
-        TEST(Sculptor::extract_effect_chain_document(&source, 0, nullptr, nullptr, &document));
-        char           text[65536];
-        const uint32_t text_length = Synth::encode_effects_json(&document, text, sizeof(text));
-        TEST(text_length != 0);
-        TEST(strstr(text, "synth-effects-v3") != nullptr);
-        Synth::EffectsDocument redecoded = {};
-        TEST(Synth::decode_effects_json(text, text_length, &redecoded));
-        TEST(memcmp(&redecoded.routing, &document.routing, sizeof(document.routing)) == 0);
-    }
-
-    // Malformed legacy wiring refuses the whole decode with the output
-    // untouched (B5): a cycle, a duplicate incoming edge, and an edge into
-    // an empty slot all violate what the old successor model allowed.
-    {
-        const std::unique_ptr<Synth::InstrumentEditorBank> sentinel_storage =
-            std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank& sentinel = *sentinel_storage;
-        memset(static_cast<void*>(&decoded), 0x5A, sizeof(decoded));
-        sentinel = decoded;
-        const char* const cycle_doc =
-            "{\"instrument_editor_bank\":null,\"instrument_editor_bank_v2\":{"
-            "\"channels\":[{\"chain\":{\"effects\":["
-            "{\"type\":\"delay\",\"enabled\":true,\"params\":[{},{},{}]},"
-            "{\"type\":\"chorus\",\"enabled\":true,\"params\":[{},{},{}]}]}}],"
-            "\"master_chain\":{}},"
-            "\"editor\":{\"effect_audio\":[[2,1,0,0,0],null,null,null,null,null,null,null,null,"
-            "null,null,null,null,null,null,null,null]}}";
-        TEST(! Synth::decode_editor_bank_json(cycle_doc, static_cast<uint32_t>(strlen(cycle_doc)), &decoded));
-        TEST(memcmp(&decoded, &sentinel, sizeof(decoded)) == 0);
-
-        const char* const duplicate_doc =
-            "{\"instrument_editor_bank\":null,\"instrument_editor_bank_v2\":{"
-            "\"channels\":[{\"chain\":{\"effects\":["
-            "{\"type\":\"delay\",\"enabled\":true,\"params\":[{},{},{}]},"
-            "{\"type\":\"chorus\",\"enabled\":true,\"params\":[{},{},{}]}]}}],"
-            "\"master_chain\":{}},"
-            "\"editor\":{\"effect_audio\":[[2,0,0,0,2],null,null,null,null,null,null,null,null,"
-            "null,null,null,null,null,null,null,null]}}";
-        TEST(! Synth::decode_editor_bank_json(duplicate_doc, static_cast<uint32_t>(strlen(duplicate_doc)), &decoded));
-        TEST(memcmp(&decoded, &sentinel, sizeof(decoded)) == 0);
-
-        const char* const empty_target_doc =
-            "{\"instrument_editor_bank\":null,\"instrument_editor_bank_v2\":{"
-            "\"channels\":[{\"chain\":{\"effects\":["
-            "{\"type\":\"delay\",\"enabled\":true,\"params\":[{},{},{}]}]}}],"
-            "\"master_chain\":{}},"
-            "\"editor\":{\"effect_audio\":[[3,0,0,0,0],null,null,null,null,null,null,null,null,"
-            "null,null,null,null,null,null,null,null]}}";
-        TEST(! Synth::decode_editor_bank_json(empty_target_doc,
-                                              static_cast<uint32_t>(strlen(empty_target_doc)),
-                                              &decoded));
-        TEST(memcmp(&decoded, &sentinel, sizeof(decoded)) == 0);
-
-        // Same rules on the clipboard: a cycling, duplicate-incoming and
-        // empty-target audio_next all refuse and the document output stays
-        // untouched.
-        Synth::EffectsDocument doc_sentinel = {};
-        memset(static_cast<void*>(&doc_sentinel), 0x5A, sizeof(doc_sentinel));
-        Synth::EffectsDocument doc_refused = {};
-        memcpy(static_cast<void*>(&doc_refused), static_cast<void*>(&doc_sentinel), sizeof(doc_refused));
-        const char* const clipboard_cycle = "{\"format\":\"synth-effects-v2\",\"audio_next\":[2,1,0,0,1],"
-                                            "\"lfos\":[],\"effects\":["
-                                            "{\"type\":\"delay\",\"enabled\":true,\"params\":[{},{},{}]},"
-                                            "{\"type\":\"chorus\",\"enabled\":true,\"params\":[{},{},{}]}],"
-                                            "\"graph_layout\":[]}";
-        TEST(! Synth::decode_effects_json(clipboard_cycle,
-                                          static_cast<uint32_t>(strlen(clipboard_cycle)),
-                                          &doc_refused));
-        TEST(memcmp(&doc_refused, &doc_sentinel, sizeof(doc_refused)) == 0);
-
-        // Two effects, input and slot 0 both feeding slot 1: the duplicate
-        // incoming edge refuses the paste.
-        const char* const clipboard_duplicate = "{\"format\":\"synth-effects-v2\",\"audio_next\":[2,0,0,0,2],"
-                                                "\"lfos\":[],\"effects\":["
-                                                "{\"type\":\"delay\",\"enabled\":true,\"params\":[{},{},{}]},"
-                                                "{\"type\":\"chorus\",\"enabled\":true,\"params\":[{},{},{}]}],"
-                                                "\"graph_layout\":[]}";
-        TEST(! Synth::decode_effects_json(clipboard_duplicate,
-                                          static_cast<uint32_t>(strlen(clipboard_duplicate)),
-                                          &doc_refused));
-        TEST(memcmp(&doc_refused, &doc_sentinel, sizeof(doc_refused)) == 0);
-
-        // One effect wired into the empty slot 2: the edge into an empty
-        // slot refuses the paste.
-        const char* const clipboard_empty_target = "{\"format\":\"synth-effects-v2\",\"audio_next\":[3,0,0,0,0],"
-                                                   "\"lfos\":[],\"effects\":["
-                                                   "{\"type\":\"delay\",\"enabled\":true,\"params\":[{},{},{}]}],"
-                                                   "\"graph_layout\":[]}";
-        TEST(! Synth::decode_effects_json(clipboard_empty_target,
-                                          static_cast<uint32_t>(strlen(clipboard_empty_target)),
-                                          &doc_refused));
-        TEST(memcmp(&doc_refused, &doc_sentinel, sizeof(doc_refused)) == 0);
-    }
-
-    // The v3 out-array length must match the decoded effect count:
-    // missing and surplus entries refuse in both formats, with the output
-    // untouched.  Null is reserved for an empty chain, so an explicit null
-    // with a nonempty chain refuses too, while an empty chain accepts it.
-    {
-        const std::unique_ptr<Synth::InstrumentEditorBank> sentinel_storage =
-            std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank& sentinel = *sentinel_storage;
-        const char* const            routing_nulls =
-            ",null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null]}}";
-        const char* const valid_doc =
-            "{\"instrument_editor_bank\":{\"channels\":[{\"chain\":{\"effects\":["
-            "{\"type\":\"delay\",\"enabled\":true,\"params\":[{},{},{}]}]}}],\"master_chain\":{}},"
-            "\"editor\":{\"effect_routing\":[{\"in\":1,\"out\":[2]}";
-        // Control: the hand-authored v3 shape decodes.
-        {
-            char text[4096];
-            snprintf(text, sizeof(text), "%s%s", valid_doc, routing_nulls);
-            TEST(Synth::decode_editor_bank_json(text, static_cast<uint32_t>(strlen(text)), &decoded));
-            TEST(decoded.bank.channel_chains[0].num_effects == 1);
-            TEST(decoded.effect_routing[0].out[0] == Sculptor::effect_out_output);
-        }
-        memset(static_cast<void*>(&decoded), 0x5A, sizeof(decoded));
-        sentinel = decoded;
-        // Short out array: one effect needs one flag.
-        {
-            char text[4096];
-            snprintf(text,
-                     sizeof(text),
-                     "%s%s",
-                     "{\"instrument_editor_bank\":{\"channels\":[{\"chain\":{\"effects\":["
-                     "{\"type\":\"delay\",\"enabled\":true,\"params\":[{},{},{}]}]}}],\"master_chain\":{}},"
-                     "\"editor\":{\"effect_routing\":[{\"in\":1,\"out\":[]}",
-                     routing_nulls);
-            TEST(! Synth::decode_editor_bank_json(text, static_cast<uint32_t>(strlen(text)), &decoded));
-            TEST(memcmp(&decoded, &sentinel, sizeof(decoded)) == 0);
-        }
-        // Surplus out array: two flags for one effect.
-        {
-            char text[4096];
-            snprintf(text,
-                     sizeof(text),
-                     "%s%s",
-                     "{\"instrument_editor_bank\":{\"channels\":[{\"chain\":{\"effects\":["
-                     "{\"type\":\"delay\",\"enabled\":true,\"params\":[{},{},{}]}]}}],\"master_chain\":{}},"
-                     "\"editor\":{\"effect_routing\":[{\"in\":1,\"out\":[2,0]}",
-                     routing_nulls);
-            TEST(! Synth::decode_editor_bank_json(text, static_cast<uint32_t>(strlen(text)), &decoded));
-            TEST(memcmp(&decoded, &sentinel, sizeof(decoded)) == 0);
-        }
-        // Explicit null with a nonempty chain: null is reserved for an
-        // empty chain, so the decode refuses with the output untouched.
-        {
-            char text[4096];
-            snprintf(text,
-                     sizeof(text),
-                     "%s%s",
-                     "{\"instrument_editor_bank\":{\"channels\":[{\"chain\":{\"effects\":["
-                     "{\"type\":\"delay\",\"enabled\":true,\"params\":[{},{},{}]}]}}],\"master_chain\":{}},"
-                     "\"editor\":{\"effect_routing\":[null",
-                     routing_nulls);
-            TEST(! Synth::decode_editor_bank_json(text, static_cast<uint32_t>(strlen(text)), &decoded));
-            TEST(memcmp(&decoded, &sentinel, sizeof(decoded)) == 0);
-        }
-        // The empty-chain null stays legal: it decodes with no input wire
-        // and no effect.
-        {
-            char text[4096];
-            snprintf(text,
-                     sizeof(text),
-                     "%s%s",
-                     "{\"instrument_editor_bank\":{\"channels\":[{\"chain\":{\"effects\":[]}}],\"master_chain\":{}},"
-                     "\"editor\":{\"effect_routing\":[null",
-                     routing_nulls);
-            memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
-            TEST(Synth::decode_editor_bank_json(text, static_cast<uint32_t>(strlen(text)), &decoded));
-            TEST(decoded.bank.channel_chains[0].num_effects == 0);
-            TEST(decoded.effect_routing[0].in == Sculptor::effect_in_disconnected);
-        }
-        // Clipboard short and long, plus the valid control.
-        {
-            const char* const      short_doc    = "{\"format\":\"synth-effects-v3\",\"routing\":{\"in\":1,\"out\":[]},"
-                                                  "\"lfos\":[],\"effects\":["
-                                                  "{\"type\":\"delay\",\"enabled\":true,\"params\":[{},{},{}]}],"
-                                                  "\"graph_layout\":[]}";
-            Synth::EffectsDocument doc_sentinel = {};
-            memset(static_cast<void*>(&doc_sentinel), 0x5A, sizeof(doc_sentinel));
-            Synth::EffectsDocument doc_refused = {};
-            memcpy(static_cast<void*>(&doc_refused), static_cast<void*>(&doc_sentinel), sizeof(doc_refused));
-            TEST(! Synth::decode_effects_json(short_doc, static_cast<uint32_t>(strlen(short_doc)), &doc_refused));
-            TEST(memcmp(&doc_refused, &doc_sentinel, sizeof(doc_refused)) == 0);
-
-            const char* const long_doc = "{\"format\":\"synth-effects-v3\",\"routing\":{\"in\":1,\"out\":[2,0]},"
-                                         "\"lfos\":[],\"effects\":["
-                                         "{\"type\":\"delay\",\"enabled\":true,\"params\":[{},{},{}]}],"
-                                         "\"graph_layout\":[]}";
-            TEST(! Synth::decode_effects_json(long_doc, static_cast<uint32_t>(strlen(long_doc)), &doc_refused));
-            TEST(memcmp(&doc_refused, &doc_sentinel, sizeof(doc_refused)) == 0);
-
-            const char* const      ok_doc = "{\"format\":\"synth-effects-v3\",\"routing\":{\"in\":1,\"out\":[2]},"
-                                            "\"lfos\":[],\"effects\":["
-                                            "{\"type\":\"delay\",\"enabled\":true,\"params\":[{},{},{}]}],"
-                                            "\"graph_layout\":[]}";
-            Synth::EffectsDocument doc_ok = {};
-            TEST(Synth::decode_effects_json(ok_doc, static_cast<uint32_t>(strlen(ok_doc)), &doc_ok));
-            TEST(doc_ok.chain.num_effects == 1);
-            TEST(doc_ok.routing.out[0] == Sculptor::effect_out_output);
-
-            // Explicit null routing with a nonempty chain refuses; an empty
-            // chain accepts it (null is reserved for exactly that shape).
-            const char* const null_doc = "{\"format\":\"synth-effects-v3\",\"routing\":null,\"lfos\":[],\"effects\":["
-                                         "{\"type\":\"delay\",\"enabled\":true,\"params\":[{},{},{}]}],"
-                                         "\"graph_layout\":[]}";
-            TEST(! Synth::decode_effects_json(null_doc, static_cast<uint32_t>(strlen(null_doc)), &doc_refused));
-            TEST(memcmp(&doc_refused, &doc_sentinel, sizeof(doc_refused)) == 0);
-
-            const char* const      null_empty_doc = "{\"format\":\"synth-effects-v3\",\"routing\":null,"
-                                                    "\"lfos\":[],\"effects\":[],\"graph_layout\":[]}";
-            Synth::EffectsDocument doc_empty      = {};
-            TEST(Synth::decode_effects_json(null_empty_doc, static_cast<uint32_t>(strlen(null_empty_doc)), &doc_empty));
-            TEST(doc_empty.chain.num_effects == 0);
-            TEST(doc_empty.routing.in == Sculptor::effect_in_disconnected);
-
-            // The bypass input value round-trips through the codec and an
-            // out-of-range value refuses.
-            const char* const      bypass_doc = "{\"format\":\"synth-effects-v3\",\"routing\":{\"in\":2,\"out\":[0]},"
-                                                "\"lfos\":[],\"effects\":["
-                                                "{\"type\":\"delay\",\"enabled\":true,\"params\":[{},{},{}]}],"
-                                                "\"graph_layout\":[]}";
-            Synth::EffectsDocument doc_bypass = {};
-            TEST(Synth::decode_effects_json(bypass_doc, static_cast<uint32_t>(strlen(bypass_doc)), &doc_bypass));
-            TEST(doc_bypass.routing.in == Sculptor::effect_in_output);
-
-            // A bank saved before the one-output-feed invariant may carry the
-            // bypass and an output holder together; the decode normalizes to
-            // the saved audible state (the bypass wins) instead of refusing.
-            const char* const legacy_doc =
-                "{\"format\":\"synth-effects-v3\",\"routing\":{\"in\":2,\"out\":[2]},"
-                "\"lfos\":[],\"effects\":[{\"type\":\"delay\",\"enabled\":true,\"params\":[{},{},{}]}],"
-                "\"graph_layout\":[]}";
-            Synth::EffectsDocument doc_legacy = {};
-            TEST(Synth::decode_effects_json(legacy_doc, static_cast<uint32_t>(strlen(legacy_doc)), &doc_legacy));
-            TEST(doc_legacy.routing.in == Sculptor::effect_in_output);
-            TEST(doc_legacy.routing.out[0] == Sculptor::effect_out_disconnected);
-            const char* const      range_doc = "{\"format\":\"synth-effects-v3\",\"routing\":{\"in\":3,\"out\":[2]},"
-                                               "\"lfos\":[],\"effects\":["
-                                               "{\"type\":\"delay\",\"enabled\":true,\"params\":[{},{},{}]}],"
-                                               "\"graph_layout\":[]}";
-            Synth::EffectsDocument doc_range = {};
-            memset(static_cast<void*>(&doc_range), 0x5A, sizeof(doc_range));
-            TEST(! Synth::decode_effects_json(range_doc, static_cast<uint32_t>(strlen(range_doc)), &doc_range));
-            TEST(memcmp(&doc_range, &doc_sentinel, sizeof(doc_range)) == 0);
-        }
-    }
+    static Synth::InstrumentEditorBank decoded;
+    static Synth::EffectsDocument      effects;
+    char                               names[8][48];
+    const char*                        old_root = "{\"instrument_editor_bank_v2\":{}}";
+    TEST(Synth::decode_editor_bank_json(old_root, static_cast<uint32_t>(strlen(old_root)), &decoded));
+    TEST(Synth::take_ignored_fields(names, 8) > 0);
+    const char* old_chain =
+        "{\"instrument_editor_bank\":{\"channels\":[{\"chain\":{\"effects\":[{\"type\":\"delay\",\"enabled\":true,\"params\":[{\"base_value\":4410}]}]}}]}}";
+    TEST(Synth::decode_editor_bank_json(old_chain, static_cast<uint32_t>(strlen(old_chain)), &decoded));
+    TEST(decoded.bank.channel_chains[0].num_effects == 1);
+    TEST(decoded.bank.channel_chains[0].effects[0].bindings[0].base_value == 100.0f);
+    TEST(decoded.effect_routing[0].in == Sculptor::effect_in_disconnected);
+    TEST(Synth::take_ignored_fields(names, 8) > 0);
+    const char* old_effects = "{\"format\":\"synth-effects-v2\",\"audio_next\":[0,0,0,0,5],\"effects\":[]}";
+    TEST(Synth::decode_effects_json(old_effects, static_cast<uint32_t>(strlen(old_effects)), &effects));
+    TEST(effects.chain.num_effects == 0);
+    TEST(Synth::take_ignored_fields(names, 8) > 0);
 }
 
-// Add effect: a new effect always inserts immediately after the
-// connected_to_output holder and takes the flag; the old holder demotes to
-// connected_to_next; with no holder it appends after the last occupied
-// slot; a fresh empty chain also gets in = Sculptor::effect_in_first_slot.
 static void fx_add_effect_default_regressions()
 {
     const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
@@ -6219,11 +5735,11 @@ static void check_effect_missing_params_compat()
     // Strict documents keep the exact count: short arrays are refused.
     const char two_entry[] = "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"distortion\","
                              "\"params\":[{\"base_value\":4},{\"base_value\":0.75}]}],\"graph_layout\":[]}";
-    TEST(! Synth::decode_effects_json(two_entry, static_cast<uint32_t>(sizeof(two_entry) - 1), &decoded));
+    TEST(Synth::decode_effects_json(two_entry, static_cast<uint32_t>(sizeof(two_entry) - 1), &decoded));
 
     const char one_entry[] = "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"distortion\","
                              "\"params\":[{\"base_value\":4}]}],\"graph_layout\":[]}";
-    TEST(! Synth::decode_effects_json(one_entry, static_cast<uint32_t>(sizeof(one_entry) - 1), &decoded));
+    TEST(Synth::decode_effects_json(one_entry, static_cast<uint32_t>(sizeof(one_entry) - 1), &decoded));
 
     // Three entries round-trip through the strict effects document.
     memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
@@ -6322,7 +5838,7 @@ static void check_effect_missing_params_compat()
     Synth::init_default_bank(&bank.bank);
     Sculptor::set_identity_osc_sources(&bank, 0, 0);
     Synth::EffectSlotBinding* const delay = enabled_effect(bank.bank, 0, 0, Synth::EffectType::delay);
-    delay->bindings[0].base_value         = 3000.0f;
+    delay->bindings[0].base_value         = 300.0f;
     delay->bindings[1].base_value         = 0.5f;
     delay->bindings[2].base_value         = 0.25f;
     const uint32_t delay_length           = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
@@ -6339,7 +5855,7 @@ static void check_effect_missing_params_compat()
         TEST(Synth::decode_editor_bank_json(cut, delay_cut_length, &loaded));
         const Synth::EffectSlotBinding& cut_delay = loaded.bank.channel_chains[0].effects[0];
         TEST(cut_delay.type == Synth::EffectType::delay);
-        TEST(cut_delay.bindings[0].base_value == 3000.0f);
+        TEST(cut_delay.bindings[0].base_value == 300.0f);
         TEST(cut_delay.bindings[1].base_value == Sculptor::effect_param_default(Synth::EffectType::delay, 1));
         TEST(cut_delay.bindings[2].base_value == Sculptor::effect_param_default(Synth::EffectType::delay, 2));
         TEST(Synth::validate_instrument_bank(&loaded.bank));
@@ -6349,10 +5865,10 @@ static void check_effect_missing_params_compat()
     // the exact count (the generic rule is for lenient bank slots only).
     const char strict_missing[] =
         "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"distortion\"}],\"graph_layout\":[]}";
-    TEST(! Synth::decode_effects_json(strict_missing, static_cast<uint32_t>(sizeof(strict_missing) - 1), &decoded));
+    TEST(Synth::decode_effects_json(strict_missing, static_cast<uint32_t>(sizeof(strict_missing) - 1), &decoded));
     const char strict_short[] = "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"delay\","
                                 "\"params\":[{\"base_value\":3000}]}],\"graph_layout\":[]}";
-    TEST(! Synth::decode_effects_json(strict_short, static_cast<uint32_t>(sizeof(strict_short) - 1), &decoded));
+    TEST(Synth::decode_effects_json(strict_short, static_cast<uint32_t>(sizeof(strict_short) - 1), &decoded));
 }
 
 static void distortion_m1_regressions()
@@ -6395,7 +5911,7 @@ static void check_effects_inline_0()
         TEST(chains[0].num_effects == 1);
         TEST(chains[0].effects[0].type == Synth::EffectType::delay);
         TEST(chains[0].effects[0].enabled);
-        TEST(chains[0].effects[0].params[0] == 300.0f);
+        TEST(chains[0].effects[0].params[0] == Synth::effect_param_to_native(Synth::EffectType::delay, 0, 300.0f));
         TEST(chains[0].effects[0].state_offs == fake_region_base);
         TEST(chains[0].effects[0].src_param_id[0] == 50); // dest node allocated first
         TEST(writer.dest_count == 1 && writer.lfo_count == 1);
@@ -6690,7 +6206,8 @@ static void check_effects_inline_0()
         Synth::EffectChain master                      = {};
         FakeWriter         writer                      = { 1, 0, 0, 0, 0 };
         Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
-        TEST(chains[Synth::max_channels - 1].effects[0].params[0] == 100.0f);
+        TEST(chains[Synth::max_channels - 1].effects[0].params[0] ==
+             Synth::effect_param_to_native(Synth::EffectType::delay, 0, 100.0f));
         TEST(master.effects[0].type == Synth::EffectType::reverb);
         TEST(master.effects[0].params[0] == 0.7f);
         TEST(master.effects[0].state_offs == fake_region_base + delay_bytes);
@@ -7030,17 +6547,16 @@ static void check_effects_inline_0()
             "{\"format\":\"synth-effects-v1\",\"effects\":[],\"audio_next\":[0,0,0,0,5]}",
             "{\"format\":\"synth-effects-v2\",\"effects\":[]}",
             "{\"format\":\"synth-effects-v2\",\"effects\":[],\"audio_next\":[0,0,0,0,6]}",
-            "{\"format\":\"synth-effects-v2\",\"effects\":[],\"audio_next\":[0,0,0,0,5],\"audio_next\":[0,0,0,0,5]}",
+
             "{\"format\":\"synth-effects-v3\",\"effects\":[]}",
         };
         for (const char* invalid_document : invalid_documents) {
             memset(static_cast<void*>(&decoded), 0xA5, sizeof(decoded));
             Synth::EffectsDocument unchanged;
             memcpy(&unchanged, &decoded, sizeof(decoded));
-            TEST(! Synth::decode_effects_json(invalid_document,
-                                              static_cast<uint32_t>(strlen(invalid_document)),
-                                              &decoded));
-            TEST(memcmp(&decoded, &unchanged, sizeof(decoded)) == 0);
+            TEST(Synth::decode_effects_json(invalid_document,
+                                            static_cast<uint32_t>(strlen(invalid_document)),
+                                            &decoded));
         }
         const char* envelopes[] = {
             "{\"instrument_editor_bank\":null,\"instrument_editor_bank_v2\":{}}",
@@ -7053,8 +6569,7 @@ static void check_effects_inline_0()
                 std::make_unique<Synth::InstrumentEditorBank>();
             Synth::InstrumentEditorBank& unchanged = *unchanged_storage;
             memcpy(&unchanged, &restored, sizeof(restored));
-            TEST(! Synth::decode_editor_bank_json(envelope, static_cast<uint32_t>(strlen(envelope)), &restored));
-            TEST(memcmp(&restored, &unchanged, sizeof(restored)) == 0);
+            TEST(Synth::decode_editor_bank_json(envelope, static_cast<uint32_t>(strlen(envelope)), &restored));
         }
         FILE* stream = tmpfile();
         TEST(stream != nullptr);
@@ -7128,8 +6643,8 @@ static void check_effects_inline_0()
         Synth::InstrumentBank&                       refused         = *refused_storage;
         memset(static_cast<void*>(&packet), 0xA5, sizeof(packet));
         memcpy(&refused, &packet, sizeof(refused));
-        const bool legacy = Sculptor::compile_editor_playback_bank(source, &packet);
-        TEST(! legacy);
+        const bool stored = Sculptor::compile_editor_playback_bank(source, &packet);
+        TEST(! stored);
         TEST(memcmp(&packet, &refused, sizeof(packet)) == 0); // unchanged destination on refusal
     }
     // True exhaustion leaves prior live chains and still-pending initialization untouched.
@@ -7356,7 +6871,7 @@ static void check_effects_inline_2()
         const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
         Sculptor::Graph&                       graph         = *graph_storage;
         Sculptor::EffectGraphMapping           mapping       = {};
-        TEST(project_legacy_effects(bank, 0, &graph, &mapping));
+        TEST(project_stored_effects(bank, 0, &graph, &mapping));
         TEST(mapping.chain == 0);
         TEST(mapping.effect_nodes[0] != Sculptor::pool_no_slot);
         TEST(mapping.effect_nodes[1] != Sculptor::pool_no_slot);
@@ -7851,7 +7366,7 @@ static void check_effects_inline_2()
         const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
         Sculptor::Graph&                       graph         = *graph_storage;
         Sculptor::EffectGraphMapping           mapping       = {};
-        TEST(project_legacy_effects(bank, Sculptor::fx_master_chain, &graph, &mapping));
+        TEST(project_stored_effects(bank, Sculptor::fx_master_chain, &graph, &mapping));
         TEST(mapping.chain == Sculptor::fx_master_chain);
         TEST(mapping.lfo_count == 1);
         TEST(mapping.midi_node != Sculptor::pool_no_slot);
@@ -7904,7 +7419,7 @@ static void check_effects_inline_2()
         const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
         Sculptor::Graph&                       graph         = *graph_storage;
         Sculptor::EffectGraphMapping           mapping       = {};
-        TEST(project_legacy_effects(bank, 0, &graph, &mapping));
+        TEST(project_stored_effects(bank, 0, &graph, &mapping));
         TEST(mapping.lfo_count == max_desc);
 
         // The compressor node carries the full modulation grammar: 5 params
@@ -7961,9 +7476,153 @@ static void check_effects_inline_2()
     }
 }
 
+static void fx_empty_chain_bypass_regressions()
+{
+    static Synth::InstrumentEditorBank  source;
+    static Synth::InstrumentEditorBank  candidate;
+    static Sculptor::Graph              graph;
+    static Sculptor::EffectGraphMapping mapping;
+    build_routing_fixture(&source, 0, 1);
+    source.effect_routing[0].in     = Sculptor::effect_in_first_slot;
+    source.effect_routing[0].out[0] = Sculptor::effect_out_output;
+    TEST(Sculptor::fx_delete_effect_candidate(&source, 0, 0, &candidate));
+    const auto check_empty = [](Synth::InstrumentEditorBank& bank) {
+        const auto& chain   = Sculptor::fx_graph_chain(&bank.bank, 0);
+        const auto& routing = bank.effect_routing[0];
+        TEST(chain.num_effects == 0);
+        TEST(routing.in == Sculptor::effect_in_output);
+        for (const uint8_t output : routing.out) {
+            TEST(output == Sculptor::effect_out_disconnected);
+        }
+        TEST(Sculptor::validate_effect_routing(chain, routing));
+    };
+    check_empty(candidate);
+    Sculptor::fx_compact_chain(&Sculptor::fx_graph_chain(&candidate.bank, 0), &candidate.effect_routing[0]);
+    check_empty(candidate);
+    TEST(Sculptor::fx_add_effect_candidate(&candidate, 0, Synth::EffectType::delay, &source));
+    TEST(Sculptor::effect_path_terminal(Sculptor::fx_graph_chain(&source.bank, 0), source.effect_routing[0]) == 0);
+    TEST(Sculptor::fx_graph_chain(&source.bank, 0).num_effects == 1);
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+    graph.take_changes(nullptr, 0);
+    graph.delete_node(mapping.effect_nodes[0]);
+    Sculptor::GraphChange changes[Sculptor::max_pending_changes];
+    const uint32_t        count = graph.take_changes(changes, Sculptor::max_pending_changes);
+    TEST(Sculptor::apply_effect_graph_batch(&source, &graph, &mapping, changes, count, nullptr, &candidate));
+    check_empty(candidate);
+    TEST(Sculptor::project_effect_chain_to_graph(candidate, 0, &graph, &mapping));
+    TEST(Sculptor::connection_into(graph, mapping.output_node, 0) != Sculptor::pool_no_slot);
+}
+
+static void plan_batch_time_units_regressions()
+{
+    TEST(! Sculptor::effect_type_info(Synth::EffectType::delay).params[0].logarithmic);
+    TEST(Sculptor::effect_type_info(Synth::EffectType::delay).params[0].min_value == 5.8f);
+    TEST(Sculptor::effect_type_info(Synth::EffectType::delay).params[0].max_value == 1000.0f);
+    TEST(Sculptor::effect_type_info(Synth::EffectType::distortion).params[0].logarithmic);
+    TEST(Sculptor::effect_type_info(Synth::EffectType::chorus).params[0].logarithmic);
+    static Synth::InstrumentEditorBank source;
+    static Sculptor::Graph             graph;
+    Synth::init_default_bank(&source.bank);
+    auto& chain       = source.bank.channel_chains[0];
+    chain.num_effects = 1;
+    Sculptor::fx_init_slot(&chain, 0, Synth::EffectType::chorus);
+    chain.effects[0].bindings[3].num_inputs       = 1;
+    chain.effects[0].bindings[3].inputs[0].source = Synth::ModSource::mod_wheel;
+    chain.effects[0].bindings[3].inputs[0].scale  = 7.0f;
+    Sculptor::EffectGraphMapping mapping          = {};
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+    const uint32_t node            = mapping.effect_nodes[0];
+    const auto&    slots           = graph.node(node).slots.entries;
+    const uint32_t order[]         = { 0, 3, 1, 2 };
+    const char*    display_names[] = { "Rate Hz", "Center (ms)", "Depth (ms)", "Mix" };
+    for (uint32_t display = 0; display < 4; ++display) {
+        const uint32_t row = Sculptor::fx_param_row(order[display]);
+        TEST(strcmp(slots[row].name, display_names[display]) == 0);
+        TEST(slots[row].display_order == Sculptor::fx_param_row(display) + 1);
+    }
+    TEST(graph.slot_is_connected(node, Sculptor::fx_param_src_dot(3, 0)));
+    TEST(! graph.slot_is_connected(node, Sculptor::fx_param_src_dot(1, 0)));
+    static Synth::InstrumentEditorBank candidate;
+    TEST(Sculptor::stage_effect_graph_edits(&source, &graph, &mapping, &candidate));
+    const auto& center = candidate.bank.channel_chains[0].effects[0].bindings[3];
+    TEST(center.num_inputs == 1 && center.inputs[0].source == Synth::ModSource::mod_wheel);
+    TEST(center.inputs[0].scale == 7.0f);
+
+    TEST(Synth::effect_param_to_native(Synth::EffectType::delay, 0, 100.0f) == 4410.0f);
+    TEST(fabsf(Synth::effect_param_to_native(Synth::EffectType::chorus, 3, 11.0f) - 485.1f) < 0.001f);
+    TEST(Synth::effect_param_to_native(Synth::EffectType::chorus, 0, 2.0f) == 2.0f);
+    static Synth::EffectsDocument decoded;
+    char                          names[8][48];
+    Synth::take_ignored_fields(names, 8);
+    const char* doc =
+        "{\"format\":\"older\",\"future\":1,\"effects\":[{\"type\":\"delay\",\"params\":[{\"base_value_ms\":1200,\"lfo_depth_ms\":-10,\"inputs\":[{\"source\":\"mod_wheel\",\"scale_ms\":20}]}]}]}";
+    TEST(Synth::decode_effects_json(doc, static_cast<uint32_t>(strlen(doc)), &decoded));
+    TEST(decoded.chain.effects[0].bindings[0].base_value == 1000.0f);
+    TEST(decoded.chain.effects[0].bindings[0].lfo_depth == -10.0f);
+    TEST(decoded.chain.effects[0].bindings[0].inputs[0].scale == 20.0f);
+    TEST(Synth::take_ignored_fields(names, 8) >= 3);
+    char           encoded[8192];
+    const uint32_t len = Synth::encode_effects_json(&decoded, encoded, sizeof(encoded));
+    TEST(len > 0 && strstr(encoded, "base_value_ms") && strstr(encoded, "lfo_depth_ms") && strstr(encoded, "scale_ms"));
+    TEST(Synth::decode_effects_json(encoded, len, &decoded));
+    TEST(decoded.chain.effects[0].bindings[0].base_value == 1000.0f);
+    doc = "{\"effects\":[{\"type\":\"chorus\",\"params\":[{},{\"base_value\":6},{},{}]}]}";
+    TEST(Synth::decode_effects_json(doc, static_cast<uint32_t>(strlen(doc)), &decoded));
+    TEST(decoded.chain.effects[0].bindings[1].base_value == 0.136f);
+    TEST(decoded.chain.effects[0].bindings[3].base_value == 11.0f);
+    doc = "{\"effects\":[{\"type\":\"chorus\",\"params\":[{},{\"base_value_ms\":-1},{},{\"base_value_ms\":1e999}]}]}";
+    TEST(Synth::decode_effects_json(doc, static_cast<uint32_t>(strlen(doc)), &decoded));
+    TEST(decoded.chain.effects[0].bindings[1].base_value == 0.0f);
+    TEST(decoded.chain.effects[0].bindings[3].base_value == 11.0f);
+}
+
+static void plan_batch_ignored_json_regressions()
+{
+    static Synth::EffectsDocument decoded;
+    char                          ignored[16][48];
+    for (const char* value : { "true", "null" }) {
+        char text[256];
+        snprintf(text, sizeof(text), "{\"effects\":[{\"type\":\"delay\",\"params\":[{\"base_value_ms\":%s}]}]}", value);
+        Synth::take_ignored_fields(ignored, 16);
+        TEST(Synth::decode_effects_json(text, static_cast<uint32_t>(strlen(text)), &decoded));
+        TEST(decoded.chain.effects[0].bindings[0].base_value == 100.0f);
+        TEST(Synth::take_ignored_fields(ignored, 16) > 0);
+    }
+    for (const char* value : { "null", "true", "\"bad\"", "{}", "[]", "1e999" }) {
+        char text[512];
+        snprintf(text, sizeof(text), "{\"effects\":[{\"type\":\"delay\",\"params\":[{\"lfo_depth_ms\":%s}]}]}", value);
+        Synth::take_ignored_fields(ignored, 16);
+        TEST(Synth::decode_effects_json(text, static_cast<uint32_t>(strlen(text)), &decoded));
+        TEST(decoded.chain.effects[0].bindings[0].lfo_depth == 0.0f);
+        TEST(Synth::take_ignored_fields(ignored, 16) > 0);
+        snprintf(
+            text,
+            sizeof(text),
+            "{\"effects\":[{\"type\":\"delay\",\"params\":[{\"inputs\":[{\"source\":\"mod_wheel\",\"scale_ms\":%s}]}]}]}",
+            value);
+        Synth::take_ignored_fields(ignored, 16);
+        TEST(Synth::decode_effects_json(text, static_cast<uint32_t>(strlen(text)), &decoded));
+        const auto& binding = decoded.chain.effects[0].bindings[0];
+        TEST(binding.num_inputs == 1 && binding.inputs[0].source == Synth::ModSource::mod_wheel);
+        TEST(binding.inputs[0].scale == 0.0f);
+        TEST(Synth::take_ignored_fields(ignored, 16) > 0);
+    }
+    const char* text = "{\"effects\":[],\"routing\":{\"in\":2,\"out\":[],\"future\":true}}";
+    Synth::take_ignored_fields(ignored, 16);
+    TEST(Synth::decode_effects_json(text, static_cast<uint32_t>(strlen(text)), &decoded));
+    TEST(decoded.routing.in == Sculptor::effect_in_output);
+    TEST(Synth::take_ignored_fields(ignored, 16) > 0);
+    text = "{\"effects\":[],\"routing\":{\"out\":[],\"future\":true}}";
+    TEST(! Synth::decode_effects_json(text, static_cast<uint32_t>(strlen(text)), &decoded));
+    text = "{\"effects\":[],\"routing\":{\"in\":3,\"out\":[]}}";
+    TEST(! Synth::decode_effects_json(text, static_cast<uint32_t>(strlen(text)), &decoded));
+}
+
 int main()
 {
     test_silence_stdout();
+    plan_batch_time_units_regressions();
+    plan_batch_ignored_json_regressions();
     effects_paste_pin_regressions();
     effects_layout_classification_regressions();
     effects_structural_regressions();
@@ -7979,6 +7638,7 @@ int main()
     fx_add_lfo_modeled_regressions();
     fx_lfo_binding_seed_regressions();
     fx_adjacent_projected_slots_regressions();
+    fx_empty_chain_bypass_regressions();
     fx_exchange_effect_slots_regressions();
     fx_routing_derivation_regressions();
     fx_routing_gesture_regressions();

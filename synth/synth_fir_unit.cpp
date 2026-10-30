@@ -450,7 +450,7 @@ static void osc_fir_slope_seed_regressions()
     }
     // The seed enters the plain descriptor base (base_value +
     // base_extra at the configure_plain call), so every propagate step
-    // restarts from it and the legacy scalar survives indefinitely.
+    // restarts from it and the stored scalar survives indefinitely.
     {
         Synth::ParamDescriptor descs[3]  = {}; // 0 sentinel, 1 slope dest
         Synth::Parameter       params[3] = {};
@@ -1089,7 +1089,7 @@ constexpr bool m2_band_seam_present = m2_has_band_seam<Sculptor::Graph>::value;
 
 constexpr bool m2_band_rows_present = Synth::num_mod_targets == 29;
 
-// The band parameter target indices: band 0 reuses the legacy spread (7) and
+// The band parameter target indices: band 0 reuses the stored spread (7) and
 // slope (11) targets; the 14 appended targets follow at 12..25 in the order
 // band 0 offset/gain, then per band 1..3 offset/spread/gain/slope.
 constexpr uint32_t m2_band0_targets[4] = { 12, 7, 13, 11 };
@@ -1101,7 +1101,7 @@ constexpr uint32_t m2_band_targets[4][4] = {
     { 22, 23, 24, 25 },
 };
 
-// One bandpass layer with the legacy spread/slope state and, when the band
+// One bandpass layer with the stored spread/slope state and, when the band
 // state exists, a band count plus per-band bases and bindings: bands 1..3
 // carry distinct values and the offset row a full binding, and rich_band0
 // binds band 0's offset and gain rows, so the copy, remove and serialization
@@ -1330,7 +1330,7 @@ static uint32_t m2_drain_osc_batch(Synth::InstrumentEditorBank* bank,
 static const char* const band_header_names_m2[4] = { "Band 1", "Band 2", "Band 3", "Band 4" };
 
 // Band 1's header row (label plus its [-]/[+] click slots) nests one
-// level under the Filter Type row (like the legacy Cutoff row), every
+// level under the Filter Type row (like the stored Cutoff row), every
 // existing band projects one uniform 55-slot block with generic
 // parameter labels, and only existing bands project.
 // Low-pass keeps the cutoff and FIR Slope labels.
@@ -1404,7 +1404,7 @@ static void m2_band_layout_regressions()
     }
     TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
 
-    // Low-pass keeps the cutoff and legacy FIR Slope labels at their slots.
+    // Low-pass keeps the cutoff and stored FIR Slope labels at their slots.
     bank.bank.instruments.entries[0].layers[0].fir_type = Synth::fir_lowpass;
     if (reproject_m2_band_graph(&bank, &graph, &mapping)) {
         const Sculptor::Node& lowpass_osc = graph.node(mapping.osc_nodes[0]);
@@ -1412,13 +1412,13 @@ static void m2_band_layout_regressions()
         const uint32_t        slope_slot  = find_nth_osc_slot(lowpass_osc, "FIR Slope", 0);
         TEST(cutoff_slot == 166);
         TEST(slope_slot == 192);
-        // The legacy single-edge rows keep the fix-6 legacy depths: the
+        // The stored single-edge rows keep the fix-6 stored depths: the
         // Cutoff and FIR Slope rows stay one level under Filter Type.
         TEST(lowpass_osc.slots.entries[cutoff_slot].child_row &&
              lowpass_osc.slots.entries[cutoff_slot].child_level == 1);
         TEST(lowpass_osc.slots.entries[slope_slot].child_row && lowpass_osc.slots.entries[slope_slot].child_level == 1);
         // The whole band UI hides for the single-edge filter types (the
-        // legacy cutoff/slope carve-out lives in the composed seam).
+        // stored cutoff/slope carve-out lives in the composed seam).
         for (uint32_t slot = Sculptor::osc_band_first_slot; slot < lowpass_osc.slots.num_allocated; slot++) {
             TEST(Sculptor::osc_band_slot_hidden(graph, mapping.osc_nodes[0], slot));
         }
@@ -1437,7 +1437,7 @@ static void m2_band_layout_regressions()
 
 // C2.1: every existing band is always visible under bandpass (headers,
 // buttons, rows, blocks - no selection concept); the single-edge filter
-// types hide the whole band region, whose legacy carve-out lives in the
+// types hide the whole band region, whose stored carve-out lives in the
 // composed seam.
 template <bool Seam, typename GraphT>
 static void m2_band_visibility_body(GraphT& graph, const uint32_t osc_node, const uint32_t filter_slot)
@@ -2223,8 +2223,8 @@ static void m2_fir_kernel_mirror_regressions()
 // ---- FIR effect multi-band staging, expansion, JSON and remap ----
 static void fir_effect_bands_regressions()
 {
-    // Staging: the legacy single-band form (and the zeroed legacy count) stages
-    // unconditionally with the gain forced to 1.0, so legacy banks keep their
+    // Staging: the stored single-band form (and the zeroed stored count) stages
+    // unconditionally with the gain forced to 1.0, so stored banks keep their
     // bit-exact coefficient entries.
     {
         Synth::FirEffectCoeffEntry entry                                          = {};
@@ -2235,7 +2235,7 @@ static void fir_effect_bands_regressions()
         TEST(entry.bands[0].lowpass_cutoff_freq == Synth::cutoff_hz_to_int(8000.0f));
         TEST(entry.bands[0].highpass_cutoff_freq == 0);
         TEST(entry.bands[0].window_span == Synth::fir_effective_span(100.0f));
-        TEST(entry.bands[0].gain == 1.0f); // the legacy gain stays forced
+        TEST(entry.bands[0].gain == 1.0f); // the stored gain stays forced
         TEST(Synth::stage_fir_effect_coeff_entry(0, 0, 8000.0f, 0.0f, 100.0f, band_params, &entry));
         TEST(entry.band_count == 1);
         TEST(entry.bands[0].gain == 1.0f);
@@ -2357,7 +2357,7 @@ static void fir_effect_bands_regressions()
         TEST(Synth::validate_instrument_bank(&bank));
     }
     // Bank JSON: multi-band FIR slots carry the band count and per-band
-    // bindings; the legacy single-band form encodes exactly as before.
+    // bindings; the stored single-band form encodes exactly as before.
     {
         const std::unique_ptr<FixedArray<char, 65536>> text_storage = std::make_unique<FixedArray<char, 65536>>();
         char (&text)[65536]                                         = text_storage->elements;
@@ -2370,7 +2370,7 @@ static void fir_effect_bands_regressions()
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         build_small_bank_fixture(bank.bank);
         Synth::EffectSlotBinding* const fir = enabled_effect(bank.bank, 0, 0, Synth::EffectType::fir);
-        fir->bindings[2].base_value         = 100.0f; // a valid legacy slope keeps the round trip byte-stable
+        fir->bindings[2].base_value         = 100.0f; // a valid stored slope keeps the round trip byte-stable
         fir->fir_bands.band_count           = 3;
         fir->fir_bands.bands[0].base_value  = 0.5f;
         Synth::EffectParamBinding* band1    = fir->fir_bands.bands + 1;
@@ -2402,7 +2402,7 @@ static void fir_effect_bands_regressions()
         TEST(reencoded == length);
         TEST(memcmp(text, text + length + 1, length) == 0);
     }
-    // The legacy single-band form keeps its zeroed band block through the JSON
+    // The stored single-band form keeps its zeroed band block through the JSON
     // round trip, so byte-comparable bank snapshots survive.
     {
         const std::unique_ptr<FixedArray<char, 65536>> text_storage = std::make_unique<FixedArray<char, 65536>>();
@@ -2490,7 +2490,7 @@ static void fir_effect_bands_regressions()
         TEST(dst.effects[0].fir_bands.bands[5].lfo_desc_id == 0);
         TEST(dst.effects[0].fir_bands.bands[9].lfo_desc_id == 0);
         TEST(dst.effects[0].fir_bands.band_count == 2);
-        // The legacy single-band form zeroes every band binding, including
+        // The stored single-band form zeroes every band binding, including
         // band 0's gain (the staging ignores it at count 1).
         src.effects[0].fir_bands.band_count           = 1;
         src.effects[0].fir_bands.bands[0].lfo_desc_id = 2;
@@ -2501,7 +2501,7 @@ static void fir_effect_bands_regressions()
 
 // Wave-2 band-editor regressions, restored to the pre-M4 contract: no
 // current effect type projects the FIR band region, so a fir node renders
-// exactly its legacy rows (Lowpass Hz, Highpass Hz, FIR Slope, Enabled)
+// exactly its stored rows (Lowpass Hz, Highpass Hz, FIR Slope, Enabled)
 // for every stored band count and every highpass edge. The band machinery
 // stays dormant behind the fx_band_region_projected gate and stays covered
 // at the model and seam level, ready for the future Multi-band FIR effect
@@ -2593,12 +2593,12 @@ static void fir_effect_band_editor_regressions()
         return count - apply_count;
     };
 
-    // Legacy-only projection, pure lowpass: exactly the 33 legacy slots.
+    // stored-only projection, pure lowpass: exactly the 33 stored slots.
     build(1, 0.0f);
     reproject();
     TEST(graph.node(node()).slots.num_allocated == Sculptor::fx_band_first_slot);
 
-    // Legacy-only projection under bandpass-authored state too: the
+    // stored-only projection under bandpass-authored state too: the
     // fx_band_region_projected gate never opens for any current effect
     // type, whatever the stored band count.
     build(1, 200.0f);
@@ -2609,20 +2609,20 @@ static void fir_effect_band_editor_regressions()
     reproject();
     TEST(graph.node(node()).slots.num_allocated == Sculptor::fx_band_first_slot);
 
-    // The legacy rows sit in place, in order, with the legacy renderer
+    // The stored rows sit in place, in order, with the stored renderer
     // line ids: three parameter blocks (row groups 2/3/4, source rows
     // 8..13) then the Enabled row.
     {
         const Sculptor::Node& fir            = graph.node(node());
-        uint32_t              legacy_lowpass = 0;
-        TEST(find_graph_slot(graph, node(), "Lowpass Hz", &legacy_lowpass));
-        TEST(legacy_lowpass == Sculptor::fx_param_row(0));
-        uint32_t legacy_highpass = 0;
-        TEST(find_graph_slot(graph, node(), "Highpass Hz", &legacy_highpass));
-        TEST(legacy_highpass == Sculptor::fx_param_row(1));
-        uint32_t legacy_slope = 0;
-        TEST(find_graph_slot(graph, node(), "FIR Slope", &legacy_slope));
-        TEST(legacy_slope == Sculptor::fx_param_row(2));
+        uint32_t              stored_lowpass = 0;
+        TEST(find_graph_slot(graph, node(), "Lowpass Hz", &stored_lowpass));
+        TEST(stored_lowpass == Sculptor::fx_param_row(0));
+        uint32_t stored_highpass = 0;
+        TEST(find_graph_slot(graph, node(), "Highpass Hz", &stored_highpass));
+        TEST(stored_highpass == Sculptor::fx_param_row(1));
+        uint32_t stored_slope = 0;
+        TEST(find_graph_slot(graph, node(), "FIR Slope", &stored_slope));
+        TEST(stored_slope == Sculptor::fx_param_row(2));
         const Sculptor::Slot& slope = fir.slots.entries[Sculptor::fx_param_row(2)];
         TEST(slope.property_type == Sculptor::PropertyType::integer);
         TEST(slope.int_bounded && slope.real_min == 1.0f && slope.real_max == 100.0f);
@@ -2631,9 +2631,9 @@ static void fir_effect_band_editor_regressions()
         TEST(enabled.property_type == Sculptor::PropertyType::toggle);
     }
 
-    // The display filter answers legacy for fir nodes: the base rows
+    // The display filter answers stored for fir nodes: the base rows
     // always render and their unconnected modulator rows hide, exactly
-    // like the pre-M4 legacy parameter rows.
+    // like the pre-M4 stored parameter rows.
     {
         const Synth::EffectSlotBinding& effect = chain_effects();
         TEST(Sculptor::fx_effect_slot_hidden(effect, graph, node(), Sculptor::fx_param_row(0)) == false);
@@ -2644,7 +2644,7 @@ static void fir_effect_band_editor_regressions()
     }
 
     // The drop-menu and wiring validator decode nothing band-shaped on a
-    // fir node: every projected slot decodes to a legacy row (fir_row 0..2
+    // fir node: every projected slot decodes to a stored row (fir_row 0..2
     // into bindings[]) or to no binding at all (the Enabled row).
     {
         const Synth::EffectSlotBinding& effect = chain_effects();
@@ -2692,7 +2692,7 @@ static void fir_effect_band_editor_regressions()
         reproject();
         TEST(graph.node(node()).slots.num_allocated == Sculptor::fx_band_first_slot);
         // [-] on band 0 removes it: the old band 1 becomes band 0 (its
-        // bytes land in the legacy rows) and the tail block zeroes.
+        // bytes land in the stored rows) and the tail block zeroes.
         Synth::EffectParamBinding old_band1[4];
         memcpy(old_band1, bands + 1, sizeof(old_band1));
         TEST(fx_edit(Sculptor::fx_band_first_slot + 1, press));
@@ -2776,8 +2776,8 @@ static void fir_effect_band_editor_regressions()
     }
 
     // Crossing into bandpass through the Highpass row writes no band-0
-    // seed anymore: the restored legacy behavior leaves fir_bands
-    // untouched, and the projection stays legacy-only.
+    // seed anymore: the restored stored behavior leaves fir_bands
+    // untouched, and the projection stays stored-only.
     build(1, 0.0f);
     {
         Sculptor::PropertyValue highpass = {};
@@ -2867,7 +2867,7 @@ static void fir_effect_band_editor_regressions()
 }
 
 // ---- Seam gates and state-loss regressions ----
-// The plain FIR renders legacy rows only (the band region belongs to
+// The plain FIR renders stored rows only (the band region belongs to
 // fir_multiband, covered by fir_multiband_projection_regressions); these
 // pins keep the plain-FIR dormant seam: the band-aware decode, the
 // out-of-count refusal, the corrupt-count remap clamp and band 0
@@ -2922,7 +2922,7 @@ static void m4_fix3_wave_regressions()
         return Sculptor::fx_graph_chain(&source.bank, 0).effects[0];
     };
 
-    // The display filter answers legacy rows for a five-parameter effect:
+    // The display filter answers stored rows for a five-parameter effect:
     // its rows share the band slot range, so the band region decode is
     // FIR-only.  In particular the fourth parameter's base row must render
     // and its unconnected modulator rows must hide.
@@ -3035,14 +3035,15 @@ static void m4_fix3_wave_regressions()
         TEST(anchor_at + replacement_len + (length - anchor_at - anchor_len) + 1 <= sizeof(text));
         memmove(text + anchor_at + replacement_len, text + anchor_at + anchor_len, length - anchor_at - anchor_len + 1);
         memcpy(text + anchor_at, replacement, replacement_len);
-        TEST(! Synth::decode_editor_bank_json(text, length + replacement_len - anchor_len, &loaded));
+        TEST(Synth::decode_editor_bank_json(text, length + replacement_len - anchor_len, &loaded) ==
+             (band_count == 0 && strstr(replacement, "fir_band0_gain") == nullptr));
     };
     inject_and_refuse("\"fir_band1\"", "\"fir_band3\":{}\"fir_band1\"", 2);
     inject_and_refuse("\"type\":\"fir\"", "\"type\":\"fir\",\"fir_band1\":{}", 0);
     inject_and_refuse("\"type\":\"fir\"", "\"type\":\"fir\",\"fir_band0_gain\":{}", 0);
 
     // Band 0's authored Gain survives the single-band round trip: the key
-    // encodes whenever the binding is non-default, and the legacy zeroed
+    // encodes whenever the binding is non-default, and the stored zeroed
     // block still encodes nothing.
     {
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
@@ -3057,9 +3058,9 @@ static void m4_fix3_wave_regressions()
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         build_small_bank_fixture(bank.bank);
         enabled_effect(bank.bank, 0, 0, Synth::EffectType::fir);
-        const uint32_t legacy_length = Synth::encode_editor_bank_json(&bank, text, sizeof(text));
-        TEST(legacy_length > 0);
-        TEST(strstr(text, "fir_band0_gain") == nullptr); // the legacy zeroed block stays omitted
+        const uint32_t stored_length = Synth::encode_editor_bank_json(&bank, text, sizeof(text));
+        TEST(stored_length > 0);
+        TEST(strstr(text, "fir_band0_gain") == nullptr); // the stored zeroed block stays omitted
     }
 
     // Model-based evidence, not an executable GUI test: the unit
@@ -3101,7 +3102,7 @@ static void fir_multiband_staging_regressions()
 {
     // Identity: the enum trails ring_mod, the param/state budgets match the
     // plain FIR's exactly (the multiband reuses the FIR's shader, state
-    // carve and three legacy scalar slots).
+    // carve and three stored scalar slots).
     TEST(static_cast<uint32_t>(Synth::EffectType::fir_multiband) == Synth::num_effect_types - 1);
     TEST(Synth::get_effect_param_floats(Synth::EffectType::fir_multiband) == 3);
     TEST(Synth::get_effect_state_floats(Synth::EffectType::fir_multiband) ==
@@ -3207,7 +3208,7 @@ static void fir_multiband_staging_regressions()
         Synth::InstrumentBank bank = {};
         build_small_bank_fixture(bank);
         Synth::EffectSlotBinding* const multiband = enabled_effect(bank, 0, 0, Synth::EffectType::fir_multiband);
-        multiband->bindings[0].base_value         = 8000.0f; // the legacy scalars ride along unused
+        multiband->bindings[0].base_value         = 8000.0f; // the stored scalars ride along unused
         multiband->bindings[2].base_value         = 100.0f;
         multiband->fir_bands.band_count           = 2;
         multiband->fir_bands.bands[0].base_value  = 4000.0f; // band 0 center
@@ -3251,7 +3252,7 @@ static void fir_multiband_staging_regressions()
         }
         (void)Synth::take_effect_clear_ranges();
     }
-    // The multiband's legacy bindings are unused: modulation stored there
+    // The multiband's stored bindings are unused: modulation stored there
     // validates but counts nothing, builds no node and resolves no source,
     // while the stored scalar still seeds the instance.
     {
@@ -3326,7 +3327,7 @@ static void fir_multiband_staging_regressions()
     }
 
     // Bank JSON: the multiband slot round trips losslessly in both
-    // directions; the plain FIR's legacy band keys refuse on the new type
+    // directions; the plain FIR's stored band keys refuse on the new type
     // and the new object keys refuse on the plain FIR.
     {
         const std::unique_ptr<FixedArray<char, 65536>> text_storage = std::make_unique<FixedArray<char, 65536>>();
@@ -3404,7 +3405,7 @@ static void fir_multiband_staging_regressions()
         TEST(loaded.bank.channel_chains[0].effects[0].fir_bands.bands[1].base_value == 600.0f);
         // Cross-type band keys are format errors in the strict effects
         // document dialect (the editor bank loader tolerates unknown keys by
-        // design): the plain FIR's legacy keys refuse on a multiband slot,
+        // design): the plain FIR's stored keys refuse on a multiband slot,
         // the multiband's object keys refuse on a plain FIR slot, and an
         // out-of-range band count refuses outright.
         const std::unique_ptr<Synth::EffectsDocument> doc_storage         = std::make_unique<Synth::EffectsDocument>();
@@ -3415,7 +3416,7 @@ static void fir_multiband_staging_regressions()
             effects_clipboard_fixture(&doc, true);
             doc.chain.effects[0].type = type;
             if (type == Synth::EffectType::fir || type == Synth::EffectType::fir_multiband) {
-                doc.chain.effects[0].bindings[2].base_value = 100.0f; // either FIR type needs an integer legacy slope
+                doc.chain.effects[0].bindings[2].base_value = 100.0f; // either FIR type needs an integer stored slope
             }
             const uint32_t n = Synth::encode_effects_json(&doc, text, sizeof(text));
             TEST(n > 0);
@@ -3433,7 +3434,7 @@ static void fir_multiband_staging_regressions()
             TEST(insert_at + injection_len + (n - insert_at) + 1 <= sizeof(text));
             memmove(text + insert_at + injection_len, text + insert_at, n - insert_at + 1);
             memcpy(text + insert_at, injection, injection_len);
-            TEST(! Synth::decode_effects_json(text, n + injection_len, &doc_decoded));
+            TEST(Synth::decode_effects_json(text, n + injection_len, &doc_decoded));
         };
         splice_and_refuse(Synth::EffectType::fir_multiband, "fir_band0_gain");
         splice_and_refuse(Synth::EffectType::fir, "fir_band0");
@@ -3457,8 +3458,8 @@ static void fir_multiband_staging_regressions()
             memcpy(text + insert_at, injection, injection_len);
             TEST(! Synth::decode_editor_bank_json(text, count_length + injection_len, &loaded));
 
-            // The multiband type shares the plain FIR's legacy params shape, so the
-            // slope reread covers it too: a fractional legacy slope (well-formed
+            // The multiband type shares the plain FIR's stored params shape, so the
+            // slope reread covers it too: a fractional stored slope (well-formed
             // for decode_binding's float grammar) refuses the strict document
             // while an integer one decodes.
             {
@@ -3504,7 +3505,7 @@ static void fir_multiband_staging_regressions()
     // The fx_band_region_projected gate opens for the multiband node only:
     // the projected slot count encodes the uniform band region (3 region-base
     // slots + 43 slots per band), while a plain FIR node keeps its
-    // byte-identical 33-slot legacy projection whatever its band state.
+    // byte-identical 33-slot stored projection whatever its band state.
     {
         const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
             std::make_unique<Synth::InstrumentEditorBank>();
@@ -3571,7 +3572,7 @@ static void fir_multiband_staging_regressions()
             return applied;
         };
 
-        // The gate stays shut for the plain FIR: exactly the 33 legacy slots
+        // The gate stays shut for the plain FIR: exactly the 33 stored slots
         // under every stored band count.
         build(Synth::EffectType::fir, 1);
         reproject();
@@ -3619,7 +3620,7 @@ static void fir_multiband_staging_regressions()
         TEST(fx_edit(Sculptor::fx_band_header_slot(Synth::EffectType::fir_multiband, 1) + 1, press)); // [-] on band 1
         TEST(chain_effects().fir_bands.band_count == 1);
         TEST(chain_effects().fir_bands.bands[4].base_value == 0.0f); // the vacated block zeroes
-        // The multiband's deliberate unwired zero gain is not a legacy
+        // The multiband's deliberate unwired zero gain is not a stored
         // marker: a copy out of band 0 keeps the zero gain instead of
         // seeding an audible 1.0 (the plain FIR's copy-out-of-band-0 gain
         // seed is plain-FIR only, matching apply_fx_band_edit).
@@ -3672,7 +3673,7 @@ static void fir_multiband_staging_regressions()
             TEST(converted.fir_bands.bands[0].base_value == (8000.0f + 200.0f) * 0.5f); // center = midpoint
             TEST(converted.fir_bands.bands[1].base_value == 8000.0f - 200.0f);          // spread = width
             TEST(converted.fir_bands.bands[2].base_value == 1.0f);                      // the neutral gain
-            TEST(converted.fir_bands.bands[3].base_value == 55.0f);                     // the legacy slope
+            TEST(converted.fir_bands.bands[3].base_value == 55.0f);                     // the stored slope
         }
         // The pure lowpass (the FIR default state) ports as the lowpass-only
         // case: one active half-open band covering 0..lowpass.
@@ -3686,7 +3687,7 @@ static void fir_multiband_staging_regressions()
             TEST(converted.fir_bands.band_count == 1);
             TEST(converted.fir_bands.bands[0].base_value == 4000.0f); // center = lowpass/2
             TEST(converted.fir_bands.bands[1].base_value == 8000.0f); // spread = lowpass
-            TEST(converted.fir_bands.bands[3].base_value == 55.0f);   // the legacy slope
+            TEST(converted.fir_bands.bands[3].base_value == 55.0f);   // the stored slope
         }
         // Highpass only: one band covering highpass..Nyquist.
         build(Synth::EffectType::fir, 1);
@@ -3872,7 +3873,7 @@ static void fir_multiband_staging_regressions()
 
 // Multi-band FIR node-projection regressions: the multiband node's tree
 // starts at Band 1 right after the Enabled row (no
-// legacy parameter rows project; the region base is type-aware, slot 3),
+// stored parameter rows project; the region base is type-aware, slot 3),
 // one uniform "Band N" header per band at the oscillator band tree's
 // depths, its four rows labeled Center/Spread/Gain/FIR Slope with the
 // bindings' own values (no FIR edge-extreme display rule), and the count
@@ -3928,7 +3929,7 @@ static void fir_multiband_projection_regressions()
 
     // Band 1's block: the "Band 1" header line at the oscillator band
     // tree's depths, its [-]/[+] click slots, and the four uniform rows
-    // carrying the bindings' own values. No legacy parameter rows project:
+    // carrying the bindings' own values. No stored parameter rows project:
     // slot 3 is the band header itself.
     build(2);
     chain_effects().fir_bands.bands[4].base_value = 1200.0f; // band 1's center
@@ -3957,7 +3958,7 @@ static void fir_multiband_projection_regressions()
         }
         // The rows project the bindings' own values: no edge-extreme rule
         // applies to Center/Spread (the FIR zero-cutoff display rule is
-        // legacy-only).
+        // stored-only).
         TEST(effect_node.slots.entries[Sculptor::fx_band_row_slot(multiband, 1, 0)].value.real == 1200.0f);
         TEST(effect_node.slots.entries[Sculptor::fx_band_row_slot(multiband, 1, 1)].value.real == 800.0f);
         TEST(strcmp(effect_node.slots.entries[Sculptor::fx_band_header_slot(multiband, 1)].name, "Band 2") == 0);
@@ -4003,8 +4004,8 @@ static void fir_multiband_projection_regressions()
     TEST(candidate.bank.channel_chains[0].effects[0].fir_bands.bands[2].inputs[0].source ==
          Synth::ModSource::mod_wheel);
 
-    // Modulation stored in the legacy scalar bindings the multiband type
-    // never reads must project no legacy wires: the legacy traversals walk
+    // Modulation stored in the stored scalar bindings the multiband type
+    // never reads must project no stored wires: the stored traversals walk
     // the projected parameter rows (0 for the multiband), so an unused
     // bindings[] entry cannot spill its wires onto the band tree's slots
     // (the old slot arithmetic would land the MIDI wire on Band 1 Center
@@ -4018,11 +4019,11 @@ static void fir_multiband_projection_regressions()
     TEST(! graph.slot_is_connected(node(), Sculptor::fx_param_src_dot(0, 0)));
     TEST(! graph.slot_is_connected(node(), Sculptor::fx_param_lfo_dot(0)));
     // The band rows stay the only wire targets: nothing reaches the band
-    // rows' modulation dots from the unused legacy bindings.
+    // rows' modulation dots from the unused stored bindings.
     TEST(! graph.slot_is_connected(node(), Sculptor::fx_band_row_slot(multiband, 0, 2) + 4u));
     TEST(! graph.slot_is_connected(node(), Sculptor::fx_band_row_slot(multiband, 0, 0) + 4u));
 
-    // Reference discovery follows the same bounds: the unused legacy
+    // Reference discovery follows the same bounds: the unused stored
     // bindings and the inactive band tail hold no LFO and no CC reference
     // for a multiband slot (no orphan LFO node, no CC lock with no visible
     // wire), while the active band bindings still do.
@@ -4086,7 +4087,7 @@ static void fir_multiband_projection_regressions()
 }
 
 // LFO pool reclamation roots and remaps FIR band-row LFO references with the same
-// bounds the validator accepts, and ignores a multiband's unused legacy bindings.
+// bounds the validator accepts, and ignores a multiband's unused stored bindings.
 static void fir_band_lfo_reclaim_regressions()
 {
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
@@ -4128,8 +4129,8 @@ static void fir_band_lfo_reclaim_regressions()
         TEST(Synth::validate_instrument_bank(&bank.bank));
     }
 
-    // An LFO referenced only by a multiband's unused legacy binding is freed and
-    // the stale legacy reference clears instead of dangling.
+    // An LFO referenced only by a multiband's unused stored binding is freed and
+    // the stale stored reference clears instead of dangling.
     {
         Synth::EffectSlotBinding& effect = build(Synth::EffectType::fir_multiband, 1);
         const uint32_t            base   = bank.bank.lfos.num_allocated;
@@ -4273,9 +4274,9 @@ static void install_m2_decoded_instrument(Synth::InstrumentEditorBank* bank, con
     bank->bank.channel_zones[0][0].instrument = 0;
 }
 
-// Legacy backfill expectations ride the decoded-object template parameter so
+// stored backfill expectations ride the decoded-object template parameter so
 // the band member access defers with the band state.
-template <bool M2, typename DecodedT> static void m2_check_legacy_backfill(DecodedT& decoded)
+template <bool M2, typename DecodedT> static void m2_check_stored_backfill(DecodedT& decoded)
 {
     if constexpr (M2) {
         TEST(decoded.instr.layer_count == 2);
@@ -4294,7 +4295,7 @@ template <bool M2, typename DecodedT> static void m2_check_legacy_backfill(Decod
 }
 
 // C2.4: the portable document codec round-trips multi-band state, backfills
-// legacy single-band documents, and keeps the gain-0 and slope conventions.
+// stored single-band documents, and keeps the gain-0 and slope conventions.
 static void m2_document_json_regressions()
 {
     {
@@ -4348,16 +4349,16 @@ static void m2_document_json_regressions()
         TEST(redecoded.instr.layers[0].targets[m2_band_targets[1][2]].envelope_desc_id != 0);
     }
 
-    // Legacy single-band documents backfill one band with Offset 0 and Gain 1
+    // stored single-band documents backfill one band with Offset 0 and Gain 1
     // on every layer.
     {
-        const char* const legacy =
+        const char* const stored =
             "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"base\":0.5}},"
             "{\"wave_a\":\"sawtooth\",\"fir_type\":\"bandpass\",\"fir_pitch_spread\":{\"base\":3}}]}";
         const std::unique_ptr<ClipboardDecode> decoded_storage = std::make_unique<ClipboardDecode>();
         ClipboardDecode&                       decoded         = *decoded_storage;
-        TEST(decode_clipboard(&decoded, legacy, max_portable_records));
-        m2_check_legacy_backfill<m2_band_state_present>(decoded);
+        TEST(decode_clipboard(&decoded, stored, max_portable_records));
+        m2_check_stored_backfill<m2_band_state_present>(decoded);
     }
 
     // An explicitly saved gain-0 band stays gain 0 through the round trip (the
@@ -4647,12 +4648,12 @@ static void m2_library_zone_regressions()
     remove(path);
 }
 
-// Fix-wave regressions: legacy bank backfill, the bandpass engagement gate,
+// Fix-wave regressions: stored bank backfill, the bandpass engagement gate,
 // the fresh bandpass default, the 255 descriptor-id bound, the slope copy on
 // [+] and the always-visible count-bound buttons.
 static void m2_fix_wave_regressions()
 {
-    // A legacy single-band bandpass bank document (no fir_bands, no band
+    // A stored single-band bandpass bank document (no fir_bands, no band
     // keys) decodes with band 0 gain 1.0 and offset 0, and re-saving keeps
     // the audible state; a non-bandpass layer keeps the zeroed gain binding.
     {
@@ -4664,16 +4665,16 @@ static void m2_fix_wave_regressions()
         Synth::Oscillator& layer                        = source.bank.instruments.entries[0].layers[0];
         layer.fir_type                                  = Synth::fir_bandpass;
         layer.targets[Synth::mod_fir_spread].base_value = 3.0f;
-        const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> legacy_storage =
+        const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> stored_storage =
             std::make_unique<FixedArray<char, Synth::library_payload_max>>();
-        char (&legacy)[Synth::library_payload_max] = legacy_storage->elements;
-        const uint32_t legacy_len                  = Synth::encode_editor_bank_json(&source, legacy, sizeof(legacy));
-        TEST(legacy_len > 0);
-        TEST(strstr(legacy, "fir_band0_gain") == nullptr); // the legacy document carries no band keys
+        char (&stored)[Synth::library_payload_max] = stored_storage->elements;
+        const uint32_t stored_len                  = Synth::encode_editor_bank_json(&source, stored, sizeof(stored));
+        TEST(stored_len > 0);
+        TEST(strstr(stored, "fir_band0_gain") == nullptr); // the stored document carries no band keys
         const std::unique_ptr<Synth::InstrumentEditorBank> loaded_storage =
             std::make_unique<Synth::InstrumentEditorBank>();
         Synth::InstrumentEditorBank& loaded = *loaded_storage;
-        TEST(Synth::decode_editor_bank_json(legacy, legacy_len, &loaded));
+        TEST(Synth::decode_editor_bank_json(stored, stored_len, &loaded));
         const Synth::Oscillator& decoded = loaded.bank.instruments.entries[0].layers[0];
         TEST(decoded.fir_band_count == 1);
         TEST(decoded.targets[Synth::mod_fir_band0_gain].base_value == 1.0f);
@@ -4690,15 +4691,15 @@ static void m2_fix_wave_regressions()
         Synth::InstrumentEditorBank& source = *source_storage;
         Synth::init_default_bank(&source.bank);
         source.bank.channel_enabled[0] = 1;
-        const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> legacy_off_storage =
+        const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> stored_off_storage =
             std::make_unique<FixedArray<char, Synth::library_payload_max>>();
-        char (&legacy_off)[Synth::library_payload_max] = legacy_off_storage->elements;
-        const uint32_t legacy_off_len = Synth::encode_editor_bank_json(&source, legacy_off, sizeof(legacy_off));
-        TEST(legacy_off_len > 0);
+        char (&stored_off)[Synth::library_payload_max] = stored_off_storage->elements;
+        const uint32_t stored_off_len = Synth::encode_editor_bank_json(&source, stored_off, sizeof(stored_off));
+        TEST(stored_off_len > 0);
         const std::unique_ptr<Synth::InstrumentEditorBank> loaded_storage =
             std::make_unique<Synth::InstrumentEditorBank>();
         Synth::InstrumentEditorBank& loaded = *loaded_storage;
-        TEST(Synth::decode_editor_bank_json(legacy_off, legacy_off_len, &loaded));
+        TEST(Synth::decode_editor_bank_json(stored_off, stored_off_len, &loaded));
         TEST(loaded.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_band0_gain].base_value == 0.0f);
     }
     // Staging mirror of the engagement rules: any band with positive
@@ -4852,7 +4853,7 @@ static void m2_fix_wave_regressions()
 static void m2_fix2_wave_regressions()
 {
     // The composed render-visibility seam.  Under the single-edge filter
-    // types the legacy cutoff and FIR Slope rows keep showing while the
+    // types the stored cutoff and FIR Slope rows keep showing while the
     // band UI hides wholesale; under bandpass they are band 0's rows and
     // every existing band's block shows alongside them.
     {
@@ -4873,7 +4874,7 @@ static void m2_fix2_wave_regressions()
             // Bandpass: band 1's whole block shows, header and buttons included.
             TEST(! hidden(150) && ! hidden(151) && ! hidden(152));
             TEST(! hidden(153) && ! hidden(166) && ! hidden(179) && ! hidden(192));
-            // The single-edge filter types keep the legacy cutoff and FIR
+            // The single-edge filter types keep the stored cutoff and FIR
             // Slope rows visible while the band UI hides wholesale.
             for (uint32_t type = 0; type < Synth::num_filter_types; type++) {
                 if (type == static_cast<uint32_t>(Synth::fir_bandpass)) {
@@ -4927,8 +4928,8 @@ static void m2_fix2_wave_regressions()
         TEST(memcmp(text, again, text_len) == 0);
     }
     // The empty-block emission is a bandpass-only policy: a non-bandpass
-    // layer with a retained fir_band_count > 1 (legacy or hand-edited)
-    // keeps the legacy serialization, so its zeroed unwired band gain
+    // layer with a retained fir_band_count > 1 (stored or hand-edited)
+    // keeps the stored serialization, so its zeroed unwired band gain
     // stays omitted and the document round trips byte-stable.
     {
         const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =

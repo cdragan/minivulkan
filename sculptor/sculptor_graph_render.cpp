@@ -15,8 +15,6 @@
 #include <float.h>
 #include <math.h>
 
-namespace {
-
 using Sculptor::ChangeKind;
 using Sculptor::graph_grid_axis_cells;
 using Sculptor::graph_grid_spacing;
@@ -55,7 +53,7 @@ static char rename_edit_buffer[sizeof(Sculptor::Node::name) + 1] = {};
 // refills the buffer per receiver node.  One buffer serves the whole draw pass.
 static bool selected_source_marks[Sculptor::max_node_slots] = {};
 
-ImU32 to_imgui(uint32_t packed)
+static ImU32 to_imgui(uint32_t packed)
 {
     return IM_COL32((packed >> 24) & 0xFFu, (packed >> 16) & 0xFFu, (packed >> 8) & 0xFFu, packed & 0xFFu);
 }
@@ -84,12 +82,10 @@ static void pop_zoom_font(float previous_scale)
 
 // Draw-list text at zoom size: ImGui 1.89 stretches the baked glyphs when
 // AddText gets a size other than the font's baked size.
-void add_text_scaled(ImDrawList* draw_list, vmath::vec2 pos, float scale, ImU32 color, const char* text)
+static void add_text_scaled(ImDrawList* draw_list, vmath::vec2 pos, float scale, ImU32 color, const char* text)
 {
     draw_list->AddText(ImGui::GetFont(), ImGui::GetFontSize() * scale, ImVec2(pos.x, pos.y), color, text);
 }
-
-} // namespace
 
 // A two-option list renders as a label+radio pair, wider than the fixed
 // property widget column: reserve its measured width so the pair never
@@ -326,9 +322,10 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
 
     // Hit tracking for the press handler at the end: topmost node wins, so
     // later nodes overwrite earlier hits.
-    bool     node_hit  = false;
-    uint32_t hit_node  = pool_no_slot;
-    bool     title_hit = false;
+    bool     node_hit   = false;
+    uint32_t hit_node   = pool_no_slot;
+    bool     resize_hit = false;
+    bool     title_hit  = false;
 
     // Hover text of the slot under the mouse, recorded while the node draw
     // loop runs and shown once after the pop; null shows nothing.
@@ -421,13 +418,29 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         for (uint32_t g = 0; g < 256; ++g) {
             group_line[g] = -1;
         }
-        uint32_t num_lines = 0;
-
+        uint32_t display_slots[max_node_slots];
+        uint32_t num_display_slots = 0;
         for (uint32_t slot_idx = 0; slot_idx < max_node_slots; ++slot_idx) {
-            if (! node.slots.is_occupied(slot_idx)) {
+            if (! node.slots.is_occupied(slot_idx))
                 continue;
+            const uint32_t order  = node.slots.entries[slot_idx].display_order;
+            const uint32_t rank   = order ? order - 1 : slot_idx;
+            uint32_t       insert = num_display_slots;
+            while (insert > 0) {
+                const uint32_t previous       = display_slots[insert - 1];
+                const uint32_t previous_order = node.slots.entries[previous].display_order;
+                if ((previous_order ? previous_order - 1 : previous) <= rank)
+                    break;
+                display_slots[insert] = previous;
+                --insert;
             }
-            const Slot& slot = node.slots.entries[slot_idx];
+            display_slots[insert] = slot_idx;
+            ++num_display_slots;
+        }
+        uint32_t num_lines = 0;
+        for (uint32_t display = 0; display < num_display_slots; ++display) {
+            const uint32_t slot_idx = display_slots[display];
+            const Slot&    slot     = node.slots.entries[slot_idx];
 
             // Display-filtered slots render nothing: no line, no dot,
             // no hit target (live connection-derived row visibility).
@@ -816,23 +829,29 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                     widget_x = is_plus ? col_right - button_size : col_right - 2.0f * button_size - 4.0f * render_scale;
                 }
                 else {
-                    widget_x = line_prop < 8 ? rect_min.x + value_col[line_prop] * render_scale : min_widget_x;
+                    widget_x = node.resizable && slot.property_type == PropertyType::real ? min_widget_x
+                               : line_prop < 8 ? rect_min.x + value_col[line_prop] * render_scale
+                                               : min_widget_x;
                     if (widget_x < min_widget_x) {
                         widget_x = min_widget_x;
                     }
                 }
-                const float widget_y = y_center - frame_h * render_scale * 0.5f;
+                const float widget_y     = y_center - frame_h * render_scale * 0.5f;
+                float       widget_width = slot_widget_w(slot) * render_scale;
+                if (node.resizable && slot.property_type == PropertyType::real) {
+                    const float available = rect_max.x - pad * render_scale - widget_x;
+                    widget_width          = fmaxf(1.0f, fminf(available, widget_width));
+                }
                 // Every property slot owns the same widget rectangle: labels
                 // may be empty (the unlabeled envelope-depth slider, the Op
                 // lists), so the widget itself must carry the hover text.
-                mark_hovered_tooltip(
-                    mouse_screen,
-                    vmath::vec2(widget_x, widget_y),
-                    vmath::vec2(widget_x + slot_widget_w(slot) * render_scale, widget_y + frame_h * render_scale),
-                    slot,
-                    is_ghost,
-                    &frame_tooltip);
-                cursor = widget_x + slot_widget_w(slot) * render_scale;
+                mark_hovered_tooltip(mouse_screen,
+                                     vmath::vec2(widget_x, widget_y),
+                                     vmath::vec2(widget_x + widget_width, widget_y + frame_h * render_scale),
+                                     slot,
+                                     is_ghost,
+                                     &frame_tooltip);
+                cursor = widget_x + widget_width;
                 ++line_prop;
                 {
                     const bool connected = slot_is_connected(node_idx, slot_idx);
@@ -871,7 +890,6 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                     }
 
                     ImGui::PushID(static_cast<int>(node_idx * max_node_slots + slot_idx));
-                    const float widget_width        = slot_widget_w(slot) * render_scale;
                     const float previous_font_scale = push_zoom_font(render_scale);
                     ImGui::SetCursorScreenPos(ImVec2(widget_x, widget_y));
                     ImGui::PushItemWidth(widget_width);
@@ -1037,9 +1055,12 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         // Hit tracking: topmost (latest drawn) node wins.  Ghost nodes are
         // placed by the click handler below, never dragged.
         if (! is_ghost && in_rect(mouse_screen, rect_min, rect_max)) {
-            node_hit  = true;
-            hit_node  = node_idx;
-            title_hit = mouse_screen.y <= rect_min.y + title_h + pad * render_scale;
+            node_hit   = true;
+            hit_node   = node_idx;
+            title_hit  = mouse_screen.y <= rect_min.y + title_h + pad * render_scale;
+            resize_hit = node.resizable && mouse_screen.x >= rect_max.x - 8.0f * render_scale;
+            if (resize_hit)
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
         }
     }
 
@@ -1210,6 +1231,17 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
     }
 
     switch (interaction) {
+        case Interaction::resizing_node: {
+            if (! io.MouseDown[0]) {
+                interaction  = Interaction::idle;
+                resized_node = pool_no_slot;
+            }
+            else if (resized_node != pool_no_slot && nodes.is_occupied(resized_node)) {
+                Node& node                  = nodes.entries[resized_node];
+                node.content_width_override = fmaxf(240.0f, mouse_point.x - node.position.x);
+            }
+            break;
+        }
         case Interaction::dragging_node: {
             if (! io.MouseDown[0]) {
                 // A press on the title without movement becomes a rename.
@@ -1455,7 +1487,11 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         }
         else if (! ImGui::IsAnyItemHovered()) {
             if (node_hit) {
-                if (io.KeyShift) {
+                if (resize_hit) {
+                    resized_node = hit_node;
+                    interaction  = Interaction::resizing_node;
+                }
+                else if (io.KeyShift) {
                     // Shift-click toggles the node in or out of the selection
                     // without starting a drag.
                     set_selected(hit_node, ! is_selected(hit_node));
@@ -1509,9 +1545,10 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         const float mid_dy = mouse_screen.y - mid.y;
         const bool  mid_hovered =
             mouse_in_widget && mid_dx * mid_dx + mid_dy * mid_dy <= dot_pick_radius * dot_pick_radius;
-        const bool dead = input_dead(connection.input);
-        const ImU32 line_color =
-            to_imgui(mid_hovered ? colors_.connector_hover : dead ? colors_.property_connected_value : colors_.connection);
+        const bool  dead       = input_dead(connection.input);
+        const ImU32 line_color = to_imgui(mid_hovered ? colors_.connector_hover
+                                          : dead      ? colors_.property_connected_value
+                                                      : colors_.connection);
         draw_list->AddBezierCubic(ImVec2(p0.x, p0.y),
                                   ImVec2(p1.x, p1.y),
                                   ImVec2(p2.x, p2.y),

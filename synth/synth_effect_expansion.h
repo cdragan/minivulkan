@@ -11,7 +11,7 @@
 namespace Synth {
 
 // Per-band live values for a FIR effect instance, in FirEffectBands index order.  A
-// plain FIR instance keeps the legacy order: index 0 is band 0's gain, then bands 1..3
+// plain FIR instance keeps the stored order: index 0 is band 0's gain, then bands 1..3
 // each carry lowpass, highpass, gain and slope.  A fir_multiband instance reads the
 // same array uniformly: band b at 4 * b + (0 center, 1 spread, 2 gain, 3 slope).
 // src_param_id is the resolved modulation node (0 = unmodulated constant).
@@ -34,10 +34,10 @@ struct EffectInstance {
     // The slot's saved checkbox bit as committed.  An unwired instance's
     // live decision reads this, so a checkbox toggle crossing a publish
     // stays visible as an off->on transition at the runtime control point.
-    bool     saved_enabled;
-    float    params[max_effect_param_floats];
-    uint32_t state_offs; // byte offset into the device data buffer; 0 when stateless
-    uint16_t src_param_id[max_effect_param_floats];
+    bool                saved_enabled;
+    float               params[max_effect_param_floats];
+    uint32_t            state_offs; // byte offset into the device data buffer; 0 when stateless
+    uint16_t            src_param_id[max_effect_param_floats];
     FirEffectBandValues fir_bands; // FIR effect only; refreshed like params
     // Resolved leaf parameter id of the slot's wired enable routing (0 =
     // unwired, the saved checkbox alone decides).  Filled at commit through

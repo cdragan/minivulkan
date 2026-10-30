@@ -125,7 +125,7 @@ void Synth::remap_effect_chain(const EffectChainBinding& src, const uint16_t* lf
                sizeof(EffectParamBinding) * (max_effect_param_floats - num_params));
 
         // FIR band bindings remap through the same lookup.  Dormant bands (beyond
-        // the active count, or all of them on the legacy single-band form) zero
+        // the active count, or all of them on the stored single-band form) zero
         // like the params tail rather than trust stale bytes.
         EffectSlotBinding& slot = dst->effects[effect];
         // The count byte travels unvalidated between banks, so the clamp

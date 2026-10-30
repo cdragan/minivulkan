@@ -49,9 +49,10 @@ struct Slot {
     float         real_min;         // bounded reals and bounded integer sliders clamp to [real_min, real_max]
     float         real_max;
     bool          real_bounded;
-    bool          int_bounded;      // integer slots render as a slider clamped to [real_min, real_max]
-    bool          real_logarithmic; // bounded slider uses a logarithmic curve
-    bool          drop_menu;        // release-over-empty-canvas opens the caller creation menu (projection state)
+    bool          int_bounded;          // integer slots render as a slider clamped to [real_min, real_max]
+    bool          real_logarithmic : 1; // bounded slider uses a logarithmic curve
+    bool          drop_menu : 1;        // release-over-empty-canvas opens the caller creation menu (projection state)
+    uint8_t       display_order;        // 0 = slot order; otherwise display position plus one
     char          list_options[8][32];
     const char*   tooltip; // hover text of the row; null = no tooltip
 };
@@ -137,6 +138,7 @@ struct Node {
     Pool<Slot, max_node_slots> slots;      // num_allocated = slot count
     StateWidgetCallback        state_widget; // optional, may be null
     void*                      state_widget_data;
+    bool                       resizable = false;
 };
 
 // Worst-case bound node population: one input node for six MIDI source
@@ -309,6 +311,24 @@ class Graph {
 public:
     Graph() = default;
 
+    void get_view(vmath::vec2* origin, float* scale) const
+    {
+        *origin = view_origin;
+        *scale  = zoom;
+    }
+
+    void set_view(vmath::vec2 origin, float scale)
+    {
+        view_origin = origin;
+        zoom        = scale;
+    }
+
+    void set_node_resizable(uint32_t node_idx)
+    {
+        if (node_occupied(node_idx))
+            nodes.entries[node_idx].resizable = true;
+    }
+
     // Node management (thin wrappers over Pool::allocate/free)
     uint32_t create_node(const char* name, vmath::vec2 position);
     // Renames a node (the projection assigns deterministic parameter names
@@ -472,6 +492,8 @@ public:
     // sparse after deletions, so callers enumerate 0..max_connections-1 with
     // this guard instead of assuming a dense 0..connection_count()-1 range.
     bool connection_occupied(uint32_t connection_idx) const;
+
+    void set_slot_display_order(uint32_t node_idx, uint32_t slot_idx, uint8_t order);
 
     // A row's knobs are inert while the row's input is unconnected.
     void set_slot_edit_disabled(uint32_t node_idx, uint32_t slot_idx, bool disabled);
@@ -643,8 +665,10 @@ private:
         retargeting   = 5, // dragging one end of an existing connection
         rubber_band   = 6, // Ctrl + drag selection rectangle on empty canvas
         drop_menu     = 7, // creation menu open after a drop on empty canvas
+        resizing_node = 8,
     };
-    Interaction interaction = Interaction::idle;
+    Interaction interaction  = Interaction::idle;
+    uint32_t    resized_node = pool_no_slot;
     uint32_t    dragged_node;
     uint32_t    renaming_node;
     bool        renaming_focus   = false; //  first frame of rename: set keyboard focus

@@ -48,8 +48,8 @@ bool Synth::stage_fir_effect_coeff_entry(const uint32_t       taps_offs,
     *entry           = FirEffectCoeffEntry();
     entry->taps_offs = taps_offs;
 
-    // The legacy single band stages unconditionally with the gain forced to 1.0, so
-    // legacy banks keep their bit-exact staging.
+    // The stored single band stages unconditionally with the gain forced to 1.0, so
+    // stored banks keep their bit-exact staging.
     if (band_count <= 1) {
         entry->band_count                    = 1;
         entry->bands[0].lowpass_cutoff_freq  = cutoff_hz_to_int(band0_lowpass_hz);
@@ -61,14 +61,14 @@ bool Synth::stage_fir_effect_coeff_entry(const uint32_t       taps_offs,
 
     uint32_t num_bands = 0;
     for (uint32_t band = 0; band < max_fir_effect_bands && band < band_count; band++) {
-        // Band 0's edges and slope stay in the slot's legacy scalar params; its gain sits at
+        // Band 0's edges and slope stay in the slot's stored scalar params; its gain sits at
         // band_params[0].  Bands 1..3 carry all four values in FirEffectBands order.
         const uint32_t band_base     = band == 0 ? 0 : 1 + (band - 1) * 4;
         const float    lowpass_hz    = band == 0 ? band0_lowpass_hz : band_params[band_base + 0];
         const float    highpass_hz   = band == 0 ? band0_highpass_hz : band_params[band_base + 1];
         const float    slope_percent = band == 0 ? band0_slope_percent : band_params[band_base + 3];
         float          gain          = band == 0 ? band_params[0] : band_params[band_base + 2];
-        // Band 0 keeps the legacy edges, so a pure lowpass with the highpass
+        // Band 0 keeps the stored edges, so a pure lowpass with the highpass
         // absent stays active (the ruled inactivity test applies to bands 1..3,
         // which need both edges present and ordered).
         const bool band_active =
@@ -242,7 +242,7 @@ uint32_t Synth::get_effect_param_floats(Synth::EffectType type)
         case Synth::EffectType::delay:
             return 3;
         case Synth::EffectType::chorus:
-            return 3;
+            return 4;
         case Synth::EffectType::reverb:
             return 3;
         case Synth::EffectType::compressor:
@@ -250,7 +250,7 @@ uint32_t Synth::get_effect_param_floats(Synth::EffectType type)
         case Synth::EffectType::fir:
             return 3; // lowpass cutoff Hz, highpass cutoff Hz, FIR slope percent
         case Synth::EffectType::fir_multiband:
-            // The legacy FIR scalars ride along unused (the uniform bands carry
+            // The stored FIR scalars ride along unused (the uniform bands carry
             // center/spread/gain/slope in FirEffectBands), so the slot and
             // document shape match the plain FIR's exactly.
             return 3;

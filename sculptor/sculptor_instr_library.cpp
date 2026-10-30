@@ -14,17 +14,15 @@
 #include <stdio.h>
 #include <string.h>
 
-namespace {
 constexpr uint32_t library_file_magic = 0x42494C49;
 
-char                         library_transfer_text[128 * 1024];
-Synth::Instrument            library_transfer_decoded;
-Synth::EnvelopeDescriptor    library_transfer_envs[Synth::instrument_max_envelopes];
-Synth::LFODescriptor         library_transfer_lfos[Synth::instrument_max_lfos];
-Synth::InstrumentGraphLayout library_transfer_layout[Synth::instrument_graph_layout_capacity];
+static char                         library_transfer_text[128 * 1024];
+static Synth::Instrument            library_transfer_decoded;
+static Synth::EnvelopeDescriptor    library_transfer_envs[Synth::instrument_max_envelopes];
+static Synth::LFODescriptor         library_transfer_lfos[Synth::instrument_max_lfos];
+static Synth::InstrumentGraphLayout library_transfer_layout[Synth::instrument_graph_layout_capacity];
 
-Synth::InstrumentEditorBank library_load_candidate;
-} // namespace
+static Synth::InstrumentEditorBank library_load_candidate;
 
 struct RecordHeader {
     char     category[Synth::library_category_len];
@@ -304,7 +302,7 @@ static bool transfer_zone_layout(const Synth::InstrumentEditorBank& source,
         const uint16_t doc_id = env_doc_ids[position];
 
         // A bound keeps a corrupt document id from indexing past the map;
-        // a missed or legacy id-less position stays 0 and append refuses a
+        // a missed or stored id-less position stays 0 and append refuses a
         // record referencing it.
         if (doc_id && doc_id <= Synth::max_envelopes)
             env_pos_slots[position] = env_ids[doc_id - 1];

@@ -2,12 +2,13 @@
 	"$schema": "http://json-schema.org/draft-07/schema#",
 	"$id": "synth-instrument-v1",
 	"title": "Synth instrument document",
-	"description": "One instrument for the sculptor synth, written for humans and LLMs. Units are musical: times in seconds, LFO rates in Hz, pitches in semitones, amounts 0..1. Paste into a zone with the zone right-click menu's 'Paste from Clipboard'. Copy an existing zone with 'Copy to Clipboard' to see a real document. A document is rejected whole (nothing changes) when a field is unknown or out of range, or when a required field is missing. Omitted optional fields have working defaults; nested objects must provide their own required fields. The bank's channel and master effect chains and free-standing parameters are outside this format on purpose: a document covers the instrument only.",
+    "description": "One instrument for the sculptor synth, written for humans and LLMs. Units are musical: times in seconds, LFO rates in Hz, pitches in semitones, amounts 0..1. Paste into a zone with the zone right-click menu's 'Paste from Clipboard'. Copy an existing zone with 'Copy to Clipboard' to see a real document. Unknown fields and older format tags are ignored with a visible warning. Malformed JSON, bank invariant violations and invalid required fields remain errors. Omitted optional fields have working defaults; nested objects must provide their own required fields. The bank's channel and master effect chains and free-standing parameters are outside this format on purpose: a document covers the instrument only.",
 	"type": "object",
 	"properties": {
+    "pitch_bend_lock": { "type": "boolean", "default": true, "description": "Capture pitch bend when the voice starts release (pedal-up or timed auto-release included)." },
 		"format": {
 			"const": "synth-instrument-v1",
-			"description": "Required document type and version identifier. The v1 decoder refuses any other value."
+            "description": "Document format identifier; writer emits synth-instrument-v1 and older values warn but do not block loading."
 		},
 		"note_skew_semitones": {
 			"type": "number",
@@ -28,7 +29,7 @@
 			"minimum": 0,
 			"maximum": 3600,
 			"default": 0,
-			"description": "Sustain decay length: once a layer's volume envelope enters its sustain span, the whole volume decays exponentially toward silence over this many seconds, through the release as well.  0 keeps the legacy hold/loop behavior."
+            "description": "Sustain decay length: once a layer's volume envelope enters its sustain span, the whole volume decays exponentially toward silence over this many seconds, through the release as well.  0 keeps the stored hold/loop behavior."
 		},
 		"voices": {
 			"type": "string",
@@ -198,7 +199,7 @@
 		"mod_target": {
 			"type": "string",
 			"enum": ["volume", "pitch", "panning", "duty_a", "duty_b", "osc_mix", "fm_index", "fir_pitch_spread", "fm_ratio", "pad_tone_a", "pad_tone_b", "fir_slope", "fir_band0_offset", "fir_band0_gain", "fir_band1_offset", "fir_band1_spread", "fir_band1_gain", "fir_band1_slope", "fir_band2_offset", "fir_band2_spread", "fir_band2_gain", "fir_band2_slope", "fir_band3_offset", "fir_band3_spread", "fir_band3_gain", "fir_band3_slope", "string_damping", "string_release_damping", "string_dispersion"],
-			"description": "Modulated quantities. Units: volume, panning (0.5 = center), duty_a/duty_b, osc_mix and fm_index (1.0 = full depth) are 0..1; pitch is -24..24 semitones; fir_pitch_spread depends on the layer fir_type: bandpass = spread in semitones 0..36 around the note pitch, one band of up to four (fir_bands); lowpass and highpass = fixed cutoff in Hz 0..22050 with no key tracking, 0 = the edge-off bypassed state; a bandpass bypasses only while every band's spread is zero, so a zero band 0 spread with a positive higher-band spread still filters; fm_ratio is the ratio, slider-bounded 0.125..8 (0 stays bank-legal as the legacy unset carrier value). Only 'volume' defaults to 1.0 and 'panning' to 0.5, fm_ratio inherits the layer's legacy mod_ratio when its block is absent, and every other base defaults to 0. pad_tone_a/pad_tone_b is the per-oscillator pad spectral tilt in -1..+1: the harmonic exponent is 1 + value (0 = saw-like 1/n spectrum, +1 = mellow 1/n^2, -1 = flat/brightest), inert for non-pad waves. string_damping/string_release_damping and string_dispersion are 0..1 (0 = natural decay) and inert for non-string waves. fir_slope is the FIR window slope as an integer percent 1..100; an unrouted layer carries it in the layer's fir_slope scalar, a routed one in the target block's base."
+            "description": "Modulated quantities. Units: volume, panning (0.5 = center), duty_a/duty_b, osc_mix and fm_index (1.0 = full depth) are 0..1; pitch is -24..24 semitones; fir_pitch_spread depends on the layer fir_type: bandpass = spread in semitones 0..36 around the note pitch, one band of up to four (fir_bands); lowpass and highpass = fixed cutoff in Hz 0..22050 with no key tracking, 0 = the edge-off bypassed state; a bandpass bypasses only while every band's spread is zero, so a zero band 0 spread with a positive higher-band spread still filters; fm_ratio is the ratio, slider-bounded 0.125..8 (0 stays bank-legal as the stored unset carrier value). Only 'volume' defaults to 1.0 and 'panning' to 0.5, fm_ratio inherits the layer's stored mod_ratio when its block is absent, and every other base defaults to 0. pad_tone_a/pad_tone_b is the per-oscillator pad spectral tilt in -1..+1: the harmonic exponent is 1 + value (0 = saw-like 1/n spectrum, +1 = mellow 1/n^2, -1 = flat/brightest), inert for non-pad waves. string_damping/string_release_damping and string_dispersion are 0..1 (0 = natural decay) and inert for non-string waves. fir_slope is the FIR window slope as an integer percent 1..100; an unrouted layer carries it in the layer's fir_slope scalar, a routed one in the target block's base."
 		},
 		"mod_source": {
 			"type": "string",
@@ -249,7 +250,7 @@
 			},
 				"fir_bands": {
         "type": "integer", "minimum": 1, "maximum": 4,
-        "description": "Active bandpass band count; absent decodes as the legacy single band. Bands 1..3 state their four parameters as fir_bandN_offset/spread/gain/slope target blocks; band 0 reuses fir_pitch_spread and fir_slope and adds fir_band0_offset/fir_band0_gain. A band whose block is absent decodes its defaults (offset 0, spread 0, gain 1, slope 100 for bands 1..3); a present block with an omitted base decodes 0, so an explicitly saved gain-0 band stays inactive instead of reloading as the 1.0 default."
+        "description": "Active bandpass band count; absent decodes as the stored single band. Bands 1..3 state their four parameters as fir_bandN_offset/spread/gain/slope target blocks; band 0 reuses fir_pitch_spread and fir_slope and adds fir_band0_offset/fir_band0_gain. A band whose block is absent decodes its defaults (offset 0, spread 0, gain 1, slope 100 for bands 1..3); a present block with an omitted base decodes 0, so an explicitly saved gain-0 band stays inactive instead of reloading as the 1.0 default."
       },
 				"fir_type": {
 					"type": "string",
@@ -310,7 +311,7 @@
 			"properties": {
 				"base": {
 					"type": "number",
-					"description": "The value in the target's units (see mod_target). Defaults: volume 1.0, panning 0.5, fm_ratio 1.0, everything else 0. The fm_ratio default applies on layer 0, whose targets are pre-seeded to these defaults, and on any layer whose fm_ratio block states sources without base; a later-layer fm_ratio block that states neither base nor sources keeps the zeroed binding; a wholly absent fm_ratio block instead inherits the layer's legacy mod_ratio scalar (see mod_target)."
+                    "description": "The value in the target's units (see mod_target). Defaults: volume 1.0, panning 0.5, fm_ratio 1.0, everything else 0. The fm_ratio default applies on layer 0, whose targets are pre-seeded to these defaults, and on any layer whose fm_ratio block states sources without base; a later-layer fm_ratio block that states neither base nor sources keeps the zeroed binding; a wholly absent fm_ratio block instead inherits the layer's stored mod_ratio scalar (see mod_target)."
 				},
 				"envelope": { "$ref": "#/definitions/envelope" },
 				"lfo": { "$ref": "#/definitions/lfo" },
@@ -374,7 +375,7 @@
 					"minimum": 0,
 					"maximum": 1,
 					"default": 0,
-					"description": "Multi-point sustain spans bounce between their ends instead of looping back to the span start; requires more than one point in the span.  0 keeps the legacy loop."
+                    "description": "Multi-point sustain spans bounce between their ends instead of looping back to the span start; requires more than one point in the span.  0 keeps the stored loop."
 				},
 				"quick_release": {
 					"type": "integer",

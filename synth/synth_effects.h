@@ -45,9 +45,9 @@ constexpr uint32_t max_effect_mod_params = 32;
 
 // Multi-band FIR effect model: at most four bands per effect.  The band
 // bindings' index meaning follows the slot's effect type.  The plain FIR
-// effect keeps its dormant legacy layout: index 0 is band 0's gain and bands
+// effect keeps its dormant stored layout: index 0 is band 0's gain and bands
 // 1..3 carry lowpass, highpass, gain and slope each (1 + 4 * (band - 1) +
-// kind), with band 0's edges and slope in the slot's legacy scalar params.
+// kind), with band 0's edges and slope in the slot's stored scalar params.
 // EffectType::fir_multiband reads the same array uniformly: band b lives at
 // 4 * band + (0 = center, 1 = spread, 2 = gain, 3 = slope), all four bands
 // alike, and the coefficient staging derives each band's edges from its
@@ -56,7 +56,7 @@ constexpr uint32_t max_fir_effect_bands       = 4;
 constexpr uint32_t num_fir_effect_band_params = max_fir_effect_bands * 4;
 
 // Active band-binding count for a FIR effect slot, the one type-aware statement
-// of the dual-layout policy: the plain fir keeps its legacy layout (band 0's
+// of the dual-layout policy: the plain fir keeps its stored layout (band 0's
 // gain plus each extra band's four values; a count of 0 or 1 is the single-band
 // marker with no active band-array params), while fir_multiband reads the array
 // uniformly at four bindings per band with a zeroed count meaning one.  Other
@@ -87,17 +87,27 @@ constexpr uint32_t fir_reference_band_param_count(EffectType type, uint32_t band
                                              band_count > max_fir_effect_bands ? max_fir_effect_bands : band_count);
 }
 
-// Whether the slot's legacy scalar bindings (bindings[0..num_params)) carry live
+constexpr bool effect_param_is_ms(EffectType type, uint32_t index)
+{
+    return (type == EffectType::delay && index == 0) || (type == EffectType::chorus && (index == 1 || index == 3));
+}
+
+constexpr float effect_param_to_native(EffectType type, uint32_t index, float value)
+{
+    return effect_param_is_ms(type, index) ? value * (rt_sampling_rate / 1000.0f) : value;
+}
+
+// Whether the slot's stored scalar bindings (bindings[0..num_params)) carry live
 // parameters.  A fir_multiband keeps them only as unused stored shape (its band
 // array carries the parameters), so they validate but are never counted, built,
 // rooted or walked as references.
-constexpr bool effect_reads_legacy_params(EffectType type)
+constexpr bool effect_reads_scalar_params(EffectType type)
 {
     return type != EffectType::fir_multiband;
 }
 
 // The two FIR effect types share the coefficient-staging machinery; the band
-// array's index meaning differs (the plain FIR's dormant legacy order vs the
+// array's index meaning differs (the plain FIR's dormant stored order vs the
 // multiband's uniform center/spread/gain/slope), so every type gate and the
 // staging dispatch key on this one predicate.
 constexpr bool is_fir_effect_type(EffectType type)
@@ -154,7 +164,7 @@ struct FirEffectCoeffEntry {
 };
 
 // Stages one FIR effect's coefficient entry from its live values.  band_count 1 (or the
-// legacy 0) stages the legacy single-band form with the gain forced to 1.0, so legacy
+// stored 0) stages the stored single-band form with the gain forced to 1.0, so stored
 // banks keep their bit-exact staging.  band_count 2..4 stages every active band and
 // returns false when no band is active, so the caller drops the entry like the
 // oscillator staging does.  band_params holds the plain FIR's FirEffectBands-order live

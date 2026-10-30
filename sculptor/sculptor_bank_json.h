@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 namespace Synth {
+uint32_t take_ignored_fields(char (*names)[48], uint32_t capacity);
 
 // Documents are bounded: the codec stages one document at a time in a shared
 // static buffer whose sizes are internal to the codec's translation unit, and
@@ -33,8 +34,8 @@ int write_editor_bank_json(FILE* file, const InstrumentEditorBank* bank, uint32_
 
 // Reads a JSON document of len bytes from file at the current position into
 // out.  Transactional: on any failure out is left untouched.
-// The strict library policy refuses unknown editor-metadata fields and duplicate
-// layout identities before compatibility deduplication; ordinary bank reads tolerate them.
+// Unknown editor-metadata fields are reported and ignored. Strict library reads
+// refuse duplicate layout identities; ordinary bank reads deduplicate them.
 bool read_editor_bank_json(FILE* file, uint32_t len, InstrumentEditorBank* out, bool strict_editor_metadata = false);
 
 // Encodes the bank as one JSON document into dest.  Returns the document length, or 0
@@ -80,7 +81,7 @@ struct EffectsDocument {
 };
 
 // Effects documents: the writer emits synth-effects-v3 with flag routing;
-// the decoder also accepts legacy v1 and v2 documents.  Failure leaves
+// Other format tags warn without blocking loading. Failure leaves
 // destination bytes untouched.  GUI-thread-only shared staging is
 // non-reentrant, like the bank codec.
 bool     validate_effects_document(const EffectsDocument* document);
@@ -196,7 +197,7 @@ bool decode_instrument_json(const char*            text,
                             uint32_t               layout_capacity,
                             uint32_t*              out_layout_count);
 
-// Validated bank transport retains finite legacy pitch/ratio outside clipboard slider bounds.
+// Validated bank transport retains finite stored pitch/ratio outside clipboard slider bounds.
 enum class InstrumentJsonDomain : uint8_t {
     clipboard,
     validated_bank
@@ -220,7 +221,7 @@ bool decode_instrument_json_for_domain(const char*            text,
                                        // Per decoded descriptor position (1-based into
                                        // out_envelopes / out_lfos), the document's pool id
                                        // (envelope_id / lfo_id keys): 0 when the text carries
-                                       // no id (legacy content-dedup documents).  May be null.
+                                       // no id (stored content-dedup documents).  May be null.
                                        uint16_t* envelope_ids_out = nullptr,
                                        uint16_t* lfo_ids_out      = nullptr);
 

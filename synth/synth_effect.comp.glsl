@@ -148,10 +148,7 @@ vec2 apply_chorus(in EffectParams eff)
 
     const float pi = 3.14159265358979;
 
-    // Center delay the LFO swings the read offset around.  Derived from the sample
-    // rate so it stays ~11 ms at any rate.
-    const float chorus_base_delay_ms = 11.0;
-    const float chorus_base_delay    = chorus_base_delay_ms * float(sampling_rate) / 1000.0;
+    const float chorus_base_delay = eff.params[3];
 
     const float phase = base_lfo_phase + float(gl_LocalInvocationID.x) * rate_hz / float(sampling_rate);
 
@@ -466,8 +463,6 @@ void main()
         result = apply_compressor(eff);
     }
     else if (eff.type == effect_fir) {
-        // Plain fir never consults bypass: its behavior is byte-identical legacy
-        // (a failed multi-band staging keeps the pre-existing drop-the-entry  semantics).
         result = apply_fir(eff, false);
     }
     else if (eff.type == effect_ring_mod) {

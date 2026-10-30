@@ -220,11 +220,9 @@ Sculptor::GraphColors Sculptor::default_graph_colors()
     return colors;
 }
 
-namespace {
-
 // The one-edge refusal names the node already wired into the input, so the
 // user can find the competing wire without tracing it by hand.
-void set_input_taken_error(Sculptor::Graph& graph, Sculptor::EndPoint input)
+static void set_input_taken_error(Sculptor::Graph& graph, Sculptor::EndPoint input)
 {
     for (uint32_t i = 0; i < Sculptor::max_connections; ++i) {
         if (! graph.connection_occupied(i)) {
@@ -243,7 +241,6 @@ void set_input_taken_error(Sculptor::Graph& graph, Sculptor::EndPoint input)
     }
     graph.set_error("Input already connected");
 }
-} // namespace
 
 // The editor state carve-out in sculptor_instr_bank.cpp reserves one
 // editor-resident Graph slot at exactly max_graph_bytes; a capacity raise
@@ -1282,5 +1279,12 @@ void Sculptor::collect_selected_source_inputs(const Graph& graph, uint32_t node_
         if (connection.input.node_idx == node_idx && graph.is_selected(connection.output.node_idx)) {
             slot_flags[connection.input.slot_idx] = true;
         }
+    }
+}
+
+void Sculptor::Graph::set_slot_display_order(uint32_t node_idx, uint32_t slot_idx, uint8_t order)
+{
+    if (nodes.is_occupied(node_idx) && nodes.entries[node_idx].slots.is_occupied(slot_idx)) {
+        nodes.entries[node_idx].slots.entries[slot_idx].display_order = order;
     }
 }

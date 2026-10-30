@@ -91,19 +91,18 @@ struct PortableNode {
 
 static_assert(sizeof(PortableNode) == (sizeof(Synth::InstrumentGraphLayout) + 1 + Synth::num_mod_targets + 3) / 4 * 4);
 
-namespace {
-PortableNode                        clipboard_source_nodes[Synth::instrument_graph_layout_capacity];
-PortableNode                        clipboard_decoded_nodes[Synth::instrument_graph_layout_capacity];
-Synth::InstrumentGraphLayout        clipboard_portable_records[Synth::instrument_graph_layout_capacity];
-Synth::GraphNodeLayout              clipboard_mapped_records[Synth::instrument_graph_layout_capacity];
+static PortableNode                 clipboard_source_nodes[Synth::instrument_graph_layout_capacity];
+static PortableNode                 clipboard_decoded_nodes[Synth::instrument_graph_layout_capacity];
+static Synth::InstrumentGraphLayout clipboard_portable_records[Synth::instrument_graph_layout_capacity];
+static Synth::GraphNodeLayout       clipboard_mapped_records[Synth::instrument_graph_layout_capacity];
 const Synth::InstrumentGraphLayout* clipboard_saved_layout[Synth::instrument_graph_layout_capacity];
 
-Synth::InstrumentEditorBank clipboard_candidate;
-Synth::InstrumentBank       clipboard_model_bank;
-Synth::GraphNodeLayout      clipboard_candidate_records[Synth::instrument_graph_layout_capacity];
-uint16_t                    clipboard_envelope_ids[Synth::instrument_max_envelopes];
-uint16_t                    clipboard_lfo_ids[Synth::instrument_max_lfos];
-char                        clipboard_destination_name[Synth::max_name_len];
+static Synth::InstrumentEditorBank clipboard_candidate;
+static Synth::InstrumentBank       clipboard_model_bank;
+static Synth::GraphNodeLayout      clipboard_candidate_records[Synth::instrument_graph_layout_capacity];
+static uint16_t                    clipboard_envelope_ids[Synth::instrument_max_envelopes];
+static uint16_t                    clipboard_lfo_ids[Synth::instrument_max_lfos];
+static char                        clipboard_destination_name[Synth::max_name_len];
 
 // The projection arithmetic relies on this exact ModTarget ordering.
 static_assert(static_cast<uint32_t>(Synth::mod_panning) == 2);
@@ -277,7 +276,6 @@ constexpr uint32_t lfo_rate_input  = 2;
 constexpr uint32_t canonical_first_osc  = Synth::graph_canonical_first_osc;
 constexpr uint32_t canonical_first_env  = Synth::graph_canonical_first_env;
 constexpr uint32_t canonical_node_count = Synth::graph_canonical_node_count;
-} // namespace
 
 // Oscillator-node rows whose widgets only make sense for the current
 // waveform/mode selection.  Slot indices follow the projection layout
@@ -478,15 +476,15 @@ static Sculptor::Slot osc_duty_row_slot(const char*      name,
 
 // Band block grammar: one renderer line per band packs the band header
 // label and its two click slots, as a child row of the Filter Type row
-// (the legacy Cutoff row's depth), so the band tree reads one level
+// (the stored Cutoff row's depth), so the band tree reads one level
 // shallower than the wave-5 depths while keeping the parent-child
 // relation to Filter Type: header at 1, rows at 2, blocks at 3, rate
 // and amount rows at 4.
 // (The row-group ids live in the header; the renderer keys on the range;
-// the block level sits in the anonymous namespace.)
+// the block level is file-local.)
 
 // Band b's parameter target for parameter p (0 offset, 1 spread, 2 gain,
-// 3 slope).  Band 0 keeps the legacy spread/slope targets so saved banks
+// 3 slope).  Band 0 keeps the stored spread/slope targets so saved banks
 // stay bit-compatible; only the row slots moved.
 static constexpr Synth::ModTarget band_target(const uint32_t band, const uint32_t param)
 {
@@ -626,7 +624,7 @@ static void append_target_block(Graph*                      graph,
 }
 
 // One band-parameter value row plus its 12-slot modulation block.  The
-// per-band slope rows are integer-percent slots like the legacy FIR slope
+// per-band slope rows are integer-percent slots like the stored FIR slope
 // row; every other band row is a real slider over its view bounds.
 static void append_band_row(Graph* graph, uint32_t node, Synth::ModTarget target, const Synth::Oscillator& osc)
 {
@@ -909,7 +907,7 @@ static void clear_mapping(Sculptor::OscGraphMapping* mapping)
     }
     mapping->osc_output_slot = Sculptor::pool_no_slot;
     mapping->instrument_node = Sculptor::pool_no_slot;
-    for (uint32_t i = 0; i < 4; ++i) {
+    for (uint32_t i = 0; i < 5; ++i) {
         mapping->instrument_slots[i] = Sculptor::pool_no_slot;
     }
     // Uniform node layouts; populated even when no such node exists so the
@@ -1082,7 +1080,7 @@ static void project_osc_node(Sculptor::Graph*           graph,
         Sculptor::Slot header    = Sculptor::make_slot(band_header_names[band], Sculptor::SlotKind::property);
         header.row_group         = row_group;
         // The header line anchors the row group's nesting: one level under
-        // Filter Type, like the legacy Cutoff row.
+        // Filter Type, like the stored Cutoff row.
         header.child_row   = true;
         header.child_level = 1;
         graph->add_slot(node, header);
@@ -1096,12 +1094,12 @@ static void project_osc_node(Sculptor::Graph*           graph,
         graph->add_slot(node, band_plus_slot);
 
         // One uniform row group per band: Offset, Spread, Gain, Slope.  Band 0's
-        // Spread/Slope rows keep their legacy targets (7/11) so saved banks stay
+        // Spread/Slope rows keep their stored targets (7/11) so saved banks stay
         // bit-compatible; only their slots moved.  Every band row nests
         // one level under the band header row, so its modulation block
-        // shifts with it.  Band 0's Spread/Slope slots double as the legacy
+        // shifts with it.  Band 0's Spread/Slope slots double as the stored
         // single-edge rows (Cutoff (Hz) / FIR Slope) under low-pass and
-        // high-pass: those keep the legacy depths (row 1, block 2), while
+        // high-pass: those keep the stored depths (row 1, block 2), while
         // the bandpass band block sits one level deeper (rows 2, blocks 3).
         const bool    bandpass_layout   = osc.fir_type == Synth::fir_bandpass;
         const uint8_t band0_row_level   = bandpass_layout ? 2 : 1;
@@ -1190,6 +1188,7 @@ static uint32_t create_env_node(Sculptor::Graph*                 graph,
         node,
         with_tooltip(Sculptor::toggle_slot("Quick Release", (env.flags & Synth::envelope_quick_release) != 0),
                      "On note off, jumps behind sustain loop end"));
+    graph->set_node_resizable(node);
     // Point and sustain editing lives in the curve state widget; property
     // slots for those fields would be a second stale UI over the same data.
     return node;
@@ -1445,7 +1444,7 @@ bool Sculptor::osc_target_field_hidden(const Graph& graph, uint32_t node_idx, ui
 }
 
 // The projected filter type of an oscillator node (its Filter Type list
-// slot), for callers composing the band visibility with the legacy
+// slot), for callers composing the band visibility with the stored
 // single-edge rows.  A node too small to carry the slot reads as fir_off.
 static Synth::FilterType osc_node_filter_type(const Graph& graph, const uint32_t node_idx)
 {
@@ -1471,7 +1470,7 @@ bool Sculptor::osc_band_slot_hidden(const Graph& graph, const uint32_t node_idx,
 }
 
 // The composed render filter for an oscillator node's slot: band-derived
-// visibility, except the legacy cutoff and FIR Slope rows and their
+// visibility, except the stored cutoff and FIR Slope rows and their
 // blocks, which a non-bandpass layer keeps showing as its own rows; then
 // the per-target block field rule on whatever remains.  The editor's
 // callback composes this with the output-node layer rule, which reads
@@ -1479,13 +1478,13 @@ bool Sculptor::osc_band_slot_hidden(const Graph& graph, const uint32_t node_idx,
 bool Sculptor::osc_node_slot_hidden(const Graph& graph, const uint32_t node_idx, const uint32_t slot_idx)
 {
     const Synth::FilterType filter_type = osc_node_filter_type(graph, node_idx);
-    const bool              legacy_row_group =
+    const bool              stored_row_group =
         (slot_idx >= osc_filter_cutoff_slot && slot_idx < osc_filter_cutoff_slot + osc_target_block_stride + 1u) ||
         (slot_idx >= osc_filter_slope_slot && slot_idx < osc_filter_slope_slot + osc_target_block_stride + 1u);
-    // Under bandpass the legacy rows are band 0's rows: they show like
+    // Under bandpass the stored rows are band 0's rows: they show like
     // every other always-visible band row.  Only a non-bandpass layer's
-    // legacy rows skip the band check.
-    if (filter_type == Synth::fir_bandpass || ! legacy_row_group) {
+    // stored rows skip the band check.
+    if (filter_type == Synth::fir_bandpass || ! stored_row_group) {
         if (osc_band_slot_hidden(graph, node_idx, slot_idx)) {
             return true;
         }
@@ -1700,8 +1699,8 @@ bool Sculptor::project_instrument_to_graph(const Synth::Instrument&     instrume
         instrument.layer_count <= Synth::max_layers ? instrument.layer_count : Synth::max_layers;
 
     // MIDI Inputs starts low enough that the Instrument Parameters node
-    // (four rows) fits right above it, so both are inside the default view.
-    const uint32_t input_node = graph->create_node("MIDI Inputs", vmath::vec2(0.0f, 160.0f));
+    // (five rows) fits right above it, so both are inside the default view.
+    const uint32_t input_node = graph->create_node("MIDI Inputs", vmath::vec2(0.0f, 192.0f));
     if (input_node == Sculptor::pool_no_slot) {
         return false;
     }
@@ -1749,16 +1748,22 @@ bool Sculptor::project_instrument_to_graph(const Synth::Instrument&     instrume
         instrument_node,
         with_tooltip(bounded_real_slot("Random Oscillator Detune", instrument.layer_skew_semitones, 0.0f, 1.0f),
                      "Max random pitch offset per note, separate for each oscillator (in semitones)"));
-    mapping->instrument_slots[2] =
-        graph->add_slot(instrument_node,
-                        with_tooltip(bounded_real_slot("Release (s)", instrument.release_seconds, 0.0f, 30.0f),
-                                     "Sustain volume decay time in seconds (0 = no decay)"));
+    mapping->instrument_slots[2] = graph->add_slot(
+        instrument_node,
+        with_tooltip(
+            bounded_real_slot("Sustain Decay (s)", instrument.release_seconds, 0.0f, 30.0f),
+            "Decay starts at sustain entry, or at the first step after note-on without a volume envelope (0 = no decay)"));
     // Voice allocation policy; the names match the bank JSON spelling.
     mapping->instrument_slots[3] = graph->add_slot(
         instrument_node,
         with_tooltip(list_slot("Voices", voice_mode_names, 3, instrument.voice_mode <= 2 ? instrument.voice_mode : 0),
                      "How notes share voices: multiple = every note gets its own voice; reuse per-note = the same "
                      "note restarts its voice in place; single = one note at a time per instrument"));
+
+    mapping->instrument_slots[4] =
+        graph->add_slot(instrument_node,
+                        with_tooltip(toggle_slot("Pitch bend lock", instrument.pitch_bend_lock != 0),
+                                     "Locks pitch bend value on note off"));
 
     // One node per editor layer, in order: mapping.osc_nodes[o] names node
     // o, whether or not a slot names it.  The source row (slot -> editor
@@ -2035,7 +2040,7 @@ static bool read_oscillator_layer(const Sculptor::Graph&           graph,
         }
         else {
             // The per-band slope rows are integer-percent slots like the
-            // legacy FIR slope row, so their base reads from the integer
+            // stored FIR slope row, so their base reads from the integer
             // property instead of the real union field.
             gen.base_value = target == Synth::mod_fir_band1_slope || target == Synth::mod_fir_band2_slope ||
                                      target == Synth::mod_fir_band3_slope
@@ -2229,10 +2234,10 @@ bool Sculptor::compile_graph_to_instrument(const Graph&             graph,
     // the Instrument{} zero-init instead of a slot read.
     if (mapping.instrument_node != pool_no_slot) {
         const Node& params = graph.node(mapping.instrument_node);
-        if (params.slots.num_allocated < 4) {
+        if (params.slots.num_allocated < 5) {
             return false;
         }
-        for (uint32_t i = 0; i < 4; ++i) {
+        for (uint32_t i = 0; i < 5; ++i) {
             if (mapping.instrument_slots[i] == pool_no_slot) {
                 return false;
             }
@@ -2241,6 +2246,7 @@ bool Sculptor::compile_graph_to_instrument(const Graph&             graph,
         out->layer_skew_semitones = params.slots.entries[mapping.instrument_slots[1]].value.real;
         out->release_seconds      = params.slots.entries[mapping.instrument_slots[2]].value.real;
         out->voice_mode           = params.slots.entries[mapping.instrument_slots[3]].value.list_index;
+        out->pitch_bend_lock      = params.slots.entries[mapping.instrument_slots[4]].value.toggle ? 1 : 0;
     }
 
     // Invariant: every wire into an oscillator lands on a block family
@@ -3201,7 +3207,7 @@ static bool relocate_base_row_wire(Sculptor::Graph*                 graph,
     graph->set_connection_input(connection_idx, Sculptor::EndPoint{ connection.input.node_idx, landing });
     if (wire_family == family_env &&
         graph->node(connection.input.node_idx).slots.entries[landing + 1].value.real == 0.0f) {
-        // A first envelope wire adopts the legacy unscaled amount: the
+        // A first envelope wire adopts the stored unscaled amount: the
         // row's depth defaults to 0, which silences the envelope entirely,
         // and 0 is almost never the intent.
         graph->set_slot_value(connection.input.node_idx, landing + 1, Sculptor::PropertyValue{ .real = 1.0f });
@@ -3738,7 +3744,8 @@ bool Sculptor::project_editor_to_graph(const Synth::InstrumentEditorBank& bank,
                 entry.rate_source  = record.rate_source;
                 graph->set_node_layout(entry.node_idx,
                                        vmath::vec2(record.x, record.y),
-                                       record.width_override,
+                                       is_env && record.width_override <= 0.0f ? envelope_node_content_width
+                                                                               : record.width_override,
                                        record.height_override);
                 char name[32];
                 snprintf(name, sizeof(name), is_env ? "Envelope %u" : "LFO %u", record.uid);
@@ -3767,6 +3774,11 @@ bool Sculptor::project_editor_to_graph(const Synth::InstrumentEditorBank& bank,
             if (node == pool_no_slot) {
                 return false;
             }
+            graph->set_node_layout(node,
+                                   vmath::vec2(record.x, record.y),
+                                   is_env && record.width_override <= 0.0f ? envelope_node_content_width
+                                                                           : record.width_override,
+                                   record.height_override);
             DetachedNode& entry = mapping->detached[mapping->detached_count++];
             entry.node_idx      = node;
             entry.kind          = record.kind;

@@ -13,13 +13,9 @@
 #include <stdio.h>
 #include <string.h>
 
-namespace {
-
 // Per-instrument driver: TargetBinding (48 bytes) x 26 targets x 7 layers.
 static_assert(sizeof(Synth::InstrumentBank) <= 3'456'000);
 static_assert(sizeof(Synth::BankUpdateQueue) <= 2 * sizeof(Synth::InstrumentBank) + 32);
-
-} // namespace
 
 const char Synth::default_channel_names[max_channels][max_name_len] = {
     "Channel 01", "Channel 02", "Channel 03", "Channel 04", "Channel 05", "Channel 06", "Channel 07", "Channel 08",
@@ -236,9 +232,9 @@ static bool validate_effect_chain(const Synth::EffectChainBinding& chain,
                 return false;
             }
 
-            // A multiband's legacy bindings are unused: validated above, never
+            // A multiband's stored bindings are unused: validated above, never
             // counted against the modulation capacity (matches expansion).
-            if (Synth::effect_reads_legacy_params(effect.type) && (binding.lfo_desc_id || binding.num_inputs)) {
+            if (Synth::effect_reads_scalar_params(effect.type) && (binding.lfo_desc_id || binding.num_inputs)) {
                 (*num_modulated)++;
             }
         }
@@ -246,7 +242,7 @@ static bool validate_effect_chain(const Synth::EffectChainBinding& chain,
         // FIR band bindings ride the same acceptance and node-counting rules as
         // the scalar params, so load-time and expansion-time acceptance stay
         // identical.  Only the active band bindings count (the plain FIR's
-        // band 0 gain on the legacy single-band form, whose staging ignores
+        // band 0 gain on the stored single-band form, whose staging ignores
         // it, and bands beyond the count count nothing).  A deliberate policy
         // difference: the plain FIR's dormant seam can carry authored bindings,
         // so it validates all of them; a multiband's dormant tail is always
@@ -726,7 +722,7 @@ void Synth::reclaim_unused_slots(Synth::InstrumentEditorBank* editor_bank, uint1
             const Synth::EffectSlotBinding& effect = binding.effects[slot];
 
             const uint32_t num_params =
-                Synth::effect_reads_legacy_params(effect.type) ? get_effect_param_floats(effect.type) : 0;
+                Synth::effect_reads_scalar_params(effect.type) ? get_effect_param_floats(effect.type) : 0;
 
             for (uint32_t param = 0; param < num_params; param++) {
 

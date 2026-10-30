@@ -24,7 +24,6 @@
 
 #include "../core/shaders.h"
 
-namespace {
 enum BufferTypes : uint8_t {
     data_buf,   // Device buffer which is used by effects etc.
     param_buf,  // Dynamic device buffer with parameters for compute shaders etc.
@@ -32,10 +31,10 @@ enum BufferTypes : uint8_t {
     num_buf_types
 };
 
-Buffer buffers[num_buf_types];
+static Buffer buffers[num_buf_types];
 
 // Vulkan command buffer used for the synth
-CommandBuffers<1> audio_cmd_buf;
+static CommandBuffers<1> audio_cmd_buf;
 
 // Polyphony limits
 constexpr uint32_t max_voices = 64; // Max notes are playing
@@ -45,13 +44,13 @@ using Synth::num_fir_taps;
 using Synth::osc_mode_hard_sync;
 
 // Number of samples which have been rendered since playback started.
-uint32_t rendered_samples;
+static uint32_t rendered_samples;
 
 // Stores current per-channel time measured in samples
-uint32_t channel_samples[Synth::max_channels];
+static uint32_t channel_samples[Synth::max_channels];
 
 // Saved state of event decode, per-channel
-uint8_t events_decode_state[Synth::max_channels];
+static uint8_t events_decode_state[Synth::max_channels];
 
 // MidiEvent, including note duration (for note_on event)
 struct DispatchedMidiEvent : Synth::MidiEvent {
@@ -59,21 +58,20 @@ struct DispatchedMidiEvent : Synth::MidiEvent {
 };
 
 // Map notes in each note in each channel to voices
-typedef uint8_t NoteToVoice[128];
-NoteToVoice     note_to_voice[Synth::max_channels];
+typedef uint8_t    NoteToVoice[128];
+static NoteToVoice note_to_voice[Synth::max_channels];
 
 // Random pitch skew: a few cents of analog-style drift, applied per note and per layer.
 constexpr uint32_t note_skew_seed     = 0x5eed1234u;
 constexpr uint32_t noise_start_stride = 0x9e3779b9u; // Spreads note-on noise starts across the 32 bit range
-
-// Default pitch bend range in semitones (standard MIDI default is +/- 2)
-constexpr float default_pitch_bend_range_semitones = 2.0f;
 
 // MIDI continuous controller number for the modulation wheel
 constexpr uint32_t mod_wheel_cc = 1;
 
 // Voice is a single playing note of a single instrument
 struct Voice {
+    bool     bend_locked;
+    bool     bend_frozen;
     bool     active;
     uint8_t  channel;
     uint8_t  note;                // MIDI note this voice plays, set at note-on
@@ -83,16 +81,16 @@ struct Voice {
     bool     releasing;           // True after note-off, until the volume envelope finishes
     bool     note_finished;       // True after release stage is finished and the note is no longer playing
     bool     sustained;           // Key is up but the sustain pedal holds the voice
-    uint32_t release_total_ticks; // Instrument release in control steps (0 = legacy hold/loop)
+    uint32_t release_total_ticks; // Instrument release in control steps (0 = stored hold/loop)
     uint32_t release_sample;      // Absolute sample to auto-release a duration-model note (0 = none)
 };
 
-Voice voices[max_voices];
+static Voice voices[max_voices];
 
 // Raw 14-bit assignable-CC accumulators, one per MIDI channel (see synth_midi_cc.h).
 // CC state is MIDI-driven, not bank-driven, so it survives bank swaps like the mod
 // wheel does.  init_modulation seeds every LSB register with the 0xFF sentinel.
-Synth::ChannelCcState channel_cc_state[Synth::max_channels];
+static Synth::ChannelCcState channel_cc_state[Synth::max_channels];
 
 using Synth::EffectChainBinding;
 using Synth::EffectParamBinding;
@@ -114,10 +112,10 @@ using enum Synth::ModTarget;
 using enum Synth::OscMode;
 
 // The bank of instruments, envelopes and LFOs the runtime builds at init and reads while playing.
-InstrumentBank synth_bank;
+static InstrumentBank synth_bank;
 
 // Callback for reading modified instrument bank from the editor.
-std::atomic<void (*)()> bank_source_callback = nullptr;
+static std::atomic<void (*)()> bank_source_callback = nullptr;
 
 // parameters[] is partitioned into a sentinel (param 0) then per-owner blocks.  Each owner has a
 // fixed set of roles; a source addresses a parameter by computing its block index.  A modulation
@@ -135,6 +133,7 @@ enum ChannelParamRole : uint32_t {
 };
 
 enum VoiceParamRole : uint32_t {
+    voice_input_bend,
     voice_input_velocity,
     voice_input_aftertouch,
     voice_input_pressure_combine,
@@ -310,21 +309,21 @@ constexpr uint32_t band_dest_roles[3][4] = {
     { osc_fir_band3_offset_dest, osc_fir_band3_spread_dest, osc_fir_band3_gain_dest, osc_fir_band3_slope_dest },
 };
 
-Synth::Parameter       parameters[total_params];
-Synth::ParamDescriptor param_descs[total_params];
+static Synth::Parameter       parameters[total_params];
+static Synth::ParamDescriptor param_descs[total_params];
 
 // Bump cursor into the effect-param pool [effect_pool_base, total_params); reset before the
 // effect bindings are (re)expanded.
-uint32_t effect_pool_next = effect_pool_base;
+static uint32_t effect_pool_next = effect_pool_base;
 
-void reset_effect_pool()
+static void reset_effect_pool()
 {
     effect_pool_next = effect_pool_base;
 }
 
 // Hands out the next pool node, or 0 (the sentinel) when the pool is exhausted; a caller that
 // gets 0 leaves the effect param as an unmodulated constant.
-uint32_t allocate_effect_pool_node()
+static uint32_t allocate_effect_pool_node()
 {
     if (effect_pool_next >= total_params) {
         return 0;
@@ -441,8 +440,8 @@ enum SynthPipelines {
     num_synth_pipes
 };
 
-VkPipelineLayout pipe_layouts[num_synth_pipes];
-VkPipeline       pipes[num_synth_pipes];
+static VkPipelineLayout pipe_layouts[num_synth_pipes];
+static VkPipeline       pipes[num_synth_pipes];
 
 enum DescSetTypes : uint8_t {
     one_buffer_ds,
@@ -451,9 +450,9 @@ enum DescSetTypes : uint8_t {
     num_desc_set_layouts
 };
 
-VkDescriptorSetLayout desc_set_layouts[num_desc_set_layouts];
+static VkDescriptorSetLayout desc_set_layouts[num_desc_set_layouts];
 
-bool create_shaders()
+static bool create_shaders()
 {
     static const DescSetBindingInfo bindings[] = { { one_buffer_ds, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 },
                                                    { one_buffer_ds, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 },
@@ -553,11 +552,11 @@ bool create_shaders()
 
 constexpr VkDeviceSize device_buf_size = Synth::effect_buffer_bytes;
 
-SubAllocator<1024> data_allocator;
+static SubAllocator<1024> data_allocator;
 
-SubAllocator<1> param_allocator;
+static SubAllocator<1> param_allocator;
 
-size_t synth_alignment;
+static size_t synth_alignment;
 
 template <typename T> T& get_param(uint32_t offset)
 {
@@ -610,7 +609,7 @@ struct RunningOscillator {
     float    fm_index;               // FM modulation depth
 
     // Multi-band bandpass state, refreshed by update_modulation each step.
-    // Band 0 mirrors the legacy spread/slope fields above, so its kernel math
+    // Band 0 mirrors the stored spread/slope fields above, so its kernel math
     // stays bit-identical to the single-band form.
     float band_offset[4]; // Offset of the band center above the pitch, semitones
     float band_spread[4]; // Band width in semitones (band 0 = spread)
@@ -641,7 +640,7 @@ struct RunningOscillator {
 
 static RunningOscillator oscillators[Synth::max_oscillators];
 
-RNG note_skew_rng; // Shared generator for per-note pitch skew
+static RNG note_skew_rng; // Shared generator for per-note pitch skew
 
 // Gives every note-on its own noise start, so repeated notes do not repeat the same noise.
 static uint32_t noise_start_counter;
@@ -659,7 +658,7 @@ struct Channel {
 static Channel mix_channels[max_mix_channels];
 
 // Dedicated interleaved-stereo master output, summed from all channels
-uint32_t master_output_offs;
+static uint32_t master_output_offs;
 
 using Synth::EffectChain;
 using Synth::EffectInstance;
@@ -672,7 +671,7 @@ struct FirSlot {
     uint32_t history_offs;
 };
 
-FirSlot fir_slots[Synth::max_oscillators];
+static FirSlot fir_slots[Synth::max_oscillators];
 
 // A layer carries a filter iff its spread target can modulate at all: a
 static void init_fir()
@@ -746,12 +745,10 @@ constexpr uint32_t max_fir_coeff_entries =
 static_assert(sizeof(ShaderParams::FIRCoeff) == Synth::fir_coeff_entry_words * sizeof(uint32_t));
 static_assert(sizeof(Synth::FirEffectCoeffEntry) == sizeof(ShaderParams::FIRCoeff));
 static_assert(max_fir_coeff_entries * sizeof(ShaderParams::FIRCoeff) <= ShaderParams::max_param_range);
-ShaderParams::FIRCoeff fir_coeff_stage[max_fir_coeff_entries];
-ShaderParams::FIRCoeff fir_coeff_prev[max_fir_coeff_entries];
-uint32_t               fir_coeff_prev_count = 0; // 0 = no valid snapshot
-bool                   fir_taps_cleared     = false;
-
-} // namespace
+static ShaderParams::FIRCoeff fir_coeff_stage[max_fir_coeff_entries];
+static ShaderParams::FIRCoeff fir_coeff_prev[max_fir_coeff_entries];
+static uint32_t               fir_coeff_prev_count = 0; // 0 = no valid snapshot
+static bool                   fir_taps_cleared     = false;
 
 // Every oscillator slot gets its own string wave state region, so any slot can play a string
 // note.  Slot 0 is the reserved sentinel and stays unused.
@@ -914,6 +911,9 @@ static void init_oscillator_buffers()
 
 static void init_modulation()
 {
+    for (uint32_t voice = 0; voice < max_voices; ++voice) {
+        param_descs[voice_param(voice, voice_input_bend)].kind = Synth::ParamKind::external;
+    }
     // Each channel's pitch bend, mod wheel and pressure are externally-driven inputs;
     // propagate_parameters must not overwrite them with a fold.  The two mix leaves
     // (volume CC 7, panning CC 10) and the 16 assignable-CC leaves are likewise
@@ -1211,6 +1211,24 @@ static bool get_next_midi_event(DispatchedMidiEvent* event, uint32_t end_samples
     return true;
 }
 
+static void copy_voice_bend(uint32_t voice_idx)
+{
+    const Voice& voice        = voices[voice_idx];
+    auto&        bend         = parameters[voice_param(voice_idx, voice_input_bend)];
+    const auto&  channel_bend = parameters[channel_param(voice.channel, chan_param_bend)];
+    bend.value                = channel_bend.value;
+    bend.prev_value           = channel_bend.prev_value;
+}
+
+static void freeze_voice_bend(uint32_t voice_idx)
+{
+    Voice& voice = voices[voice_idx];
+    if (! voice.bend_locked || voice.bend_frozen)
+        return;
+    copy_voice_bend(voice_idx);
+    voice.bend_frozen = true;
+}
+
 // Enters a voice's release: marks it releasing (an already-releasing voice
 // keeps fading and must never jump twice) and applies the note-off rule to
 // every envelope parameter owned by the voice (a backward ping-pong direction
@@ -1223,6 +1241,7 @@ static void begin_voice_release(uint32_t voice_idx)
     if (voice.releasing) {
         return;
     }
+    freeze_voice_bend(voice_idx);
     voice.releasing = true;
     for (uint32_t node_idx = 1; node_idx < total_params; node_idx++) {
         if (param_descs[node_idx].kind == Synth::ParamKind::envelope &&
@@ -1283,7 +1302,8 @@ static uint32_t resolve_source(ModSource source, uint8_t cc_number, uint32_t cha
 {
     switch (source) {
         case ModSource::pitch_bend:
-            return channel_param(channel, chan_param_bend);
+            return voice_idx != 0 && voices[voice_idx].bend_locked ? voice_param(voice_idx, voice_input_bend)
+                                                                   : channel_param(channel, chan_param_bend);
         case ModSource::mod_wheel:
             return channel_param(channel, chan_param_mod_wheel);
         case ModSource::channel_pressure:
@@ -1550,6 +1570,9 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
     // starts at zero (driven by poly-aftertouch events); pressure_combine is recomputed each step as
     // max(aftertouch, channel pressure) by advance_parameters.
     const float velocity = static_cast<float>(event.note_data) / 127.0f;
+    voice.bend_locked    = instrument.pitch_bend_lock != 0;
+    voice.bend_frozen    = false;
+    copy_voice_bend(voice_idx);
     set_input_leaf(voice_param(voice_idx, voice_input_velocity), velocity);
     set_input_leaf(voice_param(voice_idx, voice_input_aftertouch), 0.0f);
     set_input_leaf(voice_param(voice_idx, voice_input_pressure_combine), 0.0f);
@@ -1670,11 +1693,11 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         for (const ModTargetNode& node : mod_target_nodes) {
             float base_extra = node.target == Synth::mod_pitch ? note_skew + layer_skew : 0.0f;
             if (node.target == Synth::mod_fir_slope) {
-                // Legacy scalar inheritance: an unrouted (zeroed) slope binding starts from the
+                // Stored scalar inheritance: an unrouted (zeroed) slope binding starts from the
                 // layer's fir_slope scalar, a routed one from its own base.  The seed enters the
                 // plain descriptor base (configure_plain writes base_value + base_extra), not the
                 // running parameter value: propagation restarts the dest from the descriptor base
-                // every step, so a value-only seed would be clobbered and the legacy slope would
+                // every step, so a value-only seed would be clobbered and the stored slope would
                 // collapse to the 11-tap floor.
                 base_extra =
                     Synth::osc_fir_slope_seed_value(layer.targets[Synth::mod_fir_slope], layer.fir_slope_percent) -
@@ -1789,7 +1812,7 @@ static void process_pitch_bend(uint32_t delta_samples, const DispatchedMidiEvent
 {
     // Drive the channel bend leaf (value and prev_value) so consumers read it with zero lag.
     const uint32_t bend_node = channel_param(event.channel, chan_param_bend);
-    const float    bend      = Synth::pitch_bend_to_semitones(event.pitch_bend, default_pitch_bend_range_semitones);
+    const float    bend      = Synth::pitch_bend_to_semitones(event.pitch_bend, 1.0f);
     Synth::write_external_leaf(bend, leaf(bend_node));
 }
 
@@ -2026,9 +2049,8 @@ static void apply_effects(const EffectTarget* targets, uint32_t num_targets)
     }
 }
 
-// FIR coefficient staging and snapshot live in the file's anonymous
-// namespace above; compute_fir_coefficients builds, compares and dispatches
-// the block.
+// FIR coefficient staging and snapshots are file-local;
+// compute_fir_coefficients builds, compares and dispatches the block.
 
 // Copies each modulated effect param's current graph value into the param float the effect shader
 // reads (and compute_fir_coefficients reads for the FIR effect).  Unmodulated params (src_param_id
@@ -2081,7 +2103,10 @@ static void pull_effect_param_chain(EffectChain* chain, bool* reset_barrier_need
         }
         for (uint32_t param_idx = 0; param_idx < Synth::max_effect_param_floats; param_idx++) {
             if (instance.src_param_id[param_idx]) {
-                instance.params[param_idx] = parameters[instance.src_param_id[param_idx]].value;
+                instance.params[param_idx] =
+                    Synth::effect_param_to_native(instance.type,
+                                                  param_idx,
+                                                  parameters[instance.src_param_id[param_idx]].value);
             }
         }
         // FIR band values refresh through the same graph-leaf mechanism; the commit records one
@@ -2114,6 +2139,8 @@ static void advance_parameters()
     // non-additive combine the graph cannot express as an edge.  Written value+prev for zero lag.
     for (uint32_t voice_idx = 1; voice_idx < max_voices; voice_idx++) {
         if (voices[voice_idx].active) {
+            if (! voices[voice_idx].bend_frozen)
+                copy_voice_bend(voice_idx);
             const uint32_t channel    = voices[voice_idx].channel;
             const float    aftertouch = parameters[voice_param(voice_idx, voice_input_aftertouch)].value;
             const float    pressure   = parameters[channel_param(channel, chan_param_pressure)].value;
@@ -2262,7 +2289,7 @@ static void update_modulation()
         osc.string_dispersion = unit_range_clamp(parameters[osc_param(osc_idx, osc_string_dispersion_dest)].value);
         osc.osc_mix           = parameters[osc_param(osc_idx, osc_mix_dest)].value;
         osc.fm_index          = parameters[osc_param(osc_idx, osc_fm_index_dest)].value;
-        // The ratio clamps like the static row: legacy 0 ratios play at the
+        // The ratio clamps like the static row: stored 0 ratios play at the
         // slider floor and hand-written out-of-range values stay in bounds.
         const float ratio_dest = parameters[osc_param(osc_idx, osc_fm_ratio_dest)].value;
         osc.mod_ratio          = ratio_dest < Synth::osc_mod_ratio_min   ? Synth::osc_mod_ratio_min
@@ -2274,7 +2301,7 @@ static void update_modulation()
         osc.fir_slope = parameters[osc_param(osc_idx, osc_fir_slope_dest)].value;
 
         // Multi-band bandpass state: every band's four leaves refresh like the
-        // other targets; band 0 mirrors the legacy spread/slope dests read
+        // other targets; band 0 mirrors the stored spread/slope dests read
         // above, so its kernel math stays bit-identical to the single-band form.
         osc.band_offset[0] = parameters[osc_param(osc_idx, osc_fir_band0_offset_dest)].value;
         osc.band_gain[0]   = parameters[osc_param(osc_idx, osc_fir_band0_gain_dest)].value;
@@ -2333,7 +2360,7 @@ static void update_modulation()
 static bool stage_effect_fir_entry(const EffectInstance& instance, Synth::FirEffectCoeffEntry* entry)
 {
     // The multiband form derives every band's edges from its uniform
-    // center/spread pair; the plain FIR keeps its bit-exact legacy staging.
+    // center/spread pair; the plain FIR keeps its bit-exact stored staging.
     if (instance.type == Synth::EffectType::fir_multiband) {
         return Synth::stage_fir_multiband_coeff_entry(instance.state_offs / 4,
                                                       instance.fir_bands.band_count,
@@ -2350,7 +2377,7 @@ static bool stage_effect_fir_entry(const EffectInstance& instance, Synth::FirEff
 }
 
 // A FIR effect contributes a coefficient entry iff its staging produces one: a single-band
-// effect always stages the legacy entry (byte-identical legacy staging), a multi-band effect
+// effect always stages the stored entry (byte-identical stored staging), a multi-band effect
 // stages when at least one band is active (the oscillator fir_active analog).
 static uint32_t count_effect_fir(const EffectChain& chain)
 {

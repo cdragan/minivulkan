@@ -10,22 +10,30 @@
 #include "synth_soundtrack.h"
 #include <assert.h>
 
-namespace Synth {
+using Synth::EnvelopeDescriptor;
+using Synth::EnvelopeState;
+using Synth::lfo_beat_div_period_ms;
+using Synth::LFODescriptor;
+using Synth::ParamDescriptor;
+using Synth::Parameter;
+using Synth::ParamKind;
+using Synth::SourceOp;
+using Synth::WaveType;
 
 static constexpr int pitch_bend_full_scale = 8192;
 
-float pitch_bend_to_semitones(int16_t centered_bend, float range_semitones)
+float Synth::pitch_bend_to_semitones(int16_t centered_bend, float range_semitones)
 {
     return static_cast<float>(centered_bend) / static_cast<float>(pitch_bend_full_scale) * range_semitones;
 }
 
-float note_to_frequency(int midi_note, float pitch_semitones, uint32_t freq_mult)
+float Synth::note_to_frequency(int midi_note, float pitch_semitones, uint32_t freq_mult)
 {
     const float note_pitch = static_cast<float>(midi_note - 69) + pitch_semitones;
     return static_cast<float>(freq_mult * 440) * mstd::exp2(note_pitch / 12.0f);
 }
 
-float random_pitch_skew(RNG* rng, float amount_semitones)
+float Synth::random_pitch_skew(RNG* rng, float amount_semitones)
 {
     // Amount 0 leaves the pitch untouched and the generator unadvanced (deterministic, unchanged).
     if (amount_semitones == 0.0f) {
@@ -134,7 +142,7 @@ static float eval_lfo_normalized(const LFODescriptor& lfo,
     return pulse_shaper(wave, lfo.pulse_mix);
 }
 
-float lfo_beat_div_period_ms(uint8_t beat_div)
+float Synth::lfo_beat_div_period_ms(uint8_t beat_div)
 {
     assert(beat_div <= 5);
 
@@ -176,7 +184,7 @@ static uint32_t resolved_lfo_period_ms(const LFODescriptor& lfo)
     return period ? period : 1;
 }
 
-float eval_lfo(const LFODescriptor& lfo, uint32_t lfo_tick, uint32_t step_samples, uint32_t sampling_rate)
+float Synth::eval_lfo(const LFODescriptor& lfo, uint32_t lfo_tick, uint32_t step_samples, uint32_t sampling_rate)
 {
     const uint32_t period_ms = resolved_lfo_period_ms(lfo);
     const float    wave      = eval_lfo_normalized(lfo, lfo_tick, step_samples, sampling_rate, period_ms);
@@ -184,13 +192,13 @@ float eval_lfo(const LFODescriptor& lfo, uint32_t lfo_tick, uint32_t step_sample
     return lfo.min_value + wave * lfo.min_max_delta;
 }
 
-float eval_lfo_mod(const LFODescriptor& lfo,
-                   uint32_t             lfo_tick,
-                   uint32_t             step_samples,
-                   uint32_t             sampling_rate,
-                   uint32_t             period_ms,
-                   float                depth,
-                   SourceOp             op)
+float Synth::eval_lfo_mod(const LFODescriptor& lfo,
+                          uint32_t             lfo_tick,
+                          uint32_t             step_samples,
+                          uint32_t             sampling_rate,
+                          uint32_t             period_ms,
+                          float                depth,
+                          SourceOp             op)
 {
     const uint32_t rate_period = period_ms ? period_ms : lfo.period_ms;
     const float    wave        = eval_lfo_normalized(lfo, lfo_tick, step_samples, sampling_rate, rate_period);
@@ -249,12 +257,12 @@ static float envelope_value_at(const EnvelopeDescriptor& envelope, const Envelop
     return envelope.min_value + static_cast<float>(env_value) * envelope.min_max_delta;
 }
 
-float eval_envelope_at(const EnvelopeDescriptor& envelope, const EnvelopeState& state)
+float Synth::eval_envelope_at(const EnvelopeDescriptor& envelope, const EnvelopeState& state)
 {
     return envelope_value_at(envelope, state);
 }
 
-float eval_envelope(const EnvelopeDescriptor& envelope, EnvelopeState* state, bool sustain)
+float Synth::eval_envelope(const EnvelopeDescriptor& envelope, EnvelopeState* state, bool sustain)
 {
     uint32_t env_point = state->point;
     uint32_t env_tick  = state->tick;
@@ -263,7 +271,7 @@ float eval_envelope(const EnvelopeDescriptor& envelope, EnvelopeState* state, bo
 
     // Ping-pong sustain span: the direction reverses at both span ends
     // instead of looping back to the span start.  Single-point spans (and
-    // the ping_pong flag off) keep the legacy loop below.
+    // the ping_pong flag off) keep the stored loop below.
     if (sustain && (envelope.flags & envelope_ping_pong) &&
         envelope.sustain_last_point > envelope.sustain_first_point) {
         if (! state->reverse) {
@@ -351,7 +359,7 @@ float eval_envelope(const EnvelopeDescriptor& envelope, EnvelopeState* state, bo
     return value;
 }
 
-void propagate_parameters(Parameter* params, const ParamDescriptor* descs, uint32_t num_params)
+void Synth::propagate_parameters(Parameter* params, const ParamDescriptor* descs, uint32_t num_params)
 {
     // Snapshot every parameter's value so all reads this step see a consistent previous
     // state.  Envelope generators are exempt: their step pre-pass writes the pair (value at
@@ -386,13 +394,13 @@ void propagate_parameters(Parameter* params, const ParamDescriptor* descs, uint3
     }
 }
 
-void configure_lfo(ParamDescriptor*     desc,
-                   const LFODescriptor& lfo,
-                   SourceOp             lfo_op,
-                   float                lfo_depth,
-                   uint16_t             lfo_depth_param_id,
-                   uint16_t             lfo_rate_param_id,
-                   float                lfo_rate_scale)
+void Synth::configure_lfo(ParamDescriptor*     desc,
+                          const LFODescriptor& lfo,
+                          SourceOp             lfo_op,
+                          float                lfo_depth,
+                          uint16_t             lfo_depth_param_id,
+                          uint16_t             lfo_rate_param_id,
+                          float                lfo_rate_scale)
 {
     *desc                    = {};
     desc->kind               = ParamKind::lfo;
@@ -404,14 +412,14 @@ void configure_lfo(ParamDescriptor*     desc,
     desc->lfo.rate_scale_ms  = lfo_rate_scale;
 }
 
-void configure_plain(ParamDescriptor*   desc,
-                     float              base_value,
-                     uint16_t           env_param_id,
-                     float              env_scale,
-                     uint16_t           lfo_param_id,
-                     SourceOp           lfo_op,
-                     const SourceParam* inputs,
-                     uint32_t           num_inputs)
+void Synth::configure_plain(ParamDescriptor*   desc,
+                            float              base_value,
+                            uint16_t           env_param_id,
+                            float              env_scale,
+                            uint16_t           lfo_param_id,
+                            SourceOp           lfo_op,
+                            const SourceParam* inputs,
+                            uint32_t           num_inputs)
 {
     assert((env_param_id ? 1u : 0u) + (lfo_param_id ? 1u : 0u) + num_inputs <= max_param_sources);
 
@@ -436,22 +444,20 @@ void configure_plain(ParamDescriptor*   desc,
     desc->plain.num_sources = static_cast<uint16_t>(num_sources);
 }
 
-uint32_t get_ringbuf_data_size(const uint64_t write_pos, const uint64_t read_pos)
+uint32_t Synth::get_ringbuf_data_size(const uint64_t write_pos, const uint64_t read_pos)
 {
     return static_cast<uint32_t>(write_pos - read_pos);
 }
 
-uint32_t get_ringbuf_avail_space(const uint64_t write_pos, const uint64_t read_pos, const uint32_t capacity)
+uint32_t Synth::get_ringbuf_avail_space(const uint64_t write_pos, const uint64_t read_pos, const uint32_t capacity)
 {
     return capacity - get_ringbuf_data_size(write_pos, read_pos);
 }
 
-uint32_t get_ringbuf_contig_tail(const uint64_t pos, const uint32_t capacity)
+uint32_t Synth::get_ringbuf_contig_tail(const uint64_t pos, const uint32_t capacity)
 {
     return capacity - static_cast<uint32_t>(pos % capacity);
 }
-
-} // namespace Synth
 
 Synth::EnvelopeState Synth::quick_release_target(const EnvelopeDescriptor& envelope, const EnvelopeState& state)
 {
@@ -540,7 +546,7 @@ bool Synth::envelope_note_off(const EnvelopeDescriptor& envelope, EnvelopeState*
 uint32_t Synth::sustain_decay_ticks(const float release_seconds)
 {
     // Zero (and negative or NaN, which no decoded bank can carry) is the
-    // legacy gate: no decay.
+    // stored gate: no decay.
     if (! (release_seconds > 0.0f)) {
         return 0;
     }

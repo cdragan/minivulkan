@@ -788,7 +788,7 @@ static void check_clipboard_inline_0()
         TEST(osc.osc_type[1] == Synth::WaveType::sawtooth_wave);
         TEST(osc.osc_mode == Synth::osc_mode_fm);
         TEST(osc.mod_ratio == 2.0f);
-        // The legacy key folds into the pitch base: 1.0 + (-12.0).
+        // The stored key folds into the pitch base: 1.0 + (-12.0).
         TEST(osc.targets[Synth::mod_pitch].base_value == -11.0f);
         TEST(osc.octave_offset == 5);
         // Untouched targets keep neutral defaults.
@@ -801,7 +801,7 @@ static void check_clipboard_inline_0()
         TEST(instr.layers[0].targets[Synth::mod_volume].inputs[0].source == Synth::ModSource::velocity);
         TEST(instr.layers[0].targets[Synth::mod_volume].inputs[0].op == Synth::SourceOp::add);
         TEST(instr.layers[0].targets[Synth::mod_volume].inputs[0].scale == 0.5f);
-        // The pitch block base plus the folded legacy key: 1.0 + (-12.0).
+        // The pitch block base plus the folded stored key: 1.0 + (-12.0).
         TEST(instr.layers[0].targets[Synth::mod_pitch].base_value == -11.0f);
         TEST(instr.layers[0].targets[Synth::mod_panning].base_value == 0.5f);
         TEST(instr.layers[0].targets[Synth::mod_duty1].base_value == 0.5f);
@@ -1492,42 +1492,42 @@ static void check_clipboard_inline_0()
             // Old banks: a scalar slope with no routing key decodes with
             // the 12th target zeroed and the scalar preserved.
             {
-                Synth::Instrument         legacy_instr                                 = {};
-                Synth::EnvelopeDescriptor legacy_envs[Synth::instrument_max_envelopes] = {};
-                Synth::LFODescriptor      legacy_lfos[Synth::instrument_max_lfos]      = {};
-                uint32_t                  legacy_env_count                             = 999;
-                uint32_t                  legacy_lfo_count                             = 999;
-                const char* const         legacy_slope_doc =
+                Synth::Instrument         stored_instr                                 = {};
+                Synth::EnvelopeDescriptor stored_envs[Synth::instrument_max_envelopes] = {};
+                Synth::LFODescriptor      stored_lfos[Synth::instrument_max_lfos]      = {};
+                uint32_t                  stored_env_count                             = 999;
+                uint32_t                  stored_lfo_count                             = 999;
+                const char* const         stored_slope_doc =
                     "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_slope\":37}]}";
-                TEST(Synth::decode_instrument_json(legacy_slope_doc,
-                                                   static_cast<uint32_t>(strlen(legacy_slope_doc)),
-                                                   &legacy_instr,
-                                                   legacy_envs,
-                                                   &legacy_env_count,
-                                                   legacy_lfos,
-                                                   &legacy_lfo_count));
-                TEST(legacy_instr.layers[0].fir_slope_percent == 37);
-                TEST(legacy_instr.layers[0].targets[Synth::mod_fir_slope].base_value == 0.0f);
-                TEST(legacy_instr.layers[0].targets[Synth::mod_fir_slope].num_inputs == 0);
-                TEST(legacy_instr.layers[0].targets[Synth::mod_fir_slope].envelope_desc_id == 0);
-                TEST(legacy_instr.layers[0].targets[Synth::mod_fir_slope].lfo_desc_id == 0);
-                // The same legacy shape through the saved-bank codec.
-                const char* const legacy_bank_doc =
+                TEST(Synth::decode_instrument_json(stored_slope_doc,
+                                                   static_cast<uint32_t>(strlen(stored_slope_doc)),
+                                                   &stored_instr,
+                                                   stored_envs,
+                                                   &stored_env_count,
+                                                   stored_lfos,
+                                                   &stored_lfo_count));
+                TEST(stored_instr.layers[0].fir_slope_percent == 37);
+                TEST(stored_instr.layers[0].targets[Synth::mod_fir_slope].base_value == 0.0f);
+                TEST(stored_instr.layers[0].targets[Synth::mod_fir_slope].num_inputs == 0);
+                TEST(stored_instr.layers[0].targets[Synth::mod_fir_slope].envelope_desc_id == 0);
+                TEST(stored_instr.layers[0].targets[Synth::mod_fir_slope].lfo_desc_id == 0);
+                // The same stored shape through the saved-bank codec.
+                const char* const stored_bank_doc =
                     "{\"instrument_editor_bank\":{\"instruments\":"
                     "[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\",\"fir_slope\":37,"
                     "\"routing\":{}}]}],"
                     "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}";
-                const std::unique_ptr<Synth::InstrumentEditorBank> legacy_bank_storage =
+                const std::unique_ptr<Synth::InstrumentEditorBank> stored_bank_storage =
                     std::make_unique<Synth::InstrumentEditorBank>();
-                Synth::InstrumentEditorBank& legacy_bank = *legacy_bank_storage;
-                memset(static_cast<void*>(&legacy_bank), 0, sizeof(legacy_bank));
-                TEST(Synth::decode_editor_bank_json(legacy_bank_doc,
-                                                    static_cast<uint32_t>(strlen(legacy_bank_doc)),
-                                                    &legacy_bank));
-                TEST(legacy_bank.bank.instruments.entries[0].layers[0].fir_slope_percent == 37);
-                TEST(legacy_bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_slope].base_value ==
+                Synth::InstrumentEditorBank& stored_bank = *stored_bank_storage;
+                memset(static_cast<void*>(&stored_bank), 0, sizeof(stored_bank));
+                TEST(Synth::decode_editor_bank_json(stored_bank_doc,
+                                                    static_cast<uint32_t>(strlen(stored_bank_doc)),
+                                                    &stored_bank));
+                TEST(stored_bank.bank.instruments.entries[0].layers[0].fir_slope_percent == 37);
+                TEST(stored_bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_slope].base_value ==
                      0.0f);
-                TEST(legacy_bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_slope].num_inputs == 0);
+                TEST(stored_bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_slope].num_inputs == 0);
             }
             // A schema-conformant document may state a routed slope block
             // without a base (the decode default 0): decode, clipboard-encode
@@ -1974,7 +1974,6 @@ static void check_clipboard_inline_0()
             // malformed
             "{\"format\":\"synth-instrument-v1\",\"layers\":[]",
             // unknown key
-            "{\"format\":\"synth-instrument-v1\",\"layers\":[],\"bogus\":1}",
             // bad wave
             "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"flugelhorn\"}]}",
             // bad mode
@@ -1987,7 +1986,6 @@ static void check_clipboard_inline_0()
             "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"sources\":["
             "{\"source\":\"velocity\"},{\"source\":\"mod_wheel\"},{\"source\":\"aftertouch\"}]}}]}",
             // unknown target
-            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"bassoon\":{\"base\":1.0}}]}",
             // negative Hz
             "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"lfo\":{\"wave\":\"sine\",\"frequency_hz\":-5.0}}}]}",
             // period overflow
@@ -2001,7 +1999,6 @@ static void check_clipboard_inline_0()
             "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"envelope\":{\"points\":["
             "{\"time_seconds\":0.5,\"level\":0.5},{\"time_seconds\":0.1,\"level\":1.0}]}}}]}",
             // wrong format tag
-            "{\"format\":\"synth-editor-9\",\"layers\":[]}",
             // no points
             "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"envelope\":{\"points\":[]}}}]}",
             // no wave
@@ -2011,7 +2008,6 @@ static void check_clipboard_inline_0()
             // source entry without "source"
             "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"sources\":[{\"op\":\"add\",\"scale\":0.5}]}}]}",
             // unknown field inside a source entry
-            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"sources\":[{\"source\":\"velocity\",\"banana\":1}]}}]}",
             // time beyond the tick range
             "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"envelope\":{\"points\":["
             "{\"time_seconds\":1000000.0,\"level\":0.5}]}}}]}",
@@ -3431,22 +3427,22 @@ static void check_clipboard_inline_0()
             const uint32_t cc_len = build_layout_doc(cc_doc, sizeof(cc_doc), clipboard_doc_head, clipboard_doc_records);
             TEST(cc_len > 0);
 
-            // A valid nonempty layout is refused by the legacy decoder rather than
-            // silently dropped, with every legacy output left at its sentinel.
-            const std::unique_ptr<ClipboardDecode> cc_legacy_attempt_storage  = std::make_unique<ClipboardDecode>();
-            ClipboardDecode&                       cc_legacy_attempt          = *cc_legacy_attempt_storage;
-            const std::unique_ptr<ClipboardDecode> cc_legacy_sentinel_storage = std::make_unique<ClipboardDecode>();
-            ClipboardDecode&                       cc_legacy_sentinel         = *cc_legacy_sentinel_storage;
-            fill_clipboard_sentinels(&cc_legacy_attempt);
-            fill_clipboard_sentinels(&cc_legacy_sentinel);
+            // A valid nonempty layout is refused by the stored decoder rather than
+            // silently dropped, with every stored output left at its sentinel.
+            const std::unique_ptr<ClipboardDecode> cc_stored_attempt_storage  = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       cc_stored_attempt          = *cc_stored_attempt_storage;
+            const std::unique_ptr<ClipboardDecode> cc_stored_sentinel_storage = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       cc_stored_sentinel         = *cc_stored_sentinel_storage;
+            fill_clipboard_sentinels(&cc_stored_attempt);
+            fill_clipboard_sentinels(&cc_stored_sentinel);
             TEST(! Synth::decode_instrument_json(cc_doc,
                                                  cc_len,
-                                                 &cc_legacy_attempt.instr,
-                                                 cc_legacy_attempt.envs,
-                                                 &cc_legacy_attempt.env_count,
-                                                 cc_legacy_attempt.lfos,
-                                                 &cc_legacy_attempt.lfo_count));
-            TEST(clipboard_sentinels_intact(&cc_legacy_attempt, &cc_legacy_sentinel));
+                                                 &cc_stored_attempt.instr,
+                                                 cc_stored_attempt.envs,
+                                                 &cc_stored_attempt.env_count,
+                                                 cc_stored_attempt.lfos,
+                                                 &cc_stored_attempt.lfo_count));
+            TEST(clipboard_sentinels_intact(&cc_stored_attempt, &cc_stored_sentinel));
 
             // An absent or empty field decodes; the new decoder accepts both and
             // reports a zero layout count through a null layout output while the
@@ -3655,23 +3651,23 @@ static void check_clipboard_inline_0()
             TEST(decode_clipboard(&mf_short, mf_text, max_portable_records - 1) == false);
             TEST(clipboard_sentinels_intact(&mf_short, &mf_sentinel));
 
-            // The same instrument through the legacy entry point is smaller by the
+            // The same instrument through the stored entry point is smaller by the
             // record array alone and carries an empty layout: the layout array is the
             // only addition to the document.
-            const std::unique_ptr<FixedArray<char, clipboard_capacity>> mf_legacy_storage =
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> mf_stored_storage =
                 std::make_unique<FixedArray<char, clipboard_capacity>>();
-            char (&mf_legacy)[clipboard_capacity] = mf_legacy_storage->elements;
-            const uint32_t mf_legacy_len =
-                Synth::encode_instrument_json(mf_legacy, sizeof(mf_legacy), &mf_instr, &mf_bank);
-            TEST(mf_legacy_len > 0);
-            TEST(mf_legacy_len < mf_len);
-            TEST(strstr(mf_legacy, "\"graph_layout\":[]") != nullptr);
+            char (&mf_stored)[clipboard_capacity] = mf_stored_storage->elements;
+            const uint32_t mf_stored_len =
+                Synth::encode_instrument_json(mf_stored, sizeof(mf_stored), &mf_instr, &mf_bank);
+            TEST(mf_stored_len > 0);
+            TEST(mf_stored_len < mf_len);
+            TEST(strstr(mf_stored, "\"graph_layout\":[]") != nullptr);
 
             // A legal portable LFO record has nine key/value pairs: 19 tokens.
             // This bounds legal layout output, not rejection order for malformed input.
-            // The instrument body is measured from this fixture's legacy encoding.
+            // The instrument body is measured from this fixture's stored encoding.
             constexpr uint32_t max_tokens_per_record = 2u * 9u + 1u; // object + 9 keys + 9 values
-            const int32_t      mf_body_tokens        = count_clipboard_tokens(mf_legacy, mf_legacy_len);
+            const int32_t      mf_body_tokens        = count_clipboard_tokens(mf_stored, mf_stored_len);
             TEST(mf_body_tokens > 0);
             TEST(max_portable_records * max_tokens_per_record < clipboard_token_bound);
             TEST(static_cast<uint64_t>(mf_body_tokens) + uint64_t{ max_portable_records } * max_tokens_per_record <

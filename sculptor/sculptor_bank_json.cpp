@@ -184,7 +184,6 @@ struct Walker {
     uint32_t         num_toks;
     bool             failed;
     bool             strict_editor_metadata;
-    bool             strict_effects;
 };
 
 // A key's decoded stream: every literal byte sequence and every \u escape
@@ -299,8 +298,6 @@ struct InstrumentDocState {
     uint32_t                  lfo_count;
 };
 
-namespace {
-
 // ---------------------------------------------------------------------------
 // Shared enum spelling: one name per value, used by both encoder and decoder
 // ---------------------------------------------------------------------------
@@ -363,8 +360,8 @@ constexpr uint32_t bank_json_text_size = 1024 * 1024;
 // One token index per parser token; the decoder pins the vendored parser's
 // 16-byte token size so the key-index scratch stays a fixed fraction of the pool.
 constexpr uint32_t json_token_count = 32768;
-char               json_text[bank_json_text_size];
-jsmntok_t          json_tokens[json_token_count];
+static char        json_text[bank_json_text_size];
+static jsmntok_t   json_tokens[json_token_count];
 
 // Token storage uses the parser's fixed four-int representation.
 static_assert(sizeof(jsmntok_t) == 16);
@@ -378,7 +375,7 @@ constexpr uint32_t invalid_index = 0xFFFFFFFFu;
 // Post-order key-uniqueness scratch: by the time an object checks its own keys,
 // every nested object finished checking (theirs ran during the recursive value
 // walks below), so one shared array serves all of them.
-uint32_t object_keys[json_token_count];
+static uint32_t object_keys[json_token_count];
 
 // Resident parser storage is counted by the owner in sculptor_instr_edit.cpp.
 static_assert(sizeof(json_text) + sizeof(json_tokens) + sizeof(object_keys) == Synth::bank_json_parser_bytes);
@@ -387,7 +384,7 @@ static_assert(sizeof(json_text) + sizeof(json_tokens) + sizeof(object_keys) == S
 
 // Shared staging for the transactional decode: the GUI thread runs one decode at a
 // time, so one static scratch serves every caller (decode is not reentrant).
-Synth::InstrumentEditorBank decode_scratch;
+static Synth::InstrumentEditorBank decode_scratch;
 
 // ---------------------------------------------------------------------------
 // Clipboard instrument documents: friendly-unit JSON for one instrument
@@ -398,33 +395,29 @@ Synth::InstrumentEditorBank decode_scratch;
 
 constexpr const char instrument_format_tag[] = "synth-instrument-v1";
 
-InstrumentDocState           instrument_doc;
-Synth::InstrumentGraphLayout instrument_layout_staging[Synth::instrument_graph_layout_capacity];
-Synth::GraphNodeLayout       instrument_mapped_staging[Synth::instrument_graph_layout_capacity];
+static InstrumentDocState           instrument_doc;
+static Synth::InstrumentGraphLayout instrument_layout_staging[Synth::instrument_graph_layout_capacity];
+static Synth::GraphNodeLayout       instrument_mapped_staging[Synth::instrument_graph_layout_capacity];
 
-char                         editor_export_text[128 * 1024];
-Synth::Instrument            editor_export_decoded;
-Synth::EnvelopeDescriptor    editor_export_envelopes[Synth::instrument_max_envelopes];
-Synth::LFODescriptor         editor_export_lfos[Synth::instrument_max_lfos];
-Synth::InstrumentGraphLayout editor_export_source_layout[Synth::instrument_graph_layout_capacity];
-Synth::InstrumentGraphLayout editor_export_normalized[Synth::instrument_graph_layout_capacity];
-uint8_t                      editor_export_osc_source[Synth::max_layers];
+static char                         editor_export_text[128 * 1024];
+static Synth::Instrument            editor_export_decoded;
+static Synth::EnvelopeDescriptor    editor_export_envelopes[Synth::instrument_max_envelopes];
+static Synth::LFODescriptor         editor_export_lfos[Synth::instrument_max_lfos];
+static Synth::InstrumentGraphLayout editor_export_source_layout[Synth::instrument_graph_layout_capacity];
+static Synth::InstrumentGraphLayout editor_export_normalized[Synth::instrument_graph_layout_capacity];
+static uint8_t                      editor_export_osc_source[Synth::max_layers];
 
 // Marker for an explicitly supplied routing null: no out-array length was
 // decoded to compare against the decoded effect count.
 constexpr uint32_t routing_len_null = 0xFFFFFFFFu;
 
-// Legacy v2 effect_audio staging: per-chain successor arrays plus the
-// explicit-entry marks, and the v3 routing out-array lengths.  The decode
-// walk consumes them; none of it enters the decoded bank.
-uint8_t  decode_audio_next[Synth::max_channels + 1][Synth::max_chain_effects + 1];
-bool     decode_audio_explicit[Synth::max_channels + 1];
-uint32_t decode_routing_out_len[Synth::max_channels + 1];
+// Decoded routing out-array lengths are checked against each chain.
+static uint32_t decode_routing_out_len[Synth::max_channels + 1];
 
 // FIR band-object decoder keys: the plain FIR's dormant band objects name
 // their edge bindings lowpass/highpass; the multiband type's name the same
 // positions center/spread.
-constexpr const char* legacy_fir_edge_keys[2]    = { "lowpass", "highpass" };
+constexpr const char* fir_edge_keys[2]           = { "lowpass", "highpass" };
 constexpr const char* multiband_fir_edge_keys[2] = { "center", "spread" };
 // The band-object keys both FIR types share: the plain FIR's dormant band
 // objects are fir_band1..3 (band 0 rides the fir_band0_gain key) and the
@@ -433,7 +426,6 @@ constexpr const char* fir_band_keys[Synth::max_fir_effect_bands] = { "fir_band0"
                                                                      "fir_band1",
                                                                      "fir_band2",
                                                                      "fir_band3" };
-} // namespace
 
 static void key_uint(Out& o, const char* name, uint32_t v)
 {
@@ -531,13 +523,13 @@ static bool routing_is_default(const Synth::TargetBinding& routing)
     return routing.base_value == 0.0f && routing.num_inputs == 0;
 }
 
-static void enc_mod_input(Out& o, const Synth::ModInput& in)
+static void enc_mod_input(Out& o, const Synth::ModInput& in, bool ms = false)
 {
     o.ch('{');
     key_enum(o, "source", mod_source_names, num_mod_sources, static_cast<uint32_t>(in.source));
     key_enum(o, "op", source_op_names, num_source_ops, static_cast<uint32_t>(in.op));
     key_uint_nonzero(o, "cc_number", in.cc_number);
-    key_float_nonzero(o, "scale", in.scale);
+    key_float_nonzero(o, ms ? "scale_ms" : "scale", in.scale);
     o.ch('}');
 }
 
@@ -646,11 +638,11 @@ static void enc_oscillator(Out& o, const Synth::Oscillator& osc)
         // A base-0 unwired gain in a multi-band bandpass layer encodes as
         // the empty block, which decodes as the gain-0 band: the explicit
         // inactive band survives the round trip instead of reloading as the
-        // 1.0 absent default.  A single-band layer keeps the legacy
-        // omission: its absent key decodes the legacy audible 1.0, the
+        // 1.0 absent default.  A single-band layer keeps the stored
+        // omission: its absent key decodes the stored audible 1.0, the
         // pre-band-UI convention for the zeroed single-band gain binding.
-        // A non-bandpass layer keeps the legacy omission too: its band
-        // count is a retained legacy/hand-edited state, and its absent
+        // A non-bandpass layer keeps the stored omission too: its band
+        // count is a retained stored/hand-edited state, and its absent
         // band gain decodes the zeroed default.
         const bool band_gain_zero = band_gain && routing_is_default(osc.targets[t]) &&
                                     osc.fir_type == Synth::fir_bandpass && osc.fir_band_count > 1u;
@@ -699,6 +691,8 @@ static void enc_instrument(Out& o, const Synth::Instrument& instr)
     key_float_nonzero(o, "layer_skew_semitones", instr.layer_skew_semitones);
     key_float_nonzero(o, "release_seconds", instr.release_seconds);
     key_enum(o, "voices", voice_mode_names, num_voice_modes, instr.voice_mode);
+    o.key("pitch_bend_lock");
+    o.bool_value(instr.pitch_bend_lock != 0);
     o.ch('}');
 }
 
@@ -805,7 +799,7 @@ static void enc_param(Out& o, const Synth::ParamDescriptor& param)
     o.ch('}');
 }
 
-static void enc_binding(Out& o, const Synth::EffectParamBinding& binding)
+static void enc_binding(Out& o, const Synth::EffectParamBinding& binding, bool ms = false)
 {
     if (binding.num_inputs > Synth::max_mod_inputs) {
         o.overflow = true;
@@ -813,10 +807,15 @@ static void enc_binding(Out& o, const Synth::EffectParamBinding& binding)
     }
 
     o.ch('{');
-    key_float_nonzero(o, "base_value", binding.base_value);
+    if (ms) {
+        o.key("base_value_ms");
+        o.float_value(binding.base_value);
+    }
+    else
+        key_float_nonzero(o, "base_value", binding.base_value);
     key_uint_nonzero(o, "lfo_desc_id", binding.lfo_desc_id);
     key_enum(o, "lfo_op", source_op_names, num_source_ops, static_cast<uint32_t>(binding.lfo_op));
-    key_float_nonzero(o, "lfo_depth", binding.lfo_depth);
+    key_float_nonzero(o, ms ? "lfo_depth_ms" : "lfo_depth", binding.lfo_depth);
     key_enum(o, "lfo_depth_source", mod_source_names, num_mod_sources, static_cast<uint32_t>(binding.lfo_depth_source));
     key_enum(o, "lfo_rate_source", mod_source_names, num_mod_sources, static_cast<uint32_t>(binding.lfo_rate_source));
     key_float_nonzero(o, "lfo_rate_scale", binding.lfo_rate_scale);
@@ -825,7 +824,7 @@ static void enc_binding(Out& o, const Synth::EffectParamBinding& binding)
         o.ch('[');
         for (uint32_t i = 0; i < binding.num_inputs; i++) {
             o.sep();
-            enc_mod_input(o, binding.inputs[i]);
+            enc_mod_input(o, binding.inputs[i], ms);
         }
         o.ch(']');
     }
@@ -882,7 +881,7 @@ static void enc_fir_effect_band(Out& o, const Synth::EffectParamBinding* band, u
         o.overflow = true;
         return;
     }
-    enc_fir_band_object(o, fir_band_keys[band_index], band, legacy_fir_edge_keys);
+    enc_fir_band_object(o, fir_band_keys[band_index], band, fir_edge_keys);
 }
 
 static void enc_effect(Out& o, const Synth::EffectSlotBinding& slot, bool strict = false)
@@ -917,14 +916,14 @@ static void enc_effect(Out& o, const Synth::EffectSlotBinding& slot, bool strict
         const uint32_t num_params = Synth::get_effect_param_floats(slot.type);
         for (uint32_t p = 0; p < num_params; p++) {
             o.sep();
-            enc_binding(o, slot.bindings[p]);
+            enc_binding(o, slot.bindings[p], Synth::effect_param_is_ms(slot.type, p));
         }
         o.ch(']');
     }
-    // FIR bands: the count key appears only above the legacy single band.
+    // FIR bands: the count key appears only above the stored single band.
     // Band 0's gain key encodes whenever its binding is non-default, so an
-    // authored single-band gain survives the round trip; the legacy zeroed
-    // block stays omitted (the legacy default) and the multi-band neutral
+    // authored single-band gain survives the round trip; the stored zeroed
+    // block stays omitted (the stored default) and the multi-band neutral
     // 1.0 stays omitted (an absent key decodes the neutral 1.0, so an
     // explicit zero gain rides the empty block).
     if (slot.type == Synth::EffectType::fir) {
@@ -1807,12 +1806,28 @@ static uint32_t check_value(Walker& w, uint32_t i)
     }
 }
 
+static char     ignored_names[8][48];
+static uint32_t ignored_count = 0;
+
+static void record_ignored(const char* name)
+{
+    if (ignored_count < 8)
+        snprintf(ignored_names[ignored_count], 48, "%s", name);
+    ++ignored_count;
+}
+
+uint32_t Synth::take_ignored_fields(char (*names)[48], uint32_t capacity)
+{
+    const uint32_t count = ignored_count;
+    for (uint32_t i = 0; i < count && i < capacity && i < 8; ++i) {
+        memcpy(names[i], ignored_names[i], 48);
+    }
+    ignored_count = 0;
+    return count;
+}
+
 static void unknown_field(Walker& w, uint32_t key_idx)
 {
-    if (w.strict_effects) {
-        w.failed = true;
-        return;
-    }
     // The logged name is the key's decoded prefix, encoded as UTF-8 as far as the
     // bounded display buffer holds it.  A code point that no longer fits ends the
     // prefix, so the log always shows a faithful head of the decoded name,
@@ -1836,6 +1851,7 @@ static void unknown_field(Walker& w, uint32_t key_idx)
     }
     display[o] = 0;
 
+    record_ignored(display);
     d_printf("Ignored unknown bank field: %s\n", display);
 }
 
@@ -2013,6 +2029,21 @@ static void want_float(Walker& w, uint32_t i, float* out)
     *out = converted;
 }
 
+// Time-key values retain their seeded default and warn on invalid numeric content.
+static void want_time_float(Walker& w, uint32_t key, uint32_t value, float* out)
+{
+    const auto& token = w.toks[value];
+    if (token.type == JSMN_PRIMITIVE &&
+        number_grammar_ok(w.doc + token.start, static_cast<uint32_t>(token.end - token.start))) {
+        const float converted = static_cast<float>(strtod(w.doc + token.start, nullptr));
+        if (std::isfinite(converted)) {
+            *out = converted;
+            return;
+        }
+    }
+    unknown_field(w, key);
+}
+
 static void want_bool(Walker& w, uint32_t i, bool* out)
 {
     if (w.toks[i].type == JSMN_PRIMITIVE && tok_text_eq(w, i, "true"))
@@ -2130,13 +2161,14 @@ template <typename F> static void walk_array(Walker& w, uint32_t arr, uint32_t m
 }
 
 // Field walk shared by the bank and document decoders; unknown_field carries
-// each format's policy (the bank skips, the document refuses) and source_set
+// the warning-and-ignore policy for both formats, and source_set
 // tells strict callers whether "source" was present.
 static void decode_mod_input_fields(Walker&          w,
                                     uint32_t         obj,
                                     Synth::ModInput& in,
                                     bool*            source_set,
-                                    void (*unknown)(Walker&, uint32_t))
+                                    void (*unknown)(Walker&, uint32_t),
+                                    bool ms = false)
 {
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
@@ -2149,8 +2181,12 @@ static void decode_mod_input_fields(Walker&          w,
             want_enum(w, val_idx, source_op_names, num_source_ops, &value);
             in.op = static_cast<Synth::SourceOp>(value);
         }
-        else if (key_eq(w, key_idx, "scale"))
-            want_float(w, val_idx, &in.scale);
+        else if (key_eq(w, key_idx, ms ? "scale_ms" : "scale")) {
+            if (ms)
+                want_time_float(w, key_idx, val_idx, &in.scale);
+            else
+                want_float(w, val_idx, &in.scale);
+        }
         else if (key_eq(w, key_idx, "cc_number")) {
             // Controller numbers are 7-bit: a cc_number above 127 is refused at decode.
             want_u8(w, val_idx, 0x7F, &in.cc_number);
@@ -2160,17 +2196,17 @@ static void decode_mod_input_fields(Walker&          w,
     });
 }
 
-static void decode_mod_input(Walker& w, uint32_t obj, Synth::ModInput& in)
+static void decode_mod_input(Walker& w, uint32_t obj, Synth::ModInput& in, bool ms = false)
 {
     bool source_set; // unused: the bank format makes "source" optional
-    decode_mod_input_fields(w, obj, in, &source_set, unknown_field);
+    decode_mod_input_fields(w, obj, in, &source_set, unknown_field, ms);
 }
 
 static void decode_gen(Walker& w, uint32_t obj, Synth::TargetBinding& gen, bool* touched)
 {
     // Only caller passes &bank_touched[t]; no portable (nullable) path.
     *touched = true;
-    // Absent key = the legacy unscaled contribution; the pre-set survives
+    // Absent key = the stored unscaled contribution; the pre-set survives
     // memset-zeroed decode targets.
     gen.envelope_depth = 1.0f;
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
@@ -2290,8 +2326,8 @@ static void decode_routing(Walker&               w,
 // The name-keyed routing dispatch shared by the saved-bank decoder and the
 // document decoder's "routing" alias: each key names a target, an explicit
 // fm_ratio block stays authoritative (monotonic tracking), and the target's
-// routing block decodes straight into the caller's oscillator.  Only the
-// unknown-field policy differs between the callers.
+// routing block decodes straight into the caller's oscillator.  Both callers
+// report and ignore unknown fields.
 static void decode_routing_object(Walker&            w,
                                   uint32_t           val_idx,
                                   Synth::FilterType  fir_type,
@@ -2321,10 +2357,10 @@ static void decode_routing_object(Walker&            w,
     });
 }
 
-// Legacy inheritance clamp shared by the bank and document decoders:
-// exactly zero stays zero (the legacy unset carrier value); anything
+// Stored inheritance clamp shared by the bank and document decoders:
+// exactly zero stays zero (the stored unset carrier value); anything
 // else is clamped to the slider range.
-static float clamp_legacy_mod_ratio(float ratio)
+static float clamp_stored_mod_ratio(float ratio)
 {
     return ratio != 0.0f ? vmath::clamp(ratio, Synth::osc_mod_ratio_min, Synth::osc_mod_ratio_max) : 0.0f;
 }
@@ -2388,9 +2424,6 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
         else if (key_eq(w, key_idx, "mode")) {
             want_enum(w, val_idx, osc_mode_names, num_osc_modes, &value);
             osc.osc_mode = static_cast<Synth::OscMode>(value);
-        }
-        else if (key_eq(w, key_idx, "string_pick")) {
-            // Legacy key: the pick position was removed.  Any value is accepted and ignored.
         }
         else if (key_eq(w, key_idx, "string_brightness"))
             want_bounded_real(w, val_idx, 0.0, 1.0, &string_brightness);
@@ -2482,9 +2515,9 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
     osc.fir_type                   = fir_type;
     osc.fir_band_count             = static_cast<uint8_t>(band_count);
     // Per-band absent-key defaults, mirroring the portable document
-    // decoder, apply to a legacy single-band bandpass bank (no fir_bands,
+    // decoder, apply to a stored single-band bandpass bank (no fir_bands,
     // no band keys) too. Band 0's offset decodes the neutral 0.
-    // Non-bandpass layers keep the legacy zeroed gain binding: the gain row
+    // Non-bandpass layers keep the stored zeroed gain binding: the gain row
     // means nothing there, and a backfilled key would change the re-encoded
     // bytes of every pre-existing document.
     if (fir_type == Synth::fir_bandpass)
@@ -2492,13 +2525,13 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
     // Multi-band banks treat band 0's slope as a real band parameter: when the
     // count key is stated and no block names fir_slope, the unrouted binding's
     // base seeds from the scalar so the band row and the compiled base agree
-    // (legacy documents without the count key keep the zeroed binding, the
+    // (stored documents without the count key keep the zeroed binding, the
     // M1 scalar convention).
     if (fir_bands_stated && ! slope_routed) {
         osc.targets[Synth::mod_fir_slope].base_value = static_cast<float>(fir_slope);
     }
 
-    // Legacy pitch_offset folds into the pitch target's base value; the
+    // Stored pitch_offset folds into the pitch target's base value; the
     // combined static trim must stay inside the pitch editing range.
     if (! w.failed &&
         (pitch_offset < Sculptor::osc_pitch_offset_min || pitch_offset > Sculptor::osc_pitch_offset_max)) {
@@ -2511,11 +2544,11 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
                                                                 pitch_view.max_value);
     }
 
-    // Legacy banks state only the scalar mod_ratio; when no routing block
+    // Stored banks state only the scalar mod_ratio; when no routing block
     // names fm_ratio the target inherits it, clamped to the slider range
     // when nonzero (0 stays 0).
     if (! fm_ratio_routed) {
-        osc.targets[Synth::mod_fm_ratio].base_value = clamp_legacy_mod_ratio(osc.mod_ratio);
+        osc.targets[Synth::mod_fm_ratio].base_value = clamp_stored_mod_ratio(osc.mod_ratio);
     }
 }
 
@@ -2544,6 +2577,11 @@ static void decode_instrument(Walker& w, uint32_t obj, Synth::Instrument& instr)
             want_float(w, val_idx, &instr.layer_skew_semitones);
         else if (key_eq(w, key_idx, "release_seconds")) {
             want_release_seconds(w, val_idx, &instr.release_seconds);
+        }
+        else if (key_eq(w, key_idx, "pitch_bend_lock")) {
+            bool lock = true;
+            want_bool(w, val_idx, &lock);
+            instr.pitch_bend_lock = lock ? 1 : 0;
         }
         else if (key_eq(w, key_idx, "voices")) {
             want_voice_mode(w, val_idx, &instr.voice_mode);
@@ -2812,12 +2850,23 @@ static void decode_param(Walker& w, uint32_t obj, Synth::ParamDescriptor& param)
         envelope_finish(w, param.envelope, fields);
 }
 
-static void decode_binding(Walker& w, uint32_t obj, Synth::EffectParamBinding& binding)
+static void decode_binding(Walker&                    w,
+                           uint32_t                   obj,
+                           Synth::EffectParamBinding& binding,
+                           Synth::EffectType          type  = Synth::EffectType::none,
+                           uint32_t                   index = 0)
 {
+    const bool ms = Synth::effect_param_is_ms(type, index);
+    if (ms)
+        binding.base_value = Sculptor::effect_param_default(type, index);
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
-        if (key_eq(w, key_idx, "base_value"))
-            want_float(w, val_idx, &binding.base_value);
+        if (key_eq(w, key_idx, ms ? "base_value_ms" : "base_value")) {
+            if (ms)
+                want_time_float(w, key_idx, val_idx, &binding.base_value);
+            else
+                want_float(w, val_idx, &binding.base_value);
+        }
         else if (key_eq(w, key_idx, "lfo_desc_id")) {
             want_uint(w, val_idx, Synth::max_lfos, &value);
             binding.lfo_desc_id = static_cast<uint16_t>(value);
@@ -2826,8 +2875,12 @@ static void decode_binding(Walker& w, uint32_t obj, Synth::EffectParamBinding& b
             want_enum(w, val_idx, source_op_names, num_source_ops, &value);
             binding.lfo_op = static_cast<Synth::SourceOp>(value);
         }
-        else if (key_eq(w, key_idx, "lfo_depth"))
-            want_float(w, val_idx, &binding.lfo_depth);
+        else if (key_eq(w, key_idx, ms ? "lfo_depth_ms" : "lfo_depth")) {
+            if (ms)
+                want_time_float(w, key_idx, val_idx, &binding.lfo_depth);
+            else
+                want_float(w, val_idx, &binding.lfo_depth);
+        }
         else if (key_eq(w, key_idx, "lfo_depth_source")) {
             want_enum(w, val_idx, mod_source_names, num_mod_sources, &value);
             binding.lfo_depth_source = static_cast<Synth::ModSource>(value);
@@ -2840,21 +2893,29 @@ static void decode_binding(Walker& w, uint32_t obj, Synth::EffectParamBinding& b
             want_float(w, val_idx, &binding.lfo_rate_scale);
         else if (key_eq(w, key_idx, "inputs"))
             walk_array(w, val_idx, Synth::max_mod_inputs, [&](uint32_t elem, uint32_t pos) {
-                decode_mod_input(w, elem, binding.inputs[pos]);
+                decode_mod_input(w, elem, binding.inputs[pos], ms);
                 binding.num_inputs = static_cast<uint16_t>(pos + 1);
             });
         else
             unknown_field(w, key_idx);
     });
+    if (ms) {
+        const float max_value = type == Synth::EffectType::delay ? 1000.0f : 50.0f;
+        const float old       = binding.base_value;
+        binding.base_value =
+            isfinite(old) ? fmaxf(0.0f, fminf(old, max_value)) : Sculptor::effect_param_default(type, index);
+        if (old != binding.base_value)
+            record_ignored("clamped base_value_ms");
+    }
 }
 
 // Pre-narrowing FIR slope validation: the binding walk narrows
 // base_value through want_float's permissive grammar, so fractional spellings
 // such as 50.5 or 1e2 would otherwise reach the percent field.   Element 2 of
-// either FIR type's shared legacy params array (the schema's  slope_binding)
+// either FIR type's shared stored params array (the schema's  slope_binding)
 // is re-read with want_int's integer grammar; an
 // omitted base_value defaults to 100 on the plain FIR (its live default),  while
-// the multiband keeps the decoded value: its zeroed legacy block is the
+// the multiband keeps the decoded value: its zeroed stored block is the
 // fresh slot's normal state, so injecting the default would break the
 // byte-identical save/load round trip.
 static void decode_fir_slope(Walker& w, uint32_t params_token, Synth::EffectSlotBinding& slot)
@@ -2888,7 +2949,7 @@ static void decode_fir_slope(Walker& w, uint32_t params_token, Synth::EffectSlot
 
 // Prescans the effect's type so the FIR band keys decode in any key order, mirroring
 // the oscillator's fir_type prescan.  An absent type reads as none, so band keys on a
-// type-less object refuse like any unknown field.
+// type-less object are reported and ignored like any unknown field.
 static Synth::EffectType prescan_effect_type(Walker& w, uint32_t obj)
 {
     uint32_t type = 0;
@@ -2901,7 +2962,7 @@ static Synth::EffectType prescan_effect_type(Walker& w, uint32_t obj)
 
 // One FIR effect band object: two edge bindings (lowpass/highpass on the plain FIR,
 // center/spread on the multiband type), gain and slope bindings.  The slope
-// base re-reads with the integer grammar like the legacy FIR Slope row (decode_fir_slope);
+// base re-reads with the integer grammar like the stored FIR Slope row (decode_fir_slope);
 // absent keys decode the neutral defaults, so an unconfigured band stays inactive (its
 // edges read 0) and its gain reads the neutral 1.0.
 static void decode_fir_effect_band(Walker&                    w,
@@ -2962,9 +3023,9 @@ static void decode_fir_band_neutral(Synth::EffectParamBinding* band)
     band[3].base_value = 100.0f;
 }
 
-// A band key beyond the declared count refuses through the unknown-field path.
+// A band key beyond the declared count is reported and ignored.
 // tokens[band - 1] and key_ids[band - 1] hold the token and key of band 1..max-1.
-static void refuse_out_of_count_bands(Walker&         w,
+static void report_out_of_count_bands(Walker&         w,
                                       const uint32_t* tokens,
                                       const uint32_t* key_ids,
                                       uint32_t        band_count,
@@ -2973,7 +3034,6 @@ static void refuse_out_of_count_bands(Walker&         w,
     for (uint32_t band = 1; band < Synth::max_fir_effect_bands; ++band) {
         if (tokens[band - 1] && (! have_count || band >= band_count)) {
             unknown_field(w, key_ids[band - 1]);
-            w.failed = true;
         }
     }
 }
@@ -2983,16 +3043,15 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
     uint32_t num_params     = 0;
     uint32_t params_token   = 0;
     bool     have_params    = false;
-    bool     have_type      = false;
     bool     have_fir_bands = false;
     uint32_t fir_band_count =
-        1; // absent fir_bands decodes as the single band (the plain FIR's legacy form, the multiband's normal shape)
+        1; // absent fir_bands decodes as the single band (the plain FIR's stored form, the multiband's normal shape)
     uint32_t fir_band0_gain_token = 0;
     uint32_t fir_band_tokens[3]   = { 0, 0, 0 };
-    uint32_t fir_band_key_ids[3]  = { 0, 0, 0 }; // each token's key, for the out-of-count refusal log
+    uint32_t fir_band_key_ids[3]  = { 0, 0, 0 }; // each token's key, for the out-of-count ignored-field log
     uint32_t fir_band0_gain_key   = 0;
     uint32_t multiband_band_tokens[Synth::max_fir_effect_bands]  = { 0, 0, 0, 0 };
-    uint32_t multiband_band_key_ids[Synth::max_fir_effect_bands] = { 0, 0, 0, 0 }; // keys, for the refusal log
+    uint32_t multiband_band_key_ids[Synth::max_fir_effect_bands] = { 0, 0, 0, 0 }; // keys, for the ignored-field log
     // Prescan: band keys decode in any key order, mirroring the oscillator's fir_type
     // prescan.
     const Synth::EffectType prescanned_type  = prescan_effect_type(w, obj);
@@ -3002,7 +3061,6 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
         if (key_eq(w, key_idx, "type")) {
-            have_type = true;
             want_enum(w, val_idx, effect_type_names, Synth::num_effect_types, &value);
             slot.type = static_cast<Synth::EffectType>(value);
         }
@@ -3018,7 +3076,7 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
             have_params  = true;
             params_token = val_idx;
             walk_array(w, val_idx, Synth::max_effect_param_floats, [&](uint32_t elem, uint32_t pos) {
-                decode_binding(w, elem, slot.bindings[pos]);
+                decode_binding(w, elem, slot.bindings[pos], prescanned_type, pos);
                 num_params = pos + 1;
             });
         }
@@ -3075,17 +3133,11 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
     if (w.failed)
         return;
 
-    // Strict effects documents carry exactly the params the type reads. Bank
-    // slots may omit trailing params (all of them when the key is absent); they
-    // take the type's defaults, so banks written before a parameter was appended
-    // load without per-type compat code. Extra params are corruption.
-    if (w.strict_effects && (! have_type || (slot.type != Synth::EffectType::none && ! have_params))) {
-        w.failed = true;
-    }
+    // Missing trailing parameters use defaults. Positional time bindings use
+    // ms-suffixed keys; old unsuffixed time keys are ignored, not converted.
     const uint32_t expected_count = Synth::get_effect_param_floats(slot.type);
-    if (num_params > expected_count || (w.strict_effects && num_params != expected_count)) {
+    if (num_params > expected_count)
         w.failed = true;
-    }
     for (uint32_t param = num_params; ! w.failed && param < expected_count; ++param) {
         slot.bindings[param]            = Synth::EffectParamBinding{};
         slot.bindings[param].base_value = Sculptor::effect_param_default(slot.type, param);
@@ -3098,19 +3150,19 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
         slot.fir_bands.band_count = static_cast<uint8_t>(fir_band_count);
     if (slot.type == Synth::EffectType::fir) {
         // Out-of-count band keys misstate the format: a band key beyond
-        // the declared count, or any band key in the legacy single-band
-        // form, refuses through the unknown-field path instead of
+        // the declared count, or any band key in the stored single-band
+        // form, is reported and ignored instead of
         // decoding into a binding nothing stages.
-        refuse_out_of_count_bands(w, fir_band_tokens, fir_band_key_ids, fir_band_count, have_fir_bands);
+        report_out_of_count_bands(w, fir_band_tokens, fir_band_key_ids, fir_band_count, have_fir_bands);
         if (w.failed)
             return;
-        // Band 0's gain decodes once.  In the legacy single-band form the key
-        // must carry state: the zeroed legacy block is not producible by the
+        // Band 0's gain decodes once.  In the stored single-band form the key
+        // must carry state: the zeroed stored block is not producible by the
         // encoder (it omits the key), so it refuses through the unknown-field
         // path, while an authored gain decodes into band 0 and re-encodes (the
         // count-1 encode rule).  A multi-band document (fir_bands stated)
         // decodes straight into band 0 and takes the neutral 1.0 when the key is
-        // absent.  The legacy form keeps the zeroed gain binding so
+        // absent.  The stored form keeps the zeroed gain binding so
         // byte-comparable snapshots survive the round trip.
         if (fir_band0_gain_token && ! have_fir_bands) {
             Synth::EffectParamBinding gain0 = {};
@@ -3132,7 +3184,7 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
             if (band >= fir_band_count)
                 break; // dormant bands stay zeroed
             if (fir_band_tokens[band - 1])
-                decode_fir_effect_band(w, fir_band_tokens[band - 1], band_bindings, legacy_fir_edge_keys);
+                decode_fir_effect_band(w, fir_band_tokens[band - 1], band_bindings, fir_edge_keys);
             else
                 decode_fir_band_neutral(band_bindings);
             if (w.failed)
@@ -3141,11 +3193,11 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
     }
     else if (slot.type == Synth::EffectType::fir_multiband) {
         // Out-of-count band keys misstate the format: a band key beyond the
-        // declared count refuses through the unknown-field path instead of
+        // declared count is reported and ignored instead of
         // decoding into a binding nothing stages.  Band 0 always decodes: the
         // single-band form (the absent count key) is this type's normal shape,
-        // not a legacy marker.
-        refuse_out_of_count_bands(w,
+        // not a stored marker.
+        report_out_of_count_bands(w,
                                   multiband_band_tokens + 1,
                                   multiband_band_key_ids + 1,
                                   fir_band_count,
@@ -3330,9 +3382,6 @@ static void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout
         else if (key_eq(w, key_idx, "name")) {
             want_text(w, val_idx, staged_name, sizeof(staged_name));
         }
-        else if (w.strict_editor_metadata) {
-            w.failed = true;
-        }
         else
             unknown_field(w, key_idx);
     });
@@ -3373,24 +3422,6 @@ static void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout
     }
 }
 
-// Legacy v2 successor array: 5 uints, entry 4 = the input row.  The arrays
-// never enter the decoded bank; the migration walk consumes them.
-static void decode_effect_audio(Walker& walker, uint32_t token, uint8_t (&next)[Synth::max_chain_effects + 1])
-{
-    if (walker.toks[token].type != JSMN_ARRAY || walker.toks[token].size != Synth::max_chain_effects + 1) {
-        walker.failed = true;
-        return;
-    }
-    walk_array(walker, token, Synth::max_chain_effects + 1, [&](uint32_t element, uint32_t position) {
-        want_u8(walker, element, Synth::max_chain_effects + 1, &next[position]);
-    });
-}
-
-// v3 routing flags: {"in":0|1,"out":[one flag per slot]}, or null for
-// an empty chain.  The decoded out-array length is retained in *out_len
-// (routing_len_null for an explicit null) and compared with the decoded
-// effect count after the walk, when the chain's slot count is final:
-// missing or surplus entries refuse the document.
 static void decode_effect_routing(Walker& walker, uint32_t token, Sculptor::EffectChainRouting* out, uint32_t* out_len)
 {
     *out     = Sculptor::EffectChainRouting{};
@@ -3423,9 +3454,8 @@ static void decode_effect_routing(Walker& walker, uint32_t token, Sculptor::Effe
                 want_u8(walker, element, Sculptor::effect_out_output, &out->out[slot]);
             });
         }
-        else {
-            walker.failed = true;
-        }
+        else
+            unknown_field(walker, key_idx);
     });
     if (present != 3) {
         walker.failed = true;
@@ -3443,190 +3473,13 @@ static void decode_effect_routing(Walker& walker, uint32_t token, Sculptor::Effe
     }
 }
 
-// v1 implicit serial wiring: input feeds slot 0, every occupied slot feeds
-// the next, the last feeds the output.
-static void implicit_serial_routing(Synth::EffectChainBinding* chain, Sculptor::EffectChainRouting* routing)
-{
-    Sculptor::fx_compact_chain(chain, routing);
-    if (! chain->num_effects) {
-        return;
-    }
-    *routing    = Sculptor::EffectChainRouting{};
-    routing->in = Sculptor::effect_in_first_slot;
-    for (uint32_t slot = 0; slot < chain->num_effects && slot < Synth::max_chain_effects; ++slot) {
-        routing->out[slot] = slot + 1 < chain->num_effects ? Sculptor::effect_out_next : Sculptor::effect_out_output;
-    }
-}
-
-// The legacy successor array is validated before the migration walk,
-// exactly what the old topology validator enforced: both endpoints of
-// every edge occupied, at most one incoming edge per destination (the
-// Output row included), and no cycles.  An invalid legacy document refuses
-// the whole decode with the destination untouched.
-static bool legacy_effect_audio_valid(const Synth::EffectChainBinding& chain,
-                                      const uint8_t (&next)[Synth::max_chain_effects + 1])
-{
-    if (chain.num_effects > Synth::max_chain_effects) {
-        return false;
-    }
-    bool incoming[Synth::max_chain_effects + 1] = {};
-    for (uint32_t source = 0; source <= Synth::max_chain_effects; ++source) {
-        const uint32_t destination = next[source];
-        if (destination > Synth::max_chain_effects + 1) {
-            return false;
-        }
-        if (! destination) {
-            continue;
-        }
-        if (source < Synth::max_chain_effects &&
-            (source >= chain.num_effects || chain.effects[source].type == Synth::EffectType::none)) {
-            return false;
-        }
-        if (incoming[destination - 1] ||
-            (destination <= Synth::max_chain_effects &&
-             (destination > chain.num_effects || chain.effects[destination - 1].type == Synth::EffectType::none))) {
-            return false;
-        }
-        incoming[destination - 1] = true;
-    }
-    for (uint32_t start = 0; start < Synth::max_chain_effects; ++start) {
-        uint32_t visited = 0;
-        uint32_t node    = start;
-        while (node < Synth::max_chain_effects) {
-            if (visited & (1u << node)) {
-                return false;
-            }
-            visited |= 1u << node;
-            const uint32_t target = next[node];
-            if (! target) {
-                break;
-            }
-            node = target - 1;
-        }
-    }
-    return true;
-}
-
-// Decomposes the old successor array into simple paths and
-// lays them contiguously from slot 0, payloads moving with their paths.
-// The input-led path leads, remaining paths follow by first slot index,
-// isolated zero-edge slots append last.  Every path member but its last
-// gets effect_out_next; a path ending at Output keeps effect_out_output on
-// its last slot; every other end is disconnected.  Returns the slot
-// permutation (new slot i holds old slot order[i]) for layout remaps, or
-// false on an edge an occupied slot does not justify (the caller validates
-// the legacy array first, so the walk never sees one).
-static bool migrate_effect_audio_chain(Synth::EffectChainBinding*    chain,
-                                       Sculptor::EffectChainRouting* routing,
-                                       const uint8_t (&next)[Synth::max_chain_effects + 1],
-                                       uint32_t* order)
-{
-    const uint32_t count                  = Synth::max_chain_effects;
-    bool           occupied[count]        = {};
-    bool           has_successor[count]   = {};
-    bool           has_predecessor[count] = {};
-    bool           visited[count]         = {};
-    uint32_t       successor[count]       = {};
-    uint32_t       order_count            = 0;
-    for (uint32_t slot = 0; slot < count; ++slot) {
-        occupied[slot] = slot < chain->num_effects && chain->effects[slot].type != Synth::EffectType::none;
-    }
-    for (uint32_t slot = 0; slot < count; ++slot) {
-        if (! occupied[slot]) {
-            continue;
-        }
-        const uint32_t target = next[slot];
-        if (! target) {
-            continue;
-        }
-        if (target > count) {
-            continue; // Output edge: the routing flag below carries it.
-        }
-        if (! occupied[target - 1]) {
-            return false;
-        }
-        successor[slot]             = target - 1;
-        has_successor[slot]         = true;
-        has_predecessor[target - 1] = true;
-    }
-    const uint32_t input_target = next[count];
-
-    // The input row may only feed a path start; the old in-degree rule
-    // guarantees no other wire lands there.
-    uint32_t input_start = count;
-    if (input_target >= 1 && input_target <= count && occupied[input_target - 1]) {
-        input_start = input_target - 1;
-    }
-
-    // One walk per path; visited slots terminate a walk defensively.
-    auto walk_path = [&](uint32_t start) {
-        uint32_t slot = start;
-        for (;;) {
-            if (visited[slot] || order_count == count) {
-                break;
-            }
-            order[order_count++] = slot;
-            visited[slot]        = true;
-            if (! has_successor[slot]) {
-                break;
-            }
-            slot = successor[slot];
-        }
-    };
-
-    if (input_start < count) {
-        walk_path(input_start);
-    }
-    // Paths with at least one outgoing edge, ordered by their first slot.
-    for (uint32_t slot = 0; slot < count; ++slot) {
-        if (! occupied[slot] || visited[slot] || has_predecessor[slot] || next[slot] == 0) {
-            continue;
-        }
-        walk_path(slot);
-    }
-    // Isolated zero-edge slots, in slot order.
-    for (uint32_t slot = 0; slot < count; ++slot) {
-        if (! occupied[slot] || visited[slot]) {
-            continue;
-        }
-        walk_path(slot);
-    }
-
-    Synth::EffectSlotBinding snapshot[count];
-    memcpy(snapshot, chain->effects, sizeof(snapshot));
-    *routing = Sculptor::EffectChainRouting{};
-    for (uint32_t slot = 0; slot < order_count; ++slot) {
-        chain->effects[slot]  = snapshot[order[slot]];
-        const uint32_t target = next[order[slot]];
-        if (target == count + 1) {
-            routing->out[slot] = Sculptor::effect_out_output;
-        }
-        else if (slot + 1 < order_count && target == order[slot + 1] + 1) {
-            routing->out[slot] = Sculptor::effect_out_next;
-        }
-        else {
-            routing->out[slot] = Sculptor::effect_out_disconnected;
-        }
-    }
-    chain->num_effects = static_cast<uint8_t>(order_count);
-    for (uint32_t slot = order_count; slot < count; ++slot) {
-        chain->effects[slot] = Synth::EffectSlotBinding{};
-    }
-    routing->in = input_start < count ? Sculptor::effect_in_first_slot : Sculptor::effect_in_disconnected;
-    return true;
-}
-
-// Legacy v2 effect_audio staging: per-chain successor arrays plus the
-// explicit-entry marks; the migration walk consumes them, so the old
-// successor wiring never enters the decoded bank.
 static void decode_editor_state(Walker&                      w,
                                 uint32_t                     val_idx,
                                 Synth::InstrumentEditorBank* out,
-                                bool                         v2              = false,
                                 bool*                        routing_present = nullptr,
                                 bool*                        editor_seen     = nullptr)
 {
-    bool audio_present = false;
+
     walk_object(w, val_idx, [&](uint32_t key_idx, uint32_t inner_idx) {
         if (editor_seen) {
             *editor_seen = true;
@@ -3641,20 +3494,6 @@ static void decode_editor_state(Walker&                      w,
             }
             walk_array(w, inner_idx, Synth::max_channels + 1, [&](uint32_t element, uint32_t owner) {
                 decode_effect_routing(w, element, &out->effect_routing[owner], &decode_routing_out_len[owner]);
-            });
-        }
-        else if (key_eq(w, key_idx, "effect_audio")) {
-            audio_present = true;
-            if (! v2 || w.toks[inner_idx].type != JSMN_ARRAY || w.toks[inner_idx].size != Synth::max_channels + 1) {
-                w.failed = true;
-                return;
-            }
-            walk_array(w, inner_idx, Synth::max_channels + 1, [&](uint32_t element, uint32_t owner) {
-                if (w.toks[element].type == JSMN_PRIMITIVE && tok_text_eq(w, element, "null")) {
-                    return;
-                }
-                decode_audio_explicit[owner] = true;
-                decode_effect_audio(w, element, decode_audio_next[owner]);
             });
         }
         else if (key_eq(w, key_idx, "layouts")) {
@@ -3710,10 +3549,7 @@ static void decode_editor_state(Walker&                      w,
             });
         }
         else if (key_eq(w, key_idx, "added_ccs")) {
-            // The registry is 17 chain masks in chain order; any other
-            // length refuses.  The length check is unconditional: legacy
-            // root files carry the key too, so the effect-audio !v2 gate
-            // does not apply here.
+            // The registry contains one mask per channel and master chain.
             if (w.toks[inner_idx].type != JSMN_ARRAY || w.toks[inner_idx].size != Synth::max_channels + 1) {
                 w.failed = true;
                 return;
@@ -3728,21 +3564,14 @@ static void decode_editor_state(Walker&                      w,
                 out->added_cc_mask[chain] = static_cast<uint16_t>(value);
             });
         }
-        else if (w.strict_editor_metadata) {
-            w.failed = true;
-        }
         else
             unknown_field(w, key_idx);
     });
-    if (v2 && ! audio_present) {
-        w.failed = true;
-    }
 }
 
 static void decode_bank(Walker&                      w,
                         uint32_t                     obj,
                         Synth::InstrumentEditorBank* out,
-                        bool                         v2              = false,
                         bool*                        routing_present = nullptr,
                         bool*                        editor_seen     = nullptr)
 {
@@ -3766,10 +3595,7 @@ static void decode_bank(Walker&                      w,
         else if (key_eq(w, key_idx, "channel_names"))
             decode_names(w, val_idx, Synth::max_channels, out->channel_names);
         else if (key_eq(w, key_idx, "editor")) {
-            decode_editor_state(w, val_idx, out, v2, routing_present, editor_seen);
-        }
-        else if (v2) {
-            w.failed = true;
+            decode_editor_state(w, val_idx, out, routing_present, editor_seen);
         }
         else
             unknown_field(w, key_idx);
@@ -3840,8 +3666,8 @@ static void canonicalize_effect(Synth::EffectSlotBinding& slot)
     if (num_params < Synth::max_effect_param_floats)
         memset(&slot.bindings[num_params], 0, (Synth::max_effect_param_floats - num_params) * sizeof(slot.bindings[0]));
 
-    // FIR band bindings normalize like the scalar ones.  A zeroed legacy count stays
-    // zero: it is the legacy single-band marker the runtime reads as 1, and rewriting
+    // FIR band bindings normalize like the scalar ones.  A zeroed stored count stays
+    // zero: it is the stored single-band marker the runtime reads as 1, and rewriting
     // it would break byte-comparable bank snapshots.  Bands beyond the active count are
     // dormant bytes and zero out, and a non-FIR slot's band block is stale bytes by
     // definition.  A count above the array bound is in-memory corruption; the local
@@ -3852,7 +3678,7 @@ static void canonicalize_effect(Synth::EffectSlotBinding& slot)
             band_count = Synth::max_fir_effect_bands;
         // A fir_multiband slot reads the band array uniformly: every band of the
         // clamped count is active.  The plain FIR's count-1 band block is the
-        // legacy marker: zeroed it stays zero (byte-comparable snapshots), but an
+        // stored marker: zeroed it stays zero (byte-comparable snapshots), but an
         // authored band-0 gain (the count-1 encode rule) canonicalizes like any
         // active binding instead of being wiped with the dormant bytes.
         uint32_t active_band_params = Synth::fir_active_band_param_count(slot.type, band_count);
@@ -4072,12 +3898,10 @@ static bool doc_value_valid(const Sculptor::OscTargetView& view, float value)
     return (value >= view.min_value || value == 0.0f) && value <= view.max_value;
 }
 
-// The instrument format is versioned by its "format" tag, so an unknown field
-// means a mismatched document: refuse instead of skipping.
+// Unknown instrument fields are reported and ignored; loading continues.
 static void doc_unknown_field(Walker& w, uint32_t key_idx)
 {
-    (void)key_idx;
-    w.failed = true;
+    unknown_field(w, key_idx);
 }
 
 // Point levels are the envelope's output values in the target's display units;
@@ -4232,8 +4056,7 @@ static void decode_envelope_doc(Walker&                    w,
     }
 }
 
-// The versioned instrument document refuses unknown fields inside a mod
-// input, and "source" is required.
+// Unknown mod-input fields are reported and ignored; "source" is required.
 static void decode_mod_input_doc(Walker& w, uint32_t obj, Synth::ModInput& input)
 {
     bool source_set = false;
@@ -4424,7 +4247,7 @@ static void decode_target_doc(Walker&             w,
                 if (group_id != 0) {
                     // The encoded pool id is authoritative: bindings carrying the
                     // same id share one descriptor even when another descriptor
-                    // holds identical content. Legacy text carries no ids and
+                    // holds identical content. Stored text carries no ids and
                     // keeps the content-equality grouping below.
                     uint32_t found = doc.envelope_count;
                     for (uint32_t i = 0; i < doc.envelope_count; i++) {
@@ -4560,9 +4383,6 @@ static void decode_layer_doc(Walker&                     w,
             if (wave_b > static_cast<uint32_t>(Synth::WaveType::pad_wave))
                 w.failed = true; // string is wave A only
         }
-        else if (key_eq(w, key_idx, "string_pick")) {
-            // Legacy key: the pick position was removed.  Any value is accepted and ignored.
-        }
         else if (key_eq(w, key_idx, "string_brightness"))
             want_bounded_real(w, val_idx, 0.0, 1.0, &string_brightness);
         else if (key_eq(w, key_idx, "string_dispersion") && w.toks[val_idx].type != JSMN_OBJECT)
@@ -4580,7 +4400,7 @@ static void decode_layer_doc(Walker&                     w,
         else if (key_eq(w, key_idx, "fir_slope")) {
             // The FIR Slope target block shares the layer scalar's key: the token
             // kind disambiguates (an object is the routing block, a number the
-            // legacy scalar).
+            // stored scalar).
             if (w.toks[val_idx].type == JSMN_OBJECT) {
                 decode_target_doc(w,
                                   val_idx,
@@ -4598,7 +4418,7 @@ static void decode_layer_doc(Walker&                     w,
             // Read by prescan_fir_type before the target blocks.
         }
         else if (key_eq(w, key_idx, "fir_bands")) {
-            // The multi-band count: absent decodes as the legacy single band; bands
+            // The multi-band count: absent decodes as the stored single band; bands
             // beyond the count decode but stay dormant (the re-encode skips them).
             want_uint(w, val_idx, 4, &doc_band_count);
             if (doc_band_count < 1) {
@@ -4635,11 +4455,6 @@ static void decode_layer_doc(Walker&                     w,
                                       doc_touched,
                                       doc_unknown_field);
             }
-            else if (key_eq(w, key_idx, "lowpass_cutoff") || key_eq(w, key_idx, "highpass_cutoff")) {
-                // Removed cutoff targets: old clipboard/library documents
-                // load with their cutoff bindings dropped; their layout
-                // records are dropped by the mapping paths.
-            }
             else
                 doc_unknown_field(w, key_idx);
         }
@@ -4672,13 +4487,13 @@ static void decode_layer_doc(Walker&                     w,
     osc.string_brightness = string_brightness;
 
     osc.string_dispersion_sections = string_dispersion_sections;
-    // Legacy documents state only the scalar ratio; when the document has
+    // Stored documents state only the scalar ratio; when the document has
     // no fm_ratio block the target inherits it, clamped to the slider
     // range when nonzero (0 stays 0).
     if (! fm_ratio_set) {
-        osc.targets[Synth::mod_fm_ratio].base_value = clamp_legacy_mod_ratio(mod_ratio);
+        osc.targets[Synth::mod_fm_ratio].base_value = clamp_stored_mod_ratio(mod_ratio);
     }
-    // Legacy pitch offset folds into the pitch target's base value;
+    // Stored pitch offset folds into the pitch target's base value;
     // the combined static trim stays inside the pitch editing range.
     const Sculptor::OscTargetView pitch_view = Sculptor::osc_target_view(Synth::mod_pitch);
     osc.targets[Synth::mod_pitch].base_value = vmath::clamp(osc.targets[Synth::mod_pitch].base_value + pitch_offset,
@@ -4760,14 +4575,10 @@ static bool decode_document_into_scratch(const char* text, uint32_t len, bool st
 
     w.strict_editor_metadata = strict_editor_metadata;
     fill_default_editor_bank(&decode_scratch);
-    memset(decode_audio_next, 0, sizeof(decode_audio_next));
-    memset(decode_audio_explicit, 0, sizeof(decode_audio_explicit));
     for (uint32_t owner = 0; owner <= Synth::max_channels; ++owner) {
         decode_routing_out_len[owner] = routing_len_null;
     }
 
-    bool      guard           = false;
-    bool      v2              = false;
     bool      routing_present = false;
     bool      editor_seen     = false;
     uint32_t  idx             = 1;
@@ -4783,35 +4594,23 @@ static bool decode_document_into_scratch(const char* text, uint32_t len, bool st
         }
         if (key_eq(w, key_idx, "instrument_editor_bank")) {
             if (w.toks[val_idx].type == JSMN_PRIMITIVE && tok_text_eq(w, val_idx, "null")) {
-                guard = true;
+                unknown_field(w, key_idx);
             }
             else {
-                decode_bank(w, val_idx, &decode_scratch, false, &routing_present, &editor_seen);
+                decode_bank(w, val_idx, &decode_scratch, &routing_present, &editor_seen);
             }
         }
-        else if (key_eq(w, key_idx, "instrument_editor_bank_v2")) {
-            v2                       = true;
-            const bool strict        = w.strict_editor_metadata;
-            w.strict_editor_metadata = true;
-            decode_bank(w, val_idx, &decode_scratch, true, &routing_present, &editor_seen);
-            w.strict_editor_metadata = strict;
-        }
         else if (key_eq(w, key_idx, "editor")) {
-            decode_editor_state(w, val_idx, &decode_scratch, v2, &routing_present, &editor_seen);
+            decode_editor_state(w, val_idx, &decode_scratch, &routing_present, &editor_seen);
         }
         else
             unknown_field(w, key_idx);
     }
 
-    if (w.failed || guard != v2 || (v2 && ! editor_seen)) {
+    if (w.failed) {
         return false;
     }
 
-    // Derive the flag-routing model from the decoded legacy shape.
-    // A v2 document migrates its per-chain successor arrays; a plain
-    // v1 document without routing state defaults to implicit serial
-    // wiring; a v3 document keeps its stored flags and only compacts
-    // gaps away.
     for (uint32_t owner = 0; owner <= Synth::max_channels; ++owner) {
         Synth::EffectChainBinding& chain =
             owner < Synth::max_channels ? decode_scratch.bank.channel_chains[owner] : decode_scratch.bank.master_chain;
@@ -4827,19 +4626,7 @@ static bool decode_document_into_scratch(const char* text, uint32_t len, bool st
         if (routing_present && decode_routing_out_len[owner] == routing_len_null && chain.num_effects != 0) {
             return false;
         }
-        if (v2 && decode_audio_explicit[owner]) {
-            uint32_t order[Synth::max_chain_effects];
-            if (! legacy_effect_audio_valid(chain, decode_audio_next[owner]) ||
-                ! migrate_effect_audio_chain(&chain, &routing, decode_audio_next[owner], order)) {
-                return false;
-            }
-        }
-        else if (v2 || ! routing_present) {
-            implicit_serial_routing(&chain, &routing);
-        }
-        else {
-            Sculptor::fx_compact_chain(&chain, &routing);
-        }
+        Sculptor::fx_compact_chain(&chain, &routing);
     }
 
     if (! Synth::validate_instrument_bank(&decode_scratch.bank, false)) {
@@ -5009,8 +4796,8 @@ bool Synth::decode_instrument_json_for_domain(const char*            text,
 
     walk_object(w, 0, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "format")) {
-            if (w.toks[val_idx].type != JSMN_STRING || ! tok_text_eq(w, val_idx, instrument_format_tag))
-                w.failed = true;
+            if (! tok_text_eq(w, val_idx, instrument_format_tag))
+                record_ignored("unrecognized instrument format tag, loading anyway");
             format_ok = true;
         }
         else if (key_eq(w, key_idx, "note_skew_semitones")) {
@@ -5025,6 +4812,11 @@ bool Synth::decode_instrument_json_for_domain(const char*            text,
         }
         else if (key_eq(w, key_idx, "release_seconds")) {
             want_release_seconds(w, val_idx, &doc.instr.release_seconds);
+        }
+        else if (key_eq(w, key_idx, "pitch_bend_lock")) {
+            bool lock = true;
+            want_bool(w, val_idx, &lock);
+            doc.instr.pitch_bend_lock = lock ? 1 : 0;
         }
         else if (key_eq(w, key_idx, "voices")) {
             want_voice_mode(w, val_idx, &doc.instr.voice_mode);
@@ -5232,7 +5024,7 @@ bool Synth::decode_instrument_json_for_domain(const char*            text,
     if (osc_source_out) {
         memcpy(osc_source_out, decoded_sources, Synth::max_layers);
     }
-    // The document's descriptor id per decoded position (0 for legacy
+    // The document's descriptor id per decoded position (0 for stored
     // content-dedup text): callers whose id maps are keyed by pool id need
     // the translation these ids provide when pool ids and document positions
     // no longer coincide.
@@ -5340,6 +5132,8 @@ static uint32_t encode_instrument_json_for_domain(char*                         
     o.float_value(instr->layer_skew_semitones);
     key_float_nonzero(o, "release_seconds", instr->release_seconds);
     key_enum(o, "voices", voice_mode_names, num_voice_modes, instr->voice_mode);
+    o.key("pitch_bend_lock");
+    o.bool_value(instr->pitch_bend_lock != 0);
     o.key("layers");
     o.ch('[');
 
@@ -5382,7 +5176,7 @@ static uint32_t encode_instrument_json_for_domain(char*                         
         }
         key_fir_type(o, osc);
         // The count key rides only multi-band layers (the absent count decodes
-        // as the legacy single band).
+        // as the stored single band).
         if (osc.fir_band_count > 1) {
             o.key("fir_bands");
             o.uint_value(osc.fir_band_count);
@@ -5893,27 +5687,18 @@ bool Synth::decode_effects_json(const char* text, uint32_t len, EffectsDocument*
     if (! parse_document(text, len, walker)) {
         return false;
     }
-    walker.strict_effects     = true;
     EffectsDocument& document = effects_json_scratch;
     memset(&document, 0, sizeof(document));
-    uint8_t  audio_next[Synth::max_chain_effects + 1] = {};
-    uint32_t routing_out_len                          = routing_len_null;
-    uint32_t fields                                   = 0;
-    bool     v2                                       = false;
-    bool     v3                                       = false;
+
+    uint32_t routing_out_len = routing_len_null;
+    uint32_t fields          = 0;
+    bool     v3              = false;
     walk_object(walker, 0, [&](uint32_t key_index, uint32_t value_index) {
         if (key_eq(walker, key_index, "format")) {
             fields |= 1;
-            v2 = tok_text_eq(walker, value_index, "synth-effects-v2");
             v3 = tok_text_eq(walker, value_index, "synth-effects-v3");
-            if (walker.toks[value_index].type != JSMN_STRING ||
-                (! v2 && ! v3 && ! tok_text_eq(walker, value_index, "synth-effects-v1"))) {
-                walker.failed = true;
-            }
-        }
-        else if (key_eq(walker, key_index, "audio_next")) {
-            fields |= 16;
-            decode_effect_audio(walker, value_index, audio_next);
+            if (! v3)
+                record_ignored("unrecognized format tag, loading anyway");
         }
         else if (key_eq(walker, key_index, "routing")) {
             fields |= 32;
@@ -5983,10 +5768,10 @@ bool Synth::decode_effects_json(const char* text, uint32_t len, EffectsDocument*
             });
         }
         else {
-            walker.failed = true;
+            unknown_field(walker, key_index);
         }
     });
-    if (walker.failed || fields != (v2 ? 31u : v3 ? 47u : 15u)) {
+    if (walker.failed) {
         return false;
     }
     // An explicitly supplied routing value must match the chain: the
@@ -5999,31 +5784,8 @@ bool Synth::decode_effects_json(const char* text, uint32_t len, EffectsDocument*
     if ((fields & 32) && routing_out_len == routing_len_null && document.chain.num_effects != 0) {
         return false;
     }
-    // Derive the flag-routing model from the legacy clipboard shape.
-    // A v2 document reorders its payloads through the migration walk and
-    // remaps its slot-keyed layout records along with them; a v1
-    // document defaults to implicit serial wiring; a v3 document keeps its
-    // stored flags.  All three compact the decoded chain.
     uint32_t old_to_new[max_chain_effects] = {};
-    if (v2) {
-        // order[new] = old from the migration walk; invert into old -> new.
-        uint32_t order[max_chain_effects] = {};
-        if (! legacy_effect_audio_valid(document.chain, audio_next) ||
-            ! migrate_effect_audio_chain(&document.chain, &document.routing, audio_next, order)) {
-            return false;
-        }
-        for (uint32_t slot = 0; slot < document.chain.num_effects; ++slot) {
-            old_to_new[order[slot]] = slot;
-        }
-    }
-    else {
-        // A v1 document defaults to implicit serial wiring; a v3 document keeps
-        // its stored flags. Both compact dormant gaps away first.
-        Sculptor::fx_compact_chain(&document.chain, &document.routing, old_to_new);
-        if (! v3) {
-            implicit_serial_routing(&document.chain, &document.routing);
-        }
-    }
+    Sculptor::fx_compact_chain(&document.chain, &document.routing, old_to_new);
     // Slot-keyed effect records follow the permuted payloads; a record
     // pointing at a compacted-away dormant slot refuses.
     for (uint32_t index = 0; index < document.graph_layout_count; ++index) {

@@ -23,7 +23,7 @@
    "enabled": true,
    "params": [
     {
-     "base_value": 4410
+     "base_value_ms": 100
     },
     {
      "base_value": 0.3,

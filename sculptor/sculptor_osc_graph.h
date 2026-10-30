@@ -98,7 +98,7 @@ static_assert(Synth::max_layers + 6 * Synth::max_layers * Synth::num_mod_targets
 constexpr uint32_t osc_slot_count          = 35;
 constexpr uint32_t osc_target_block_stride = 12;
 // One uniform block per existing band, directly after Filter Type (slot
-// 149; osc_slot_count is the legacy fixed-row additive constant, not the
+// 149; osc_slot_count is the stored fixed-row additive constant, not the
 // fixed slot count): the "Band N" header label row, its [-] and [+] click
 // slots, then the band's four parameter rows each followed by a 12-slot
 // modulation block. Only the stored band count's blocks are projected, so
@@ -225,7 +225,7 @@ static_assert(osc_target_row_slot[Synth::mod_pad_tilt1] + osc_target_block_strid
 static_assert(osc_target_row_slot[Synth::mod_fm_ratio] + osc_target_block_stride <
               osc_target_row_slot[Synth::mod_volume]);
 
-// The band region's legacy rows: for the single-edge filter types these
+// The band region's stored rows: for the single-edge filter types these
 // two slots are the cutoff and FIR Slope rows and keep showing, with
 // their modulation blocks, exactly as before the band UI.
 constexpr uint32_t osc_filter_cutoff_slot = osc_target_row_slot[Synth::mod_fir_spread];
@@ -239,7 +239,7 @@ struct OscGraphMapping {
     uint32_t input_source_slots[num_osc_graph_inputs];  // indexed by ModSource - 1
     uint32_t input_cc_slots[Synth::num_assignable_ccs]; // per assignable CC dot, pool_no_slot when absent
     uint32_t instrument_node;                           // "Instrument Parameters" node, pool_no_slot when unprojected
-    uint32_t instrument_slots[4]; // [0] note skew, [1] layer skew, [2] release, [3] voices; node's property slots
+    uint32_t instrument_slots[5]; // [0] note skew, [1] layer skew, [2] release, [3] voices; node's property slots
     uint32_t output_node;         // the oscillator sum node
     uint32_t output_layer_input_slot[Synth::max_layers];
     uint32_t osc_nodes[Synth::max_layers];
@@ -518,7 +518,7 @@ constexpr int osc_octave_offset_max = 12;
 OscTargetView osc_target_view(Synth::ModTarget target, Synth::FilterType fir_type = Synth::fir_bandpass);
 
 // The band index (0..3) of a band-parameter target, or -1 when the target is not a band
-// parameter.  Band 0 keeps the legacy spread/slope targets, so its four parameters are 12, 7, 13, 11.
+// parameter.  Band 0 keeps the stored spread/slope targets, so its four parameters are 12, 7, 13, 11.
 // The string damping targets (26, 27) are not FIR bands.
 inline int32_t osc_target_band_index(const uint32_t target)
 {
@@ -584,7 +584,7 @@ bool osc_target_field_hidden(const Graph& graph, uint32_t node_idx, uint32_t tar
 bool osc_band_slot_hidden(const Graph& graph, uint32_t node_idx, uint32_t slot_idx);
 
 // The composed oscillator-node render visibility: the band-derived hiding
-// with the legacy cutoff and FIR Slope carve-out for the single-edge
+// with the stored cutoff and FIR Slope carve-out for the single-edge
 // filter types, plus the per-target block field rule on whatever
 // remains.  Public seam: the editor's slot-hidden callback delegates
 // here, so the composed decision stays unit-testable the way

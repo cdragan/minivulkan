@@ -331,7 +331,7 @@ constexpr float sustain_decay_cutoff = 1.0f / 1024.0f;
 // Converts an instrument release in seconds to control-step ticks
 // (rt_step_samples * 1000 / rt_sampling_rate per step).  Values > 0 round to
 // at least 1 tick; 0 (and negative or NaN input, which no decoded bank can
-// carry) returns 0 = the legacy hold/loop behavior; an out-of-range value
+// carry) returns 0 = the stored hold/loop behavior; an out-of-range value
 // saturates at UINT32_MAX instead of trapping on the float-to-unsigned
 // conversion.
 uint32_t sustain_decay_ticks(float release_seconds);
@@ -437,7 +437,7 @@ void configure_lfo(ParamDescriptor*     desc,
                    float                lfo_rate_scale);
 
 // Configures a modulated parameter, composed of multiple input parameters.
-// env_scale multiplies the envelope source's contribution; 1 is the legacy
+// env_scale multiplies the envelope source's contribution; 1 is the stored
 // unscaled behavior.
 void configure_plain(ParamDescriptor*   desc,
                      float              base_value,

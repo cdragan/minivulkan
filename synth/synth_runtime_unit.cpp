@@ -543,11 +543,11 @@ static void check_quick_release_regressions()
         TEST((loaded.bank.envelopes.entries[1].flags & Synth::envelope_ping_pong) != 0);
 
         source.bank.envelopes.entries[1].flags = Synth::envelope_ping_pong;
-        const uint32_t legacy_length           = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
-        TEST(legacy_length > 0);
+        const uint32_t stored_length           = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+        TEST(stored_length > 0);
         TEST(strstr(payload, "\"quick_release\"") == nullptr);
         memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
-        TEST(Synth::decode_editor_bank_json(payload, legacy_length, &loaded));
+        TEST(Synth::decode_editor_bank_json(payload, stored_length, &loaded));
         TEST(loaded.bank.envelopes.entries[1].flags == Synth::envelope_ping_pong);
     }
 
@@ -961,7 +961,7 @@ static void check_envelope_note_off_regressions()
 
 // The in-place restart seed (EnvelopeState::old_value).  A restarted envelope continues from
 // the level of the previous envelope instead of dropping to its first point.  Zero means no
-// seed, so a fresh note keeps the exact legacy evaluation.
+// seed, so a fresh note keeps the exact stored evaluation.
 static void check_envelope_restart_seed_regressions()
 {
     // Three points, no sustain span: 0 -> 1 over four ticks -> 0 over four ticks.
@@ -975,7 +975,7 @@ static void check_envelope_restart_seed_regressions()
     env.points[1]                 = { 4, 0x8000 };
     env.points[2]                 = { 8, 0 };
 
-    // A fresh note (old_value zero) evaluates exactly as the legacy code did.  The expected
+    // A fresh note (old_value zero) evaluates exactly as the stored code did.  The expected
     // values and positions are hand-derived literals, not produced by the code under test: the
     // value at tick t is the integer interpolation of the point values (0, 0x8000, 0) scaled
     // by 1/65536, and the state advances one tick per step until it parks on the sustain
@@ -1294,7 +1294,7 @@ static void check_voice_mode_codec()
     const std::unique_ptr<ClipboardDecode> decoded_storage = std::make_unique<ClipboardDecode>();
     ClipboardDecode&                       decoded         = *decoded_storage;
 
-    // Absent key: legacy documents decode to multiple, even into a pre-filled instrument.
+    // Absent key: stored documents decode to multiple, even into a pre-filled instrument.
     static const char defaults_doc[] = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\"}]}";
     memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
     decoded.instr.voice_mode = 2;
@@ -2437,26 +2437,26 @@ static void check_runtime_inline_0()
         TEST(round_tripped.scale == 0.5f);
         TEST(Synth::validate_instrument_bank(&decoded.bank));
 
-        // A legacy pitch_bend input encodes without any cc_number key.
-        const std::unique_ptr<Synth::InstrumentEditorBank> legacy_storage =
+        // A stored pitch_bend input encodes without any cc_number key.
+        const std::unique_ptr<Synth::InstrumentEditorBank> stored_storage =
             std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank& legacy = *legacy_storage;
-        memset(static_cast<void*>(&legacy), 0, sizeof(legacy));
-        Synth::init_default_bank(&legacy.bank);
-        Sculptor::set_identity_osc_sources(&legacy, 0, 0);
-        Synth::EffectChainBinding& legacy_chain = legacy.bank.channel_chains[0];
-        legacy_chain.num_effects                = 1;
-        Sculptor::fx_init_slot(&legacy_chain, 0, Synth::EffectType::delay);
-        legacy_chain.effects[0].enabled                      = true;
-        legacy_chain.effects[0].bindings[0].num_inputs       = 1;
-        legacy_chain.effects[0].bindings[0].inputs[0].source = Synth::ModSource::pitch_bend;
-        legacy_chain.effects[0].bindings[0].inputs[0].op     = Synth::SourceOp::multiply;
-        legacy_chain.effects[0].bindings[0].inputs[0].scale  = 0.25f;
-        const uint32_t legacy_len = Synth::encode_editor_bank_json(&legacy, text, sizeof(text));
-        TEST(legacy_len > 0);
-        text[legacy_len] = '\0';
+        Synth::InstrumentEditorBank& stored = *stored_storage;
+        memset(static_cast<void*>(&stored), 0, sizeof(stored));
+        Synth::init_default_bank(&stored.bank);
+        Sculptor::set_identity_osc_sources(&stored, 0, 0);
+        Synth::EffectChainBinding& stored_chain = stored.bank.channel_chains[0];
+        stored_chain.num_effects                = 1;
+        Sculptor::fx_init_slot(&stored_chain, 0, Synth::EffectType::delay);
+        stored_chain.effects[0].enabled                      = true;
+        stored_chain.effects[0].bindings[0].num_inputs       = 1;
+        stored_chain.effects[0].bindings[0].inputs[0].source = Synth::ModSource::pitch_bend;
+        stored_chain.effects[0].bindings[0].inputs[0].op     = Synth::SourceOp::multiply;
+        stored_chain.effects[0].bindings[0].inputs[0].scale  = 0.25f;
+        const uint32_t stored_len = Synth::encode_editor_bank_json(&stored, text, sizeof(text));
+        TEST(stored_len > 0);
+        text[stored_len] = '\0';
         TEST(strstr(text, "cc_number") == nullptr);
-        TEST(Synth::decode_editor_bank_json(text, legacy_len, &decoded));
+        TEST(Synth::decode_editor_bank_json(text, stored_len, &decoded));
         TEST(decoded.bank.channel_chains[0].effects[0].bindings[0].inputs[0].cc_number == 0);
         TEST(Synth::validate_instrument_bank(&decoded.bank));
 
@@ -2466,7 +2466,7 @@ static void check_runtime_inline_0()
         const std::unique_ptr<Synth::InstrumentEditorBank> rogue_storage =
             std::make_unique<Synth::InstrumentEditorBank>();
         Synth::InstrumentEditorBank& rogue                                      = *rogue_storage;
-        rogue                                                                   = legacy;
+        rogue                                                                   = stored;
         rogue.bank.channel_chains[0].effects[0].bindings[0].inputs[0].source    = Synth::ModSource::cc;
         rogue.bank.channel_chains[0].effects[0].bindings[0].inputs[0].cc_number = 40;
         const uint32_t rogue_len = Synth::encode_editor_bank_json(&rogue, text, sizeof(text));
@@ -2758,7 +2758,7 @@ static void check_runtime_inline_0()
         pool_source.bank.instruments.entries[0].release_seconds = 3.5f;
         pool_len = Synth::encode_editor_bank_json(&pool_source, pool_payload, sizeof(pool_payload));
         TEST(pool_len > 0);
-        char* number_field = strstr(pool_payload, ":3.5}");
+        char* number_field = strstr(pool_payload, ":3.5,");
         TEST(number_field != nullptr);
         if (number_field) {
             // "-1" is one byte shorter than "3.5": shift the payload tail left.
@@ -2768,7 +2768,7 @@ static void check_runtime_inline_0()
         }
         pool_len = Synth::encode_editor_bank_json(&pool_source, pool_payload, sizeof(pool_payload));
         TEST(pool_len > 0);
-        number_field = strstr(pool_payload, ":3.5}");
+        number_field = strstr(pool_payload, ":3.5,");
         TEST(number_field != nullptr);
         if (number_field) {
             memcpy(number_field + 1, "1e4", 3); // 10000 s exceeds the bound
@@ -2779,7 +2779,7 @@ static void check_runtime_inline_0()
         // the bounds accept -0.0, so canonicalization owns the sign.
         pool_len = Synth::encode_editor_bank_json(&pool_source, pool_payload, sizeof(pool_payload));
         TEST(pool_len > 0);
-        number_field = strstr(pool_payload, ":3.5}");
+        number_field = strstr(pool_payload, ":3.5,");
         TEST(number_field != nullptr);
         if (number_field) {
             memmove(number_field + 3, number_field + 4, strlen(number_field + 4) + 1); // "-0" is one byte shorter
@@ -3246,7 +3246,7 @@ static void check_runtime_inline_0()
         const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
         Sculptor::Graph&                       graph         = *graph_storage;
         Sculptor::EffectGraphMapping           mapping       = {};
-        TEST(project_legacy_effects(bank, Sculptor::fx_master_chain, &graph, &mapping));
+        TEST(project_stored_effects(bank, Sculptor::fx_master_chain, &graph, &mapping));
         TEST(mapping.midi_node != Sculptor::pool_no_slot);
         if (mapping.midi_node != Sculptor::pool_no_slot) {
             for (uint32_t source = 0; source < Sculptor::fx_num_input_sources; ++source) {
@@ -3271,7 +3271,7 @@ static void check_runtime_inline_0()
         const std::unique_ptr<Sculptor::Graph> cc_graph_storage = std::make_unique<Sculptor::Graph>();
         Sculptor::Graph&                       cc_graph         = *cc_graph_storage;
         Sculptor::EffectGraphMapping           cc_mapping       = {};
-        TEST(project_legacy_effects(bank, Sculptor::fx_master_chain, &cc_graph, &cc_mapping));
+        TEST(project_stored_effects(bank, Sculptor::fx_master_chain, &cc_graph, &cc_mapping));
         if (cc_mapping.midi_node != Sculptor::pool_no_slot) {
             Sculptor::GraphChange cc_discard[Sculptor::max_pending_changes];
             (void)cc_graph.take_changes(cc_discard, Sculptor::max_pending_changes);
@@ -3351,7 +3351,7 @@ static void check_runtime_inline_0()
         const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
         Sculptor::Graph&                       graph         = *graph_storage;
         Sculptor::EffectGraphMapping           mapping       = {};
-        TEST(project_legacy_effects(bank, Sculptor::fx_master_chain, &graph, &mapping));
+        TEST(project_stored_effects(bank, Sculptor::fx_master_chain, &graph, &mapping));
         TEST(mapping.midi_node != Sculptor::pool_no_slot);
         Sculptor::GraphChange changes[Sculptor::max_pending_changes];
         (void)graph.take_changes(changes, Sculptor::max_pending_changes);
@@ -3379,8 +3379,8 @@ static void check_runtime_inline_0()
         TEST(chain.effects[0].bindings[0].num_inputs == 0);
     }
 
-    // T-M2-9: legacy master compatibility (DM3 as amended): legacy banks
-    // without master routing round-trip byte-identically.  A legacy master
+    // T-M2-9: stored master compatibility (DM3 as amended): stored banks
+    // without master routing round-trip byte-identically.  A stored master
     // pane already at the node limit refuses cleanly because projection
     // includes the MIDI node; a pane one node below the limit keeps loading.
     {

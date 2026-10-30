@@ -44,8 +44,6 @@ using Sculptor::PropertyType;
 using Sculptor::Slot;
 using Sculptor::SlotKind;
 
-namespace {
-
 // Unique marker color standing in for the pending-wire stroke in the
 // frozen-wire test: connector_hover is the color the in-progress wire
 // and the connection mid-dot hover share.
@@ -58,11 +56,9 @@ struct MarkerVertex {
 
 // Drop-menu test state: the callback counts invocations; the close request
 // turns the next invocation into an item click that closes the popup itself.
-uint32_t drop_menu_invocations = 0;
-bool     drop_menu_item_chosen = false;
-bool     drop_menu_close_item  = false;
-
-} // namespace
+static uint32_t drop_menu_invocations = 0;
+static bool     drop_menu_item_chosen = false;
+static bool     drop_menu_close_item  = false;
 
 static uint32_t drain_changes(Graph& graph, GraphChange* out, uint32_t out_size)
 {
@@ -2946,8 +2942,75 @@ static void check_collect_selected_source_inputs_marks_fed_inputs()
     TEST(! flags[max_node_slots + 1]);
 }
 
+static void test_envelope_width_resize_mouse()
+{
+    create_renderer_context();
+    Graph& graph = reset_unit_graph(0);
+    graph.clear();
+    graph.set_view({}, 1.0f);
+    const uint32_t node = graph.create_node("Envelope", { 64.0f, 64.0f });
+    graph.set_node_layout(node, { 64.0f, 64.0f }, 560.0f, 300.0f);
+    graph.set_node_resizable(node);
+    graph.add_slot(node, Sculptor::output_slot("Value"));
+    graph.add_slot(node, Sculptor::real_slot("Value (min)", 0.0f));
+    graph.add_slot(node, Sculptor::real_slot("Value (max)", 1.0f));
+    graph.add_slot(node, Sculptor::toggle_slot("Quick Release", false));
+    const vmath::vec2 position = graph.node(node).position;
+    render_frame(graph, { 900.0f, 600.0f }, false);
+    const vmath::vec2 size(560.0f, 300.0f);
+    const ImVec2      edge(8.0f + position.x + size.x - 3.0f, 8.0f + position.y + size.y * 0.5f);
+    render_frame(graph, edge, false);
+    render_frame(graph, edge, true);
+    render_frame(graph, { edge.x + 100.0f, edge.y }, true);
+    render_frame(graph, { edge.x + 100.0f, edge.y }, false);
+    TEST(graph.node(node).content_width_override > 560.0f);
+    render_frame(graph, { edge.x + 100.0f, edge.y }, true);
+    render_frame(graph, { 100.0f, edge.y }, true);
+    render_frame(graph, { 100.0f, edge.y }, false);
+    TEST(graph.node(node).content_width_override >= 240.0f);
+    TEST(graph.node(node).position.x == position.x && graph.node(node).position.y == position.y);
+    // Input frame vertices stay within the node's right edge at every tested width.
+    const float widths[] = { 240.0f, 300.0f, 560.0f };
+    for (float width : widths) {
+        graph.set_node_layout(node, position, width, 300.0f);
+        const ImDrawList* draw        = begin_rendered_graph_frame(graph);
+        const ImU32       frame_color = ImGui::GetColorU32(ImGuiCol_FrameBg);
+        uint32_t          frames      = 0;
+        for (const ImDrawVert& vertex : draw->VtxBuffer) {
+            if (vertex.col == frame_color) {
+                TEST(vertex.pos.x <= 8.0f + position.x + width);
+                ++frames;
+            }
+        }
+        TEST(frames > 0);
+        end_rendered_graph_frame();
+    }
+    // Loaded widths below the interactive floor collapse real widgets without overflowing.
+    graph.clear();
+    const uint32_t narrow_node = graph.create_node("Envelope", position);
+    const float    width       = 120.0f;
+    graph.set_node_layout(narrow_node, position, width, 300.0f);
+    graph.set_node_resizable(narrow_node);
+    graph.add_slot(narrow_node, Sculptor::output_slot("Value"));
+    graph.add_slot(narrow_node, Sculptor::real_slot("Value (min)", 0.0f));
+    graph.add_slot(narrow_node, Sculptor::real_slot("Value (max)", 1.0f));
+    const ImDrawList* draw        = begin_rendered_graph_frame(graph);
+    const ImU32       frame_color = ImGui::GetColorU32(ImGuiCol_FrameBg);
+    uint32_t          frames      = 0;
+    for (const ImDrawVert& vertex : draw->VtxBuffer) {
+        if (vertex.col == frame_color) {
+            TEST(vertex.pos.x <= 8.0f + position.x + width);
+            ++frames;
+        }
+    }
+    TEST(frames > 0);
+    end_rendered_graph_frame();
+    ImGui::DestroyContext();
+}
+
 int main()
 {
+    test_envelope_width_resize_mouse();
     test_renderer_audio_endpoint_mouse_frames();
     test_renderer_title_spacing_and_child_row_elbows();
     test_renderer_child_row_sibling_rails();

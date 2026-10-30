@@ -87,7 +87,7 @@ struct TargetBinding {
     // Per-binding multiplier on the envelope generator's contribution into
     // this target.  The shared descriptor stays untouched, so several
     // targets can reuse one envelope shape at different amounts.  The
-    // decoded default is 1 (the legacy unscaled contribution); 0 silences
+    // decoded default is 1 (the stored unscaled contribution); 0 silences
     // the contribution while the wire stays bound.
     float     envelope_depth;
     uint16_t  lfo_desc_id;
@@ -144,10 +144,11 @@ struct Instrument {
     Oscillator layers[max_layers];
     float      note_skew_semitones;  // Random pitch skew applied once per note (0 = none)
     float      layer_skew_semitones; // Random pitch skew drawn per layer (0 = none)
-    float      release_seconds;      // Sustain decay length in seconds (0 = legacy hold/loop);
+    float      release_seconds;      // Sustain decay length in seconds (0 = stored hold/loop);
                                      // applies to the volume target only, runtime-interpreted
     uint8_t    voice_mode;           // Voice allocation: 0 = multiple, 1 = reuse per-note, 2 = single;
-                                     // zero is the legacy behavior
+                                     // zero is the stored behavior
+    uint8_t    pitch_bend_lock = 1;
 };
 
 // Keyboard zone table entry. start_note stores the zone's first note + 1 (1..128), so a
@@ -174,8 +175,8 @@ struct EffectParamBinding {
 };
 
 // A FIR effect's per-band bindings.  The array's index meaning follows the slot's
-// effect type.  The plain FIR effect keeps its dormant legacy layout: band 0's
-// lowpass, highpass and slope stay in the slot's legacy bindings[0..2], index 0
+// effect type.  The plain FIR effect keeps its dormant stored layout: band 0's
+// lowpass, highpass and slope stay in the slot's stored bindings[0..2], index 0
 // carries band 0's gain, and bands 1..3 store lowpass, highpass, gain and slope each
 // (1 + 4 * (band - 1) + kind).  EffectType::fir_multiband reads the same array
 // uniformly: band b lives at 4 * b + (0 = center, 1 = spread, 2 = gain, 3 = slope)
@@ -183,7 +184,7 @@ struct EffectParamBinding {
 // its center/spread pair.  Every band parameter reuses the effect modulation
 // machinery (LFO + channel MIDI, no envelopes).
 struct FirEffectBands {
-    uint8_t band_count; // Active bands 1..max_fir_effect_bands; 0 = the single band (the plain FIR's legacy marker,
+    uint8_t band_count; // Active bands 1..max_fir_effect_bands; 0 = the single band (the plain FIR's stored marker,
                         // the multiband's normal shape)
     EffectParamBinding bands[num_fir_effect_band_params];
 };

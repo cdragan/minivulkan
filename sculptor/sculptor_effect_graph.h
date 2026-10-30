@@ -174,10 +174,10 @@ bool replace_effect_chain_candidate(const Synth::InstrumentEditorBank* source,
 // Chain slot an effect node projects, or -1 when the node is not an effect.
 int32_t fx_effect_slot_of(const EffectGraphMapping& mapping, uint32_t node_idx);
 
-// The previous and next projected effect slots around `slot`, or -1 when a
-// side has none.  Dormant (type none) slots project no node, so adjacency
-// follows the same projected slot list the projection builds.  Pure.
+// Connected chain-adjacent slots, or -1 when that side has none.
+// Disconnected slots have neither neighbor. Pure.
 void fx_adjacent_projected_slots(const Synth::EffectChainBinding& chain,
+                                 const EffectChainRouting&        routing,
                                  uint32_t                         slot,
                                  int32_t*                         previous,
                                  int32_t*                         next);
@@ -212,7 +212,7 @@ uint32_t fx_param_free_input(const Graph& graph, uint32_t node_idx, uint32_t par
 
 // The same display filter for a FIR effect's band row `row` of band `band`
 // (sculptor_effect_graph.h band constants, resolved against `type`'s region
-// base): a band row's unconnected modulator fields hide like the legacy
+// base): a band row's unconnected modulator fields hide like the stored
 // parameter rows'.
 bool fx_band_field_hidden(const Synth::EffectType type,
                           const Graph&            graph,
@@ -227,7 +227,7 @@ bool fx_band_field_hidden(const Synth::EffectType type,
 // in for the row's first free modulator input.  The FIR band region (the
 // type's region base, fx_band_region_first_slot) decodes only for FIR
 // effects; a five-parameter
-// effect's rows share the slot range and take the legacy decode, so the
+// effect's rows share the slot range and take the stored decode, so the
 // compressor's rows keep their answers.  Public seam: the render filter
 // lives here so the unit suite can reach it; the editor callback passes
 // the effect's binding.
@@ -237,7 +237,7 @@ bool fx_effect_slot_hidden(const Synth::EffectSlotBinding& effect,
                            uint32_t                        slot_idx);
 
 // Decodes one projected effect-node slot into the parameter row it edits.
-// Legacy parameter rows read bindings[]; the fir_multiband effect's band
+// Stored parameter rows read bindings[]; the fir_multiband effect's band
 // region (fx_band_region_first_slot) reads the slot's FirEffectBands
 // bindings, one row per
 // uniform band binding (center, spread, gain, slope) under every band.
@@ -251,7 +251,7 @@ bool fx_effect_slot_hidden(const Synth::EffectSlotBinding& effect,
 // against the effect type: whether a band row is currently projected is the
 // caller's guard. Public seam: the
 // wiring validator, the drop-command consumer and the derived generator
-// title classify endpoints through this decoder instead of legacy modulo
+// title classify endpoints through this decoder instead of stored modulo
 // arithmetic.
 bool fx_decode_row_slot(Synth::EffectSlotBinding&   effect,
                         uint32_t                    slot_idx,
@@ -260,7 +260,7 @@ bool fx_decode_row_slot(Synth::EffectSlotBinding&   effect,
                         uint32_t*                   field,
                         uint32_t*                   fir_row = nullptr);
 
-// Budget for one additional represented node, including owner roots and legacy pins.
+// Budget for one additional represented node, including owner roots and stored pins.
 bool fx_can_add_node(const Synth::InstrumentEditorBank* source, uint32_t owner, const bool* pinned_lfos = nullptr);
 // Number of nodes the chain's projection needs: fixed endpoints, one per
 // projected effect slot, and one per pinned-or-referenced LFO descriptor.
@@ -274,7 +274,7 @@ bool project_effect_chain_to_graph(const Synth::InstrumentEditorBank& bank,
                                    EffectGraphMapping*                mapping,
                                    const bool*                        pinned_lfos = nullptr);
 
-// Payload-only single-event seam for parameter/modulation edits and legacy raw
+// Payload-only single-event seam for parameter/modulation edits and stored raw
 // chain helper checks. Editor audio structure is captured transactionally by
 // apply_effect_graph_batch; this raw-bank seam carries no routing state.
 bool apply_fx_graph_change(Synth::InstrumentBank*    bank,
@@ -435,14 +435,14 @@ constexpr uint32_t fx_param_src_dot(uint32_t param, uint32_t input)
 
 // FIR effect band rows.  Region owned by EffectType::fir_multiband (the
 // visibility gate lives in sculptor_effect_graph.cpp and opens only for that
-// type); the plain FIR effect renders its legacy rows only.  A multiband
+// type); the plain FIR effect renders its stored rows only.  A multiband
 // node projects one uniform block per existing band: a "Band N" header row
 // with [-]/[+] click slots, then four parameter rows.  Only the stored band
 // count's bands project, so the projected slot count encodes the band
 // count.  The region's base is type-aware: the plain FIR keeps its three
-// legacy parameter rows ahead of the region (the byte-identical legacy
+// stored parameter rows ahead of the region (the byte-identical stored
 // projection), while the multiband node starts its tree at Band 1 right
-// after the Enabled row and projects no legacy parameter rows.
+// after the Enabled row and projects no stored parameter rows.
 //
 // Narrowed invariant: the plain FIR's dormant seam helpers below use the
 // uniform 43-slot band blocks on both types, so the plain FIR's dormant

@@ -15,6 +15,8 @@
 #include "../sculptor/sculptor_graph.h"
 #include "../sculptor/sculptor_instr_bank.h"
 #include "../sculptor/sculptor_instr_edit.h"
+
+
 #include "../sculptor/sculptor_instr_envelope_edit.h"
 #include "../sculptor/sculptor_instr_library.h"
 #include "../sculptor/sculptor_osc_graph.h"
@@ -47,11 +49,11 @@ template <typename Element, uint32_t count> struct FixedArray {
     Element elements[count];
 };
 
-// The legacy raw-seam blocks start from a plain bank: give the projection
+// The stored raw-seam blocks start from a plain bank: give the projection
 // the serial routing the v1 migration would install, so its derived wires
 // match the old implicit-serial expectations.
 void implicit_serial_routing(Synth::InstrumentEditorBank& bank, uint32_t owner);
-bool project_legacy_effects(const Synth::InstrumentBank&  bank,
+bool project_stored_effects(const Synth::InstrumentBank&  bank,
                             uint32_t                      owner,
                             Sculptor::Graph*              graph,
                             Sculptor::EffectGraphMapping* mapping,
@@ -117,7 +119,7 @@ bool osc_graph_target(Synth::ModTarget target);
 uint32_t find_osc_graph_connection(const Sculptor::Graph& graph, const Sculptor::EndPoint& input);
 // The band index (0..3) of a band-parameter target, -1 otherwise: the
 // test-side mirror of the production band_target mapping (band 0 keeps
-// the legacy spread/slope targets 7 and 11).
+// the stored spread/slope targets 7 and 11).
 int32_t osc_target_band_of_target(const uint32_t target);
 // Checks via TEST that a projection filled the mapping consistently: every
 // fixed node exists and is distinct, each occupied layer's oscillator has

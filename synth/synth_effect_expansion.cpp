@@ -37,23 +37,19 @@ static bool place_effect_state(const Synth::EffectExpansionPlan& plan, uint32_t 
     return false;
 }
 
-namespace {
-
 // Effect-state region inside the device data buffer, carved once at init. Slot offsets
 // are absolute device byte offsets (region base + relative placement).
-uint32_t state_region_base = 0;
+static uint32_t state_region_base = 0;
 
 // The plan currently committed; a re-expansion preserves its per-slot state offsets.
-Synth::EffectExpansionPlan current_plan;
-bool                       has_current_plan = false;
+static Synth::EffectExpansionPlan current_plan;
+static bool                       has_current_plan = false;
 
 // Only the final plan dispatches. Retained unrendered ranges carry needs_clear;
 // abandoned ranges need no fill, and final-plan ranges never overlap.
-constexpr uint32_t      max_pending_clears = (Synth::max_channels + 1) * Synth::max_chain_effects;
-Synth::EffectClearRange pending_clears[max_pending_clears];
-uint32_t                num_pending_clears = 0;
-
-} // namespace
+constexpr uint32_t             max_pending_clears = (Synth::max_channels + 1) * Synth::max_chain_effects;
+static Synth::EffectClearRange pending_clears[max_pending_clears];
+static uint32_t                num_pending_clears = 0;
 
 // Chain bindings in a fixed index scheme: [0, max_channels) are the channel chains,
 // [max_channels] is the master chain.
@@ -203,10 +199,10 @@ bool Synth::preflight_effect_expansion(const InstrumentBank& bank, EffectExpansi
                     *error = "effect chain carries an invalid parameter binding";
                     return false;
                 }
-                // A multiband's legacy bindings are unused (its bands carry the
+                // A multiband's stored bindings are unused (its bands carry the
                 // parameters; reference discovery ignores them), so they validate
                 // but consume no modulation capacity and build no nodes.
-                if (Synth::effect_reads_legacy_params(binding.type) &&
+                if (Synth::effect_reads_scalar_params(binding.type) &&
                     (param_binding.lfo_desc_id || param_binding.num_inputs)) {
                     ++num_modulated;
                     plan.num_nodes += 1 + (param_binding.lfo_desc_id ? 1u : 0u);
@@ -215,7 +211,7 @@ bool Synth::preflight_effect_expansion(const InstrumentBank& bank, EffectExpansi
 
             // FIR band bindings ride the same acceptance and node-counting rules as the scalar
             // params.  Dormant bands (beyond the type's active count, or all of them on the
-            // legacy single-band form, whose staging ignores band 0's gain) validate but count
+            // stored single-band form, whose staging ignores band 0's gain) validate but count
             // nothing; remap and canonicalize zero them like the params tail.
             if (is_fir_effect_type(binding.type)) {
                 if (binding.fir_bands.band_count > max_fir_effect_bands) {
@@ -417,7 +413,7 @@ void Synth::commit_effect_expansion(const InstrumentBank&      bank,
             const uint32_t num_params  = get_effect_param_floats(slot_binding.type);
             for (uint32_t param = 0; param < num_params; param++) {
                 if (slot_binding.type == EffectType::fir_multiband) {
-                    // Unused legacy binding: keep the stored value, build no node.
+                    // Unused stored binding: keep the stored value, build no node.
                     instance.params[param]       = slot_binding.bindings[param].base_value;
                     instance.src_param_id[param] = 0;
                     continue;
@@ -427,12 +423,13 @@ void Synth::commit_effect_expansion(const InstrumentBank&      bank,
                                                                    writer,
                                                                    midi_channel,
                                                                    &instance.params[param]);
+                instance.params[param]       = effect_param_to_native(slot_binding.type, param, instance.params[param]);
             }
 
             // FIR band values commit through the same wiring; the preflight counted a node per
             // modulated active-band parameter.  The shared count drives one commit loop for
-            // both FIR types: a plain FIR commits only above the legacy single band (its
-            // legacy single-band instance block stays zeroed), a fir_multiband reads the
+            // both FIR types: a plain FIR commits only above the stored single band (its
+            // stored single-band instance block stays zeroed), a fir_multiband reads the
             // band array uniformly, so every band of its clamped count commits.
             if (is_fir_effect_type(slot_binding.type)) {
                 assert(slot_binding.fir_bands.band_count <= max_fir_effect_bands);
@@ -440,7 +437,7 @@ void Synth::commit_effect_expansion(const InstrumentBank&      bank,
                     fir_active_band_param_count(slot_binding.type, slot_binding.fir_bands.band_count);
                 if (active_band_params) {
                     // The zeroed count is the multiband's single-band marker; the plain
-                    // fir only reaches this write above the legacy single band.
+                    // fir only reaches this write above the stored single band.
                     instance.fir_bands.band_count = static_cast<uint8_t>(
                         slot_binding.type == EffectType::fir_multiband && slot_binding.fir_bands.band_count < 1
                             ? 1

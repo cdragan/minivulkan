@@ -8,7 +8,6 @@
 #include "sculptor_instr_library.h"
 
 #include <stdint.h>
-#include <string.h>
 
 namespace Sculptor {
 
@@ -18,9 +17,9 @@ class SynthEditor : public Editor {
 public:
     SynthEditor();
 
-    ~SynthEditor() override = default;
+    ~SynthEditor() override;
 
-    const char* get_editor_name() const override { return "Synth"; }
+    const char* get_editor_name() const override;
 
     bool create_gui_frame(uint32_t image_idx, bool* need_realloc, const UserInput& input) override;
 
@@ -29,9 +28,9 @@ public:
     void delayed_updates();
     bool allocate_resources() override;
 
-    void free_resources() override {}
+    void free_resources() override;
 
-    bool draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx) override { return true; }
+    bool draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx) override;
 
 private:
     static constexpr uint32_t target_master = Synth::max_channels;
@@ -124,12 +123,13 @@ private:
     bool     zone_menu_open       = false; // deferred: same ID-scope rule as channel_menu_open
     int32_t  zone_tab_force_entry = -1;    // one-shot: make the zone tab bar select this entry, cleared once shown
 
-    char     rename_buf[Synth::max_name_len] = {};
-    bool     rename_popup_open               = false;
-    bool     rename_zone                     = false; // rename modal targets a zone instrument
-    uint32_t rename_zone_entry               = 0;     // zone entry the rename modal targets
-    bool     show_effects_mode               = false; // zone vs Effects view; persists across targets
-    int32_t  effects_tab_pend                = -1; // one-shot: force-select the Effects tab after an undo/redo restore
+    vmath::vec2 rename_anchor                   = {};
+    char        rename_buf[Synth::max_name_len] = {};
+    bool        rename_popup_open               = false;
+    bool        rename_zone                     = false; // rename modal targets a zone instrument
+    uint32_t    rename_zone_entry               = 0;     // zone entry the rename modal targets
+    bool        show_effects_mode               = false; // zone vs Effects view; persists across targets
+    int32_t     effects_tab_pend = -1; // one-shot: force-select the Effects tab after an undo/redo restore
 
     // Instrument library. Entries refresh on every browser open and before every
     // save; errors surface as notifications and a failed scan never opens
@@ -156,27 +156,12 @@ private:
 // Shared note naming for the keyboard and zone-tab tooltips.
 // The octave is floor(midi / 12) - 2.  Pitch classes are sharps only, so
 // MIDI 51 is "D#2".  The octave is signed so MIDI 0..23 does not wrap.
-inline void note_name(uint32_t midi, char* out, uint32_t capacity)
-{
-    static const char* const pitch_classes[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
-    const int32_t            octave            = static_cast<int32_t>(midi / 12) - 2;
-
-    snprintf(out, capacity, "%s%d", pitch_classes[midi % 12], octave);
-}
+void note_name(uint32_t midi, char* out, uint32_t capacity);
 
 // First-seen label membership: true when name matches an earlier label
 // in the list.  Shared by the deriving callback and the title helper so
 // the first-seen policy lives in one place.
-inline bool label_seen(const char* const* labels, uint32_t count, const char* name)
-{
-    for (uint32_t label_index = 0; label_index < count; ++label_index) {
-        if (strcmp(labels[label_index], name) == 0) {
-            return true;
-        }
-    }
-
-    return false;
-}
+bool label_seen(const char* const* labels, uint32_t count, const char* name);
 
 // Builds a derived generator title: deduplicated parameter row labels
 // in first-seen order, joined with ", ", plus " (<host>)" when host_title
@@ -184,53 +169,11 @@ inline bool label_seen(const char* const* labels, uint32_t count, const char* na
 // null entry is a refused label too): the caller keeps the default
 // "Envelope N" / "LFO N" title and out stays untouched.  Pure string
 // logic; the text truncates to capacity.
-inline bool derive_generator_title(const char* const* labels,
-                                   uint32_t           count,
-                                   const char*        host_title,
-                                   char*              out,
-                                   uint32_t           capacity)
-{
-    if (count == 0 || labels == nullptr || out == nullptr || capacity == 0) {
-        return false;
-    }
-
-    // A null entry has no label to append; refuse before any write so a
-    // false return leaves out untouched.
-    for (uint32_t label_index = 0; label_index < count; ++label_index) {
-        if (labels[label_index] == nullptr) {
-            return false;
-        }
-    }
-
-    // Bounded append: every fragment stops before the reserved terminator.
-    uint32_t used = 0;
-    for (uint32_t label_index = 0; label_index < count; ++label_index) {
-        if (label_seen(labels, label_index, labels[label_index])) {
-            continue;
-        }
-
-        // The separator precedes every label but the first.
-        const char* pieces[2] = { used == 0 ? "" : ", ", labels[label_index] };
-        for (uint32_t fragment_index = 0; fragment_index < 2; ++fragment_index) {
-            for (const char* cursor = pieces[fragment_index]; *cursor != 0 && used + 1 < capacity; ++cursor) {
-                out[used++] = *cursor;
-            }
-        }
-    }
-
-    // Single-host parenthetical: an empty host is no host.
-    if (host_title != nullptr && host_title[0] != 0) {
-        const char* pieces[3] = { " (", host_title, ")" };
-        for (uint32_t fragment_index = 0; fragment_index < 3; ++fragment_index) {
-            for (const char* cursor = pieces[fragment_index]; *cursor != 0 && used + 1 < capacity; ++cursor) {
-                out[used++] = *cursor;
-            }
-        }
-    }
-
-    out[used] = 0;
-    return true;
-}
+bool derive_generator_title(const char* const* labels,
+                            uint32_t           count,
+                            const char*        host_title,
+                            char*              out,
+                            uint32_t           capacity);
 
 // Info panel under the synth channel list: tempo, route-to-channel
 // checkbox, playing oscillator count, underrun count, fill bar with a
@@ -241,3 +184,24 @@ inline bool derive_generator_title(const char* const* labels,
 void gui_synth_info_panel(uint32_t current_channel);
 
 } // namespace Sculptor
+
+// Private editor operations shared only with the criterion tests.
+struct ViewEntry {
+    vmath::vec2 origin = {};
+    float       zoom   = 0.0f;
+    bool        valid  = false;
+};
+
+void drop_zone_view_entries(ViewEntry* entries, uint32_t zone);
+
+void split_zone_view_entries(ViewEntry* entries, uint32_t zone);
+
+void reconcile_view_entries(ViewEntry (&osc)[Synth::max_channels][Synth::max_instr_per_channel],
+                            ViewEntry (&fx)[Synth::max_channels + 1],
+                            const Synth::Zone (&zones)[Synth::max_channels][Synth::max_instr_per_channel],
+                            const uint8_t (&enabled)[Synth::max_channels],
+                            const Synth::EffectChainBinding (&chains)[Synth::max_channels + 1],
+                            const Synth::InstrumentBank& after);
+
+// The caller owns capacity, connection and graph preflight, layout and commit.
+uint32_t append_inherited_oscillator(Synth::Instrument& instrument, uint8_t* source_row, uint32_t target_slot);

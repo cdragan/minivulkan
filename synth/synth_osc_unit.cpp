@@ -71,7 +71,7 @@ static Sculptor::OscGraphMapping t7_mapping;
 // GUI test: the unit target does not link the GUI translation
 // unit.  Canvas Add and pulled-slot Add share do_osc_add_oscillator:
 // the fresh oscillator appends at the editor layer_count with fresh
-// default parameters (no inheritance), and its wiring slot resolves
+// inherited parameters from the highest connected output slot, and its wiring slot resolves
 // through the pure lowest-free-slot helper, so red holes fill before
 // the gray add slot and a full run refuses.  The consumer must not
 // consult the dragged row beyond the slot bounds check: a disconnect
@@ -1534,15 +1534,15 @@ static void check_target_block_grammar(const Sculptor::Node&       osc,
     // Targets from duty a on nest under their parent rows (volume, pan and
     // pitch stay at the top level), so their whole block shifts one deeper;
     // the band rows nest one level under their Band N header, so their
-    // blocks shift two deeper (level 3, rate/amount 4).  The legacy
-    // single-edge pair (spread, slope) keeps the legacy block level 2
+    // blocks shift two deeper (level 3, rate/amount 4).  The stored
+    // single-edge pair (spread, slope) keeps the stored block level 2
     // under a non-bandpass filter, where it renders as the Cutoff /
     // FIR Slope rows.
     const bool band_row = osc_target_band_of_target(target) >= 0;
-    const bool legacy_pair =
+    const bool stored_pair =
         target == static_cast<uint32_t>(Synth::mod_fir_spread) || target == static_cast<uint32_t>(Synth::mod_fir_slope);
     const uint8_t  level_base = ! band_row                                       ? (target >= 3 ? 2u : 1u)
-                                : legacy_pair && fir_type != Synth::fir_bandpass ? 2u
+                                : stored_pair && fir_type != Synth::fir_bandpass ? 2u
                                                                                  : 3u;
     const uint32_t base       = Sculptor::osc_target_block_base(target);
     TEST(Sculptor::osc_target_row(target) == t7_target_row_slots[target]);
@@ -1797,7 +1797,7 @@ static void osc_direct_modulator_regressions()
                 Synth::Instrument compiled = {};
                 TEST(Sculptor::compile_graph_to_instrument(t7_graph, t7_mapping, &compiled));
                 TEST(compiled.layers[0].targets[Synth::mod_fir_spread].envelope_desc_id == 1);
-                // The first envelope wire seeded the legacy unscaled amount.
+                // The first envelope wire seeded the stored unscaled amount.
                 TEST(approx(compiled.layers[0].targets[Synth::mod_fir_spread].envelope_depth, 1.0f, 1.0e-6f));
                 TEST(compiled.layers[0].targets[Synth::mod_duty1].lfo_desc_id == 1);
                 TEST(compiled.layers[0].targets[Synth::mod_duty1].lfo_op == Synth::SourceOp::add);
@@ -3106,7 +3106,7 @@ static void osc_cc_regressions()
              Synth::ModSource::cc);
     }
 
-    // T-M6-3 (undotted legacy shape): a cc routing with no registry bit
+    // T-M6-3 (undotted stored shape): a cc routing with no registry bit
     // projects the source rows unwired, the compile drops the input, and
     // the bank keeps carrying it.  This pins the
     // decode-never-synthesizes-registry-bits rule (T-M4-9 analogue).
@@ -3119,12 +3119,12 @@ static void osc_cc_regressions()
         Sculptor::Graph&                       graph         = *graph_storage;
         Sculptor::OscGraphMapping              mapping       = {};
         build_zone_fixture(&source, &instrument);
-        Synth::TargetBinding& legacy_routing = source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume];
-        legacy_routing.num_inputs            = 1;
-        legacy_routing.inputs[0].source      = Synth::ModSource::cc;
-        legacy_routing.inputs[0].op          = Synth::SourceOp::add;
-        legacy_routing.inputs[0].cc_number   = static_cast<uint8_t>(Synth::cc_msb_base);
-        legacy_routing.inputs[0].scale       = 0.5f;
+        Synth::TargetBinding& stored_routing = source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume];
+        stored_routing.num_inputs            = 1;
+        stored_routing.inputs[0].source      = Synth::ModSource::cc;
+        stored_routing.inputs[0].op          = Synth::SourceOp::add;
+        stored_routing.inputs[0].cc_number   = static_cast<uint8_t>(Synth::cc_msb_base);
+        stored_routing.inputs[0].scale       = 0.5f;
         TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
         (void)graph.take_changes(discarded, Sculptor::max_pending_changes);
         const uint32_t osc = mapping.osc_nodes[0];
@@ -3198,7 +3198,7 @@ static void osc_cc_regressions()
     // per-layer sources arrays: the bank encoder already spells cc, so
     // bank validation is the decode-time admission gate; once admitted,
     // encode/decode is byte-identical.  Decode refuses a cc_number outside
-    // 16..31 and a non-cc input carrying a stale cc_number; a legacy bank
+    // 16..31 and a non-cc input carrying a stale cc_number; a stored bank
     // without osc cc decodes unchanged.
     {
         const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
@@ -3281,12 +3281,12 @@ static void osc_cc_regressions()
                 TEST(! Synth::decode_editor_bank_json(patched, stale_len, &decoded));
             }
         }
-        // A legacy bank without osc cc decodes unchanged.
+        // A stored bank without osc cc decodes unchanged.
         build_zone_fixture(&source, &instrument);
-        const uint32_t legacy_len = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
-        TEST(legacy_len > 0);
-        if (legacy_len > 0) {
-            TEST(Synth::decode_editor_bank_json(payload, legacy_len, &decoded));
+        const uint32_t stored_len = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+        TEST(stored_len > 0);
+        if (stored_len > 0) {
+            TEST(Synth::decode_editor_bank_json(payload, stored_len, &decoded));
             TEST(decoded.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].inputs[0].source ==
                  Synth::ModSource::velocity);
             TEST(decoded.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].inputs[0].cc_number == 0);
@@ -4048,7 +4048,7 @@ static void osc_instrument_node_regressions()
         uint32_t release_slot = Sculptor::pool_no_slot;
         TEST(find_graph_slot(graph, mapping.instrument_node, "Random Note Detune", &note_slot));
         TEST(find_graph_slot(graph, mapping.instrument_node, "Random Oscillator Detune", &layer_slot));
-        TEST(find_graph_slot(graph, mapping.instrument_node, "Release (s)", &release_slot));
+        TEST(find_graph_slot(graph, mapping.instrument_node, "Sustain Decay (s)", &release_slot));
         TEST(note_slot == mapping.instrument_slots[0]);
         TEST(layer_slot == mapping.instrument_slots[1]);
         TEST(release_slot == mapping.instrument_slots[2]);
@@ -4326,15 +4326,15 @@ static void osc_instrument_node_layout_regressions()
         TEST(! strstr(text, "\"kind\":5"));
     }
 
-    // Legacy record set: without the kind-5 record the node keeps its
+    // stored record set: without the kind-5 record the node keeps its
     // deterministic default position.
     source.graph_layout_count                                   = 0;
-    const std::unique_ptr<Sculptor::Graph> legacy_graph_storage = std::make_unique<Sculptor::Graph>();
-    Sculptor::Graph&                       legacy_graph         = *legacy_graph_storage;
-    Sculptor::OscGraphMapping              legacy_mapping       = {};
-    TEST(Sculptor::project_editor_to_graph(source, &legacy_graph, &legacy_mapping));
-    TEST(legacy_graph.node(legacy_mapping.instrument_node).position.x == default_position.x);
-    TEST(legacy_graph.node(legacy_mapping.instrument_node).position.y == default_position.y);
+    const std::unique_ptr<Sculptor::Graph> stored_graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       stored_graph         = *stored_graph_storage;
+    Sculptor::OscGraphMapping              stored_mapping       = {};
+    TEST(Sculptor::project_editor_to_graph(source, &stored_graph, &stored_mapping));
+    TEST(stored_graph.node(stored_mapping.instrument_node).position.x == default_position.x);
+    TEST(stored_graph.node(stored_mapping.instrument_node).position.y == default_position.y);
 
     // Kind-5 sanity: a nonzero uid or index refuses in the validate pass,
     // and both the decode and the validate pass still refuse kind 6.

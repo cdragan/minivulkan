@@ -28,12 +28,11 @@ using Sculptor::Slot;
 using Sculptor::SlotKind;
 using Sculptor::with_tooltip;
 
-namespace {
 // Shared hover text of the five Mix/Wet rows.
 constexpr const char* mix_tooltip = "Dry/wet balance (0 = original dry input, 1 = fully processed)";
 
 // The seven real effect types' node rows, in shader param order, plus the
-// Multi-band FIR: the three legacy scalar floats ride along unused, so its
+// Multi-band FIR: the three stored scalar floats ride along unused, so its
 // entry projects no parameter rows and the node's tree is its band region
 // alone.  Slider
 // bounds are editing aids only: the shaders clamp delay samples, chorus
@@ -52,7 +51,7 @@ static const Sculptor::EffectTypeInfo effect_type_table[Synth::num_effect_types]
         {} },
       3 },
     { "Delay",
-      { { "Samples", 256.0f, 44100.0f, true, "Echo delay length in samples (44100 = 1 second at 44.1 kHz)" },
+      { { "Time (ms)", 5.8f, 1000.0f, false, "Echo delay length in milliseconds" },
         { "Feedback", 0.0f, 0.95f, false, "Fraction of delayed output fed back into the delay line (0..0.95)" },
         { "Mix", 0.0f, 1.0f, false, mix_tooltip },
         {},
@@ -60,13 +59,13 @@ static const Sculptor::EffectTypeInfo effect_type_table[Synth::num_effect_types]
       3 },
     { "Chorus",
       { { "Rate Hz", 0.1f, 10.0f, true, "LFO frequency modulating the chorus delay time (in Hz)" },
-        { "Depth", 0.0f, 64.0f, false, "Chorus delay range (in samples)" },
+        { "Depth (ms)", 0.0f, 1.5f, false, "Chorus delay swing in milliseconds" },
         { "Mix", 0.0f, 1.0f, false, mix_tooltip },
-        {},
+        { "Center (ms)", 1.0f, 40.0f, false, "Center of the chorus delay swing in milliseconds" },
         {} },
-      3 },
+      4 },
     { "Reverb",
-      { { "Room", 0.0f, 1.0f, false, "Reverb duration (0 = short, 1 = long)" },
+      { { "Room", 0.0f, 1.0f, false, "Reverb feedback (0 = about 0.6s, 1 = about 10s)" },
         { "Damping", 0.0f, 1.0f, false, "Lowpass filtering on reverb background (0 = no damping, 1 = full damping)" },
         { "Wet", 0.0f, 1.0f, false, mix_tooltip },
         {},
@@ -111,13 +110,13 @@ static const Sculptor::EffectTypeInfo effect_type_table[Synth::num_effect_types]
 static const float effect_default_params[Synth::num_effect_types][Synth::max_effect_param_floats] = {
     { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },      // none
     { 1.0f, 1.0f, 1.0f, 0.0f, 0.0f },      // distortion
-    { 4410.0f, 0.35f, 0.35f, 0.0f, 0.0f }, // delay: 100 ms
-    { 0.6f, 6.0f, 0.5f, 0.0f, 0.0f },      // chorus
+    { 100.0f, 0.35f, 0.35f, 0.0f, 0.0f },  // delay: 100 ms
+    { 0.6f, 0.136f, 0.5f, 11.0f, 0.0f },   // chorus
     { 0.84f, 0.5f, 0.3f, 0.0f, 0.0f },     // reverb: freeverb room
     { 0.5f, 4.0f, 0.0f, 0.999f, 1.0f },    // compressor
     { 8000.0f, 0.0f, 100.0f, 0.0f, 0.0f }, // fir: full 1025-tap window slope
     { 100.0f, 1.0f, 0.0f, 0.0f, 0.0f },    // ring_mod: 100 Hz, full mix
-    { 8000.0f, 0.0f, 100.0f, 0.0f, 0.0f }, // fir_multiband: the legacy scalars ride along unused
+    { 8000.0f, 0.0f, 100.0f, 0.0f, 0.0f }, // fir_multiband: the stored scalars ride along unused
 };
 
 // The FIR band Gain row's editing metadata (every band, band 0 included):
@@ -148,7 +147,6 @@ struct FxBandRowLocation {
     uint32_t row;      // row inside the band (the band's four bindings, in order)
     uint32_t row_slot; // base-value slot of the row
 };
-} // anonymous namespace
 
 static void effect_layout_name(const Synth::EffectChainBinding& chain,
                                uint32_t                         owner,
@@ -448,13 +446,13 @@ bool Sculptor::translate_effect_lfo_title(char (&name)[32], const uint16_t* lfo_
     return true;
 }
 
-// How many legacy bindings and band-array bindings of a slot can carry a
+// How many stored bindings and band-array bindings of a slot can carry a
 // reference (the band bound is Synth::fir_reference_band_param_count's).
 static void fx_reference_binding_counts(const Synth::EffectSlotBinding& effect,
-                                        uint32_t*                       legacy_count,
+                                        uint32_t*                       stored_count,
                                         uint32_t*                       band_count)
 {
-    *legacy_count = Synth::effect_reads_legacy_params(effect.type) ? Synth::get_effect_param_floats(effect.type) : 0;
+    *stored_count = Synth::effect_reads_scalar_params(effect.type) ? Synth::get_effect_param_floats(effect.type) : 0;
     *band_count   = Synth::fir_reference_band_param_count(effect.type, effect.fir_bands.band_count);
 }
 
@@ -594,29 +592,22 @@ uint32_t Sculptor::fx_lfo_desc_of(const EffectGraphMapping& mapping, uint32_t no
 }
 
 void Sculptor::fx_adjacent_projected_slots(const Synth::EffectChainBinding& chain,
+                                           const EffectChainRouting&        routing,
                                            uint32_t                         slot,
                                            int32_t*                         previous,
                                            int32_t*                         next)
 {
-    *previous = -1;
-    *next     = -1;
-    uint32_t       slots[Synth::max_chain_effects];
-    const uint32_t count    = projected_slots(chain, slots);
-    uint32_t       position = count;
-    for (uint32_t i = 0; i < count; ++i) {
-        if (slots[i] == slot) {
-            position = i;
-            break;
-        }
-    }
-    if (position == count) {
+    *previous              = -1;
+    *next                  = -1;
+    const int32_t terminal = effect_path_terminal(chain, routing);
+    if (terminal < 0 || slot > static_cast<uint32_t>(terminal)) {
         return;
     }
-    if (position > 0) {
-        *previous = static_cast<int32_t>(slots[position - 1]);
+    if (slot > 0) {
+        *previous = static_cast<int32_t>(slot - 1);
     }
-    if (position + 1 < count) {
-        *next = static_cast<int32_t>(slots[position + 1]);
+    if (slot < static_cast<uint32_t>(terminal)) {
+        *next = static_cast<int32_t>(slot + 1);
     }
 }
 
@@ -681,7 +672,7 @@ static uint32_t fx_row_free_input(const Sculptor::Graph& graph,
 }
 
 // Decodes one projected effect-node slot into the parameter row it edits.
-// Legacy parameter rows read bindings[]; a FIR effect's band region
+// Stored parameter rows read bindings[]; a FIR effect's band region
 // (sculptor_effect_graph.h) reads the slot's FirEffectBands bindings: the
 // plain FIR keeps band 0's Gain row first and bands 1..3's
 // Lowpass/Highpass/Gain/Slope rows after, the multiband node reads the
@@ -693,11 +684,11 @@ static uint32_t fx_row_free_input(const Sculptor::Graph& graph,
 // The decode is slot arithmetic against the effect type: whether a band
 // row is currently projected is the caller's guard. Public seam: the
 // wiring validator, the drop-command consumer and the derived generator
-// title classify endpoints through this decoder instead of legacy modulo
+// title classify endpoints through this decoder instead of stored modulo
 // arithmetic.
 
 // The FirEffectBands array index of band `band`'s row `row` (0..3).  The
-// plain FIR keeps its dormant legacy order (band 0's gain first, bands 1..3
+// plain FIR keeps its dormant stored order (band 0's gain first, bands 1..3
 // lowpass/highpass/gain/slope after); the multiband type reads the array
 // uniformly (4 * band + row).
 static uint32_t fx_band_binding_ordinal(const Synth::EffectSlotBinding& effect, uint32_t band, uint32_t row)
@@ -720,9 +711,9 @@ bool Sculptor::fx_decode_row_slot(Synth::EffectSlotBinding&   effect,
     }
 
     const uint32_t num_params = Synth::get_effect_param_floats(effect.type);
-    // The multiband node projects no legacy parameter rows: its band region
+    // The multiband node projects no stored parameter rows: its band region
     // starts right after the Enabled row, so slots 3.. belong to the band
-    // blocks and the legacy decode below never runs for it.
+    // blocks and the stored decode below never runs for it.
     if (effect.type != Synth::EffectType::fir_multiband && slot_idx < Sculptor::fx_param_row(num_params)) {
         const uint32_t param = (slot_idx - Sculptor::fx_param_row(0)) / Sculptor::fx_param_stride;
         *binding             = &effect.bindings[param];
@@ -747,7 +738,7 @@ bool Sculptor::fx_decode_row_slot(Synth::EffectSlotBinding&   effect,
     }
     *row_base = slot_idx - *field;
     // The multiband node's four uniform rows report their own kind; the plain
-    // FIR's band 0 keeps the legacy Gain-row mapping.
+    // FIR's band 0 keeps the stored Gain-row mapping.
     if (fir_row)
         *fir_row = effect.type == Synth::EffectType::fir_multiband ? row : band == 0 ? 2u : row;
     *binding = &effect.fir_bands.bands[fx_band_binding_ordinal(effect, band, row)];
@@ -755,7 +746,7 @@ bool Sculptor::fx_decode_row_slot(Synth::EffectSlotBinding&   effect,
 }
 
 // The FIR band region's single visibility gate.  Only the Multi-band FIR
-// effect node projects band rows; the plain FIR keeps its legacy rows only,
+// effect node projects band rows; the plain FIR keeps its stored rows only,
 // whatever band state its slot carries.
 static bool fx_band_region_projected(const Synth::EffectSlotBinding& effect)
 {
@@ -792,7 +783,7 @@ static uint32_t fx_projected_band_rows(const Synth::EffectSlotBinding& effect, F
 
 // Renderer line ids of a FIR band row's LFO and MIDI source lines.  One
 // uniform range per band: twelve ids per band (four rows times the LFO and
-// source lines), above the legacy parameter ids and below the ids the
+// source lines), above the stored parameter ids and below the ids the
 // renderer reserves for the band headers (fx_band_row_group_base).  The
 // plain FIR never renders the region, so only the multiband node's ids
 // matter in practice.
@@ -803,7 +794,7 @@ static uint8_t fx_band_lfo_row_group(const uint32_t band, const uint32_t row)
 
 // Projects one effect parameter's row block: the base-value row (bounded
 // real, or the FIR slope's bounded integer grammar), then the LFO row and
-// the two MIDI source rows.  Shared by the legacy parameter loop and the
+// the two MIDI source rows.  Shared by the stored parameter loop and the
 // FIR band rows, so the two grammars cannot drift.  The caller picks the
 // renderer line ids and the nesting level of the nested rows.
 static void append_fx_param_block(Sculptor::Graph*                 graph,
@@ -931,12 +922,12 @@ bool Sculptor::fx_effect_slot_hidden(const Synth::EffectSlotBinding& effect,
                                      const uint32_t                  slot_idx)
 {
     // The band region belongs to the FIR effects only: a five-parameter
-    // effect's rows share the slot range, so the legacy decode below
+    // effect's rows share the slot range, so the stored decode below
     // answers for them.
     if (Synth::is_fir_effect_type(effect.type) && slot_idx >= Sculptor::fx_band_region_first_slot(effect.type)) {
         // FIR band rows: the headers and their click slots always render,
         // and a band row's unconnected modulator fields hide like the
-        // legacy parameter rows'.
+        // stored parameter rows'.
         uint32_t band   = 0;
         uint32_t offset = 0;
         if (! Sculptor::fx_band_block_of_slot(effect.type, slot_idx, &band, &offset) || offset < 3) {
@@ -1104,12 +1095,21 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
                                   1,
                                   false,
                                   0);
+            if (effect.type == Synth::EffectType::chorus) {
+                // Display blocks independently of their stable shader-index slots.
+                const uint32_t display = param == 3 ? 1 : param == 1 ? 2 : param == 2 ? 3 : 0;
+                for (uint32_t field = 0; field < Sculptor::fx_param_stride; ++field) {
+                    graph->set_slot_display_order(node,
+                                                  fx_param_row(param) + field,
+                                                  static_cast<uint8_t>(fx_param_row(display) + field + 1));
+                }
+            }
         }
 
         // The FIR band region, gated by fx_band_region_projected: only the
         // Multi-band FIR effect node projects it, and its tree starts at
-        // Band 1 right after the Enabled row (the three legacy scalar
-        // floats ride along unused; this type projects no legacy rows).
+        // Band 1 right after the Enabled row (the three stored scalar
+        // floats ride along unused; this type projects no stored rows).
         if (fx_band_region_projected(effect)) {
             uint32_t band_count = effect.fir_bands.band_count;
             if (band_count < 1) {
@@ -1276,11 +1276,11 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
         if (mapping->lfo_nodes[desc - 1] == pool_no_slot) {
             continue;
         }
-        // The legacy traversals walk the projected legacy parameter rows
+        // The stored traversals walk the projected stored parameter rows
         // (effect_type_info().num_params), not the stored slot shape
         // (get_effect_param_floats): the multiband type's ride-along scalars project
-        // no legacy rows, so modulation stored in those unused bindings must
-        // not project legacy wires onto the band tree.
+        // no stored rows, so modulation stored in those unused bindings must
+        // not project stored wires onto the band tree.
         for (uint32_t slot = 0; slot < chain_ref.num_effects; ++slot) {
             const uint32_t num_params = effect_type_info(chain_ref.effects[slot].type).num_params;
             for (uint32_t param = 0; param < num_params; ++param) {
@@ -1672,7 +1672,7 @@ static bool fx_drop_prev_modulator_wire(const Sculptor::Graph&              grap
 // The FirEffectBands binding of band `band`'s parameter `kind` (0 lowpass,
 // 1 highpass, 2 gain, 3 slope on the plain FIR; 0 center, 1 spread, 2 gain,
 // 3 slope on the multiband node).  Plain FIR band 0 keeps its edges/slope in
-// the legacy bindings (and its gain in FirEffectBands index 0, so the legacy
+// the stored bindings (and its gain in FirEffectBands index 0, so the stored
 // single-band form stays byte-identical); every other lookup, multiband
 // included, is the ordinal mapping.
 static Synth::EffectParamBinding* fx_band_param(Synth::EffectSlotBinding& effect, uint32_t band, uint32_t kind)
@@ -1763,10 +1763,10 @@ static bool apply_fx_band_edit(Synth::InstrumentBank*              bank,
         copy_fx_band(effect, band, band + 1u);
         if (band == 0 && effect.type == Synth::EffectType::fir) {
             // A plain-FIR copy out of band 0 seeds the copy's gain when band
-            // 0's gain is unwired and zero (the loaded legacy form keeps a
+            // 0's gain is unwired and zero (the loaded stored form keeps a
             // zeroed gain binding): the copy must not stage a silent band.
             // The multiband keeps a deliberate unwired zero gain: its gain
-            // rows are ordinary uniform bindings, not a legacy marker.
+            // rows are ordinary uniform bindings, not a stored marker.
             Synth::EffectParamBinding* copy_gain = fx_band_param(effect, 1, 2);
             if (copy_gain->lfo_desc_id == 0 && copy_gain->num_inputs == 0 && copy_gain->base_value == 0.0f) {
                 copy_gain->base_value = 1.0f;
@@ -2037,7 +2037,7 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
             // the dot it landed on, so a wire pulled between parameters (or
             // between LFO nodes) moves the binding with it.
             // One band-aware decode of the destination row drives the parameter
-            // dispatch below: the legacy modulo scan cannot classify a FIR band
+            // dispatch below: the stored modulo scan cannot classify a FIR band
             // region slot, so the decoder is the single seam
             // (sculptor_effect_graph.h).
             Synth::EffectParamBinding* row_binding = nullptr;
@@ -2510,7 +2510,7 @@ static bool effect_layout_identity(const Synth::InstrumentBank& bank,
     return false;
 }
 
-// Generated effect titles, the legacy "MIDI" key, and parseable LFO
+// Generated effect titles, the stored "MIDI" key, and parseable LFO
 // titles with a zero descriptor can be obsolete presentation.  Nonzero
 // descriptor titles remain references and must resolve, even when no
 // parameter uses the node.
@@ -2787,7 +2787,7 @@ void Sculptor::fx_compact_chain(Synth::EffectChainBinding*    chain,
         routing->out[slot]   = Sculptor::effect_out_disconnected;
     }
     chain->num_effects = static_cast<uint8_t>(kept);
-    if (! kept) {
+    if (! kept && routing->in == effect_in_first_slot) {
         routing->in = effect_in_disconnected;
     }
     fx_sanitize_routing(chain, routing);
@@ -3036,7 +3036,7 @@ bool Sculptor::fx_disconnect_candidate(const Synth::InstrumentEditorBank* source
 // Removes one slot and repairs the routing: flags shift down with the
 // payloads, a doubly connected slot hands its downstream connection to
 // its predecessor (the global input keeps feeding slot 0), and an
-// emptied chain loses its input wire.  Deleting slot 0 keeps the input
+// emptied chain connects its input directly to output.  Deleting slot 0 keeps the input
 // feed only when the deleted slot fed its successor: a disconnected or
 // output-flagged slot 0 must not wire the global input onto the next
 // remaining slot, which nothing fed before.  The trailing sanitize also
@@ -3058,7 +3058,7 @@ static void fx_delete_effect_routing(Synth::EffectChainBinding*    chain,
         routing->out[slot - 1] = downstream;
     }
     if (chain->num_effects == 0) {
-        routing->in = Sculptor::effect_in_disconnected;
+        routing->in = Sculptor::effect_in_output;
     }
     else if (slot == 0 && downstream != Sculptor::effect_out_next) {
         routing->in = Sculptor::effect_in_disconnected;
@@ -3081,6 +3081,9 @@ bool Sculptor::fx_delete_effect_candidate(const Synth::InstrumentEditorBank* sou
     }
     fx_delete_effect_routing(&bind, &routing, slot);
     fx_compact_chain(&bind, &routing);
+    if (bind.num_effects == 0) {
+        routing.in = effect_in_output;
+    }
     if (! validate_effect_routing(bind, routing)) {
         return false;
     }
@@ -3116,9 +3119,8 @@ bool Sculptor::fx_add_effect_candidate(const Synth::InstrumentEditorBank* source
     if (holder >= 0) {
         routing.out[holder] = effect_out_next;
     }
-    // The bypass owns the output feed: a new effect stays unwired while
-    // the input node feeds the output node directly.
-    if (routing.in != effect_in_output) {
+    // A first effect replaces the empty bypass; a nonempty bypass stays dry.
+    if (routing.in != effect_in_output || bind.num_effects == 1) {
         routing.out[insert] = effect_out_output;
         if (bind.num_effects == 1) {
             routing.in = effect_in_first_slot;
@@ -3399,7 +3401,7 @@ bool Sculptor::apply_effect_graph_batch(const Synth::InstrumentEditorBank* sourc
                     // edits, and the rows cannot drift from the bindings
                     // they project.  The gate covers both FIR types at each
                     // type's region base: a five-parameter effect's rows
-                    // share the slot range and replay like any legacy row.
+                    // share the slot range and replay like any stored row.
                     const Synth::EffectType sweep_type = sweep_chain.effects[effect_slot].type;
                     if (Synth::is_fir_effect_type(sweep_type) &&
                         slot >= Sculptor::fx_band_region_first_slot(sweep_type)) {
@@ -3512,11 +3514,11 @@ bool Sculptor::change_effect_type_candidate(const Synth::InstrumentEditorBank* s
     Synth::EffectChainBinding& chain   = fx_graph_chain(&effects_candidate.bank, owner);
     const bool                 enabled = chain.effects[slot].enabled;
     // The fir <-> fir_multiband conversion ports the plain FIR's filtering
-    // intent before the retype wipes the slot: the legacy Lowpass/Highpass/
+    // intent before the retype wipes the slot: the stored Lowpass/Highpass/
     // Slope become the band set that covers the same audible ranges (the
     // reject mapping turns a crossed or colliding edge pair into the two
     // half-open bands 0..lowpass and highpass..Nyquist), with every created
-    // band carrying the legacy slope (wire included) and the neutral gain
+    // band carrying the stored slope (wire included) and the neutral gain
     // 1.0.  This is intent-porting, not bit-exact staging equivalence.
     // Authored cutoffs bind to the range the runtime actually stages:
     // clamp_cutoff_hz clamps positive values to [1, Nyquist - 1] Hz

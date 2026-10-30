@@ -162,7 +162,7 @@ static void check_string_wave_json_codec()
         TEST(! Synth::decode_editor_bank_json(lfo_bank, static_cast<uint32_t>(strlen(lfo_bank)), bank_storage.get()));
     }
 
-    // Legacy pad documents still decode, with no string keys re-encoded.
+    // stored pad documents still decode, with no string keys re-encoded.
     {
         static const char pad_doc[] =
             "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"pad\",\"duty_a\":{\"base\":0.5}}]}";
@@ -254,7 +254,7 @@ static void check_string_wave_validator()
     }
 }
 
-// Legacy pick key, damping and release damping JSON bounds and defaults.  The removed pick key is fully inert:
+// stored pick key, damping and release damping JSON bounds and defaults.  The removed pick key is fully inert:
 // any numeric value, in range or not, decodes and is ignored; damping and release damping are 0..1 targets.
 static void check_string_param_json_bounds()
 {
@@ -272,7 +272,7 @@ static void check_string_param_json_bounds()
         TEST(string_clip_decode(doc, &decoded));
     }
 
-    // A legacy bank that still carries string_pick loads to exactly the same instrument as the document without
+    // A stored bank that still carries string_pick loads to exactly the same instrument as the document without
     // the key (the value is ignored, in range or not), so it renders identically.
     {
         const std::unique_ptr<ClipboardDecode> with_pick    = std::make_unique<ClipboardDecode>();
@@ -1260,7 +1260,7 @@ static StringScalars string_mirror_scalars(float f0, float damping, float releas
 }
 
 // Note-on burst: noise, mean pass, then the optional circular one-pole tone stage (brightness < 1; 1 keeps
-// the legacy excitation bit-identical).  Built into a scratch array, as the shader's shared burst array does.
+// the stored excitation bit-identical).  Built into a scratch array, as the shader's shared burst array does.
 // Returns the delay length n (0 when the pitch is below the floor, nothing written).
 static uint32_t string_mirror_burst(float*   burst,
                                     float    f0,
@@ -1315,7 +1315,7 @@ static uint32_t string_mirror_burst(float*   burst,
     return n;
 }
 
-// Replace-style note-on init (the legacy behavior): the burst becomes the ring head and all running state
+// Replace-style note-on init (the stored behavior): the burst becomes the ring head and all running state
 // restarts.  The chain token words are left alone.
 static void string_mirror_init(StringMirror* m,
                                float         f0,
@@ -1800,9 +1800,9 @@ static bool string_rings_equal(const float* a, const float* b, uint32_t n)
     return memcmp(a, b, n * sizeof(float)) == 0;
 }
 
-// Pluck brightness tone stage.  Frozen legacy reference for brightness 1: the pre-tone-stage excitation, the
+// Pluck brightness tone stage.  Frozen stored reference for brightness 1: the pre-tone-stage excitation, the
 // seeded noise burst followed by the mean pass.
-static void string_legacy_excitation_reference(float* ref, uint32_t n, uint32_t seed)
+static void string_stored_excitation_reference(float* ref, uint32_t n, uint32_t seed)
 {
     for (uint32_t i = 0; i < n; ++i) {
         ref[i] = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
@@ -1886,17 +1886,17 @@ static void check_string_mirror_brightness()
     static StringMirror base;
     static float        ref[string_ring_size];
 
-    // (a) Brightness 1 (explicit and defaulted) is bit-identical to the frozen legacy excitation.  At damping 0.5:
+    // (a) Brightness 1 (explicit and defaulted) is bit-identical to the frozen stored excitation.  At damping 0.5:
     // 441 Hz gives N = 98 and 400 Hz gives N = 108 (both even); 420 Hz gives N = 103 (odd).
-    const float legacy_freqs[3] = { 441.0f, 400.0f, 420.0f };
-    for (const float f0 : legacy_freqs) {
+    const float stored_freqs[3] = { 441.0f, 400.0f, 420.0f };
+    for (const float f0 : stored_freqs) {
         const uint32_t n = string_mirror_scalars(f0, 0.5f, 0.0f).n;
         TEST(n >= 3);
         TEST((n % 2u) == (f0 == 420.0f ? 1u : 0u));
 
         memset(&m, 0, sizeof(m));
         string_mirror_init(&m, f0, 0.5f, 55, 1.0f);
-        string_legacy_excitation_reference(ref, n, 55);
+        string_stored_excitation_reference(ref, n, 55);
         TEST(string_rings_equal(m.ring, ref, n));
 
         memset(&m, 0, sizeof(m));
@@ -2106,18 +2106,18 @@ static void check_string_mirror_ring_read_edges()
     TEST(i0 == 2033 && i1 == 0);
 }
 
-// FM characterization across the ring layout change. The legacy layout kept an 8-word header and a 2040-slot
+// FM characterization across the ring layout change. The stored layout kept an 8-word header and a 2040-slot
 // ring; the new one keeps 14 header words and a 2034-slot ring. Both layouts read the same logical last-L
 // samples; only the wrap point and the float magnitude of wr differ. This feeds one smooth string-like source
-// into a simulated legacy ring (size 2040) and a new ring (size 2034), reads both through the same FM mapping
+// into a simulated stored ring (size 2040) and a new ring (size 2034), reads both through the same FM mapping
 // across several wrap boundaries of each layout, and bounds the difference by the float rounding of the read
 // position (one ULP of a value below 2048 is 2^-13 slot) times the source slope.
-// Measured on this grid: max |new - legacy| = 1.94e-5 absolute (1.1e-5 of the 1.75 peak source amplitude), under
+// Measured on this grid: max |new - stored| = 1.94e-5 absolute (1.1e-5 of the 1.75 peak source amplitude), under
 // the 8.4e-5 position-rounding bound (float rounding of the read position, ~2^-13 slot, times source slope).
 // That is 1.1e-5 of peak amplitude, i.e. ULP-scale of the position arithmetic, not of the sample values
 // (reported to the parent: slightly above the 1e-5 relative target); evidence class accepted by user ruling 6.
 // Re-measured after OscillatorParams shrank to 88 bytes (pick and sections removed): this test feeds its own simulated
-// rings, so the bound is unchanged at max |new - legacy| = 1.94e-5 against the 8.4e-5 position-rounding bound.
+// rings, so the bound is unchanged at max |new - stored| = 1.94e-5 against the 8.4e-5 position-rounding bound.
 static float string_ring_read_sized(const float* ring, uint32_t size, uint32_t wr, float len, float phase)
 {
     const float f  = (phase - floorf(phase)) * len;
@@ -2132,7 +2132,7 @@ static float string_ring_read_sized(const float* ring, uint32_t size, uint32_t w
 
 static void check_string_fm_layout_characterization()
 {
-    static float legacy_ring[2040];
+    static float stored_ring[2040];
     static float new_ring[2034];
     const float  f0s[5]        = { 22.0f, 55.0f, 329.63f, 441.0f, 880.0f };
     const float  phases[6]     = { 0.0f, 0.1f, 0.37f, 0.5f, 0.9f, 0.9999f };
@@ -2143,13 +2143,13 @@ static void check_string_fm_layout_characterization()
         const double w   = 2.0 * vmath::pi_double / len;
         // Peak slope per sample of the source: sum of k * amplitude_k * w.
         const double slope = w * (1.0 + 2.0 * 0.5 + 3.0 * 0.25);
-        memset(legacy_ring, 0, sizeof(legacy_ring));
+        memset(stored_ring, 0, sizeof(stored_ring));
         memset(new_ring, 0, sizeof(new_ring));
         uint32_t checked = 0;
         for (uint32_t t = 1; t <= 3 * 2040 + 40; ++t) {
             const double x =
                 sin(w * (t - 1.0)) + 0.5 * sin(2.0 * w * (t - 1.0) + 1.0) + 0.25 * sin(3.0 * w * (t - 1.0) + 2.0);
-            legacy_ring[(t - 1) % 2040] = static_cast<float>(x);
+            stored_ring[(t - 1) % 2040] = static_cast<float>(x);
             new_ring[(t - 1) % 2034]    = static_cast<float>(x);
             const uint32_t wr_old       = t % 2040;
             const uint32_t wr_new       = t % 2034;
@@ -2159,7 +2159,7 @@ static void check_string_fm_layout_characterization()
                 continue;
             }
             for (const float phase : phases) {
-                const float old_v = string_ring_read_sized(legacy_ring, 2040, wr_old, static_cast<float>(len), phase);
+                const float old_v = string_ring_read_sized(stored_ring, 2040, wr_old, static_cast<float>(len), phase);
                 const float new_v = string_ring_read_sized(new_ring, 2034, wr_new, static_cast<float>(len), phase);
                 TEST(std::isfinite(old_v) && std::isfinite(new_v));
                 max_diff      = fmax(max_diff, fabs(static_cast<double>(new_v) - static_cast<double>(old_v)));
@@ -2291,8 +2291,8 @@ static void check_string_mirror_silent_onset_init()
     TEST(m.tagged && m.tag == 6);
 }
 
-// ---- String dispersion. Frozen legacy loop (no cascade) for the d = 0 bit-identity check.
-static void string_legacy_step(StringMirror* m, float f0, float damping, float* out, uint32_t count)
+// ---- String dispersion. Frozen stored loop (no cascade) for the d = 0 bit-identity check.
+static void string_stored_step(StringMirror* m, float f0, float damping, float* out, uint32_t count)
 {
     const StringScalars s  = string_mirror_scalars(f0, damping, 0.0f);
     const float         kr = 1.0f - expf(-1.0f / (string_fs * 0.003f));
@@ -2418,10 +2418,10 @@ static bool string_disp_case(float f0, float dispersion, double* stretch, String
     return fabs(1200.0 * log2(f1 / static_cast<double>(f0))) < 1.0 && matches;
 }
 
-// Frozen legacy memory layout (8-word header, 2040-slot ring) running the natural string loop.  Only the
+// Frozen stored memory layout (8-word header, 2040-slot ring) running the natural string loop.  Only the
 // ring wrap point differs from the current layout (14-word header, 2034 slots); the loop is integer indexed
 // (delay_whole + fractional allpass), so its output must match the current layout bit for bit.
-static constexpr uint32_t string_legacy_ring_size = 2040;
+static constexpr uint32_t string_stored_ring_size = 2040;
 
 // Frozen baseline: re-frozen at the voicing wave from the tree that already carried the dispersion recalibration
 // (count-normalized solve, strength 0.05863), the release damping curve (applied at the summed write point, outside
@@ -2431,7 +2431,7 @@ static constexpr uint32_t string_legacy_ring_size = 2040;
 // the requested section count, and the current code must equal them at a count of one for every requested count).
 // The helpers below are verbatim copies of the pre-removal arithmetic, so a regression in the current scalar or
 // excitation code cannot hide in the comparison.  Update only deliberately.
-static void string_legacy_layout_step(float*               ring,
+static void string_stored_layout_step(float*               ring,
                                       uint32_t*            wr,
                                       float*               t1,
                                       float*               u1,
@@ -2443,7 +2443,7 @@ static void string_legacy_layout_step(float*               ring,
 {
     const float kr = 1.0f - expf(-1.0f / (string_fs * 0.003f));
     for (uint32_t i = 0; i < count; ++i) {
-        const uint32_t rd = *wr >= s.n ? *wr - s.n : *wr + string_legacy_ring_size - s.n;
+        const uint32_t rd = *wr >= s.n ? *wr - s.n : *wr + string_stored_ring_size - s.n;
         const float    x  = ring[rd];
         out[i]            = x;
         *e += kr * (1.0f - *e);
@@ -2460,11 +2460,11 @@ static void string_legacy_layout_step(float*               ring,
         ring[*wr] = v;
         *t1       = t;
         *u1       = u;
-        *wr       = *wr + 1 == string_legacy_ring_size ? 0 : *wr + 1;
+        *wr       = *wr + 1 == string_stored_ring_size ? 0 : *wr + 1;
     }
 }
 
-static float string_legacy_frozen_ratio(float q)
+static float string_stored_frozen_ratio(float q)
 {
     if (q <= 0.3849002f) {
         const float cos_arg = fminf(1.0f, 2.598076f * q);
@@ -2474,12 +2474,12 @@ static float string_legacy_frozen_ratio(float q)
     return cardano + 0.33333334f / cardano;
 }
 
-static float string_legacy_frozen_phase_delay(float coeff, float omega)
+static float string_stored_frozen_phase_delay(float coeff, float omega)
 {
     return (2.0f / omega) * atan2f((1.0f - coeff) * sinf(0.5f * omega), (1.0f + coeff) * cosf(0.5f * omega));
 }
 
-static StringScalars string_legacy_frozen_scalars(float f0,
+static StringScalars string_stored_frozen_scalars(float f0,
                                                   float damping,
                                                   float release_damping,
                                                   float dispersion,
@@ -2508,9 +2508,9 @@ static StringScalars string_legacy_frozen_scalars(float f0,
         for (uint32_t count = requested; count > 0; --count) {
             const float count_f     = static_cast<float>(count);
             const float disp_q      = 0.05863f * dispersion / (count_f * (omega * omega * omega));
-            const float disp_r      = string_legacy_frozen_ratio(disp_q);
+            const float disp_r      = string_stored_frozen_ratio(disp_q);
             const float coeff       = (1.0f - disp_r) / (1.0f + disp_r);
-            const float count_delay = count_f * string_legacy_frozen_phase_delay(coeff, omega);
+            const float count_delay = count_f * string_stored_frozen_phase_delay(coeff, omega);
             if (len - tau - count_delay >= 3.0f) {
                 s.disp_a       = coeff;
                 s.num_sections = count;
@@ -2529,7 +2529,7 @@ static StringScalars string_legacy_frozen_scalars(float f0,
 }
 
 // Frozen excitation: the pick = 0 burst (noise fill, then zero mean).
-static void string_legacy_frozen_init(float* ring, const StringScalars& s, uint32_t seed)
+static void string_stored_frozen_init(float* ring, const StringScalars& s, uint32_t seed)
 {
     const uint32_t n = s.n;
     for (uint32_t i = 0; i < n; ++i) {
@@ -2545,17 +2545,17 @@ static void string_legacy_frozen_init(float* ring, const StringScalars& s, uint3
     }
 }
 
-// Natural string path: current layout (with the dispersion rows at 0 and with them omitted) versus the legacy
+// Natural string path: current layout (with the dispersion rows at 0 and with them omitted) versus the stored
 // 2040-slot layout, for dispersion 0 and above.  Output must be bit-identical, and the last 2034 logical ring
 // slots must match exactly across several wraps of both layouts.  The frozen side runs with one section, the only
 // count the current code has.
-static void check_string_natural_path_legacy_capacity()
+static void check_string_natural_path_stored_capacity()
 {
     static StringMirror current;
-    static float        legacy_ring[string_legacy_ring_size];
+    static float        stored_ring[string_stored_ring_size];
     static float        out_current[6144];
     static float        out_plain[6144];
-    static float        out_legacy[6144];
+    static float        out_stored[6144];
     static StringMirror plain;
     constexpr uint32_t  count          = 6144;
     const float         f0s[9]         = { 22.5f, 30.0f, 55.0f, 110.0f, 261.63f, 441.0f, 880.0f, 3000.0f, 8000.0f };
@@ -2566,7 +2566,7 @@ static void check_string_natural_path_legacy_capacity()
         for (const float damping : dampings) {
             for (const float dispersion : dispersions) {
                 {
-                    const StringScalars s = string_legacy_frozen_scalars(f0, damping, 0.0f, dispersion, 1.0f);
+                    const StringScalars s = string_stored_frozen_scalars(f0, damping, 0.0f, dispersion, 1.0f);
                     TEST(! s.silent && s.n >= 2 && s.n < string_ring_size);
                     const StringScalars now = string_mirror_scalars(f0, damping, 0.0f, dispersion);
                     TEST(now.n == s.n && now.c == s.c && now.a == s.a && now.g == s.g && now.gr == s.gr &&
@@ -2575,38 +2575,38 @@ static void check_string_natural_path_legacy_capacity()
                     memset(&current, 0, sizeof(current));
                     memset(&plain, 0, sizeof(plain));
                     string_mirror_init(&current, f0, damping, 77, 1.0f, dispersion);
-                    // The legacy side uses the frozen scalars and excitation, not the current helpers.
-                    memset(legacy_ring, 0, sizeof(legacy_ring));
-                    string_legacy_frozen_init(legacy_ring, s, 77);
-                    uint32_t legacy_wr               = s.n;
+                    // The stored side uses the frozen scalars and excitation, not the current helpers.
+                    memset(stored_ring, 0, sizeof(stored_ring));
+                    string_stored_frozen_init(stored_ring, s, 77);
+                    uint32_t stored_wr               = s.n;
                     float    t1                      = 0.0f;
                     float    u1                      = 0.0f;
                     float    e                       = 1.0f;
                     float    ds[string_max_sections] = {};
                     for (uint32_t i = 0; i < count; i += 256) {
                         string_mirror_step(&current, f0, damping, 0.0f, false, out_current + i, 256, dispersion);
-                        string_legacy_layout_step(legacy_ring, &legacy_wr, &t1, &u1, &e, ds, s, out_legacy + i, 256);
+                        string_stored_layout_step(stored_ring, &stored_wr, &t1, &u1, &e, ds, s, out_stored + i, 256);
                     }
-                    TEST(memcmp(out_current, out_legacy, sizeof(out_legacy)) == 0);
+                    TEST(memcmp(out_current, out_stored, sizeof(out_stored)) == 0);
                     if (dispersion == 0.0f) {
                         string_mirror_init(&plain, f0, damping, 77);
                         for (uint32_t i = 0; i < count; i += 256) {
                             string_mirror_step(&plain, f0, damping, 0.0f, false, out_plain + i, 256);
                         }
-                        TEST(memcmp(out_plain, out_legacy, sizeof(out_legacy)) == 0);
+                        TEST(memcmp(out_plain, out_stored, sizeof(out_stored)) == 0);
                     }
                     double energy = 0.0;
                     for (uint32_t i = 0; i < count; ++i) {
-                        energy += static_cast<double>(out_legacy[i]) * static_cast<double>(out_legacy[i]);
+                        energy += static_cast<double>(out_stored[i]) * static_cast<double>(out_stored[i]);
                     }
                     TEST(energy > 0.0);
                     TEST(current.wr == (s.n + count) % string_ring_size &&
-                         legacy_wr == (s.n + count) % string_legacy_ring_size);
+                         stored_wr == (s.n + count) % string_stored_ring_size);
                     // Logical write j lives at (n + j) modulo the layout's ring size; compare the last 2034 writes.
                     bool ring_same = true;
                     for (uint32_t j = count - string_ring_size; j < count; ++j) {
                         ring_same = ring_same && current.ring[(s.n + j) % string_ring_size] ==
-                                                     legacy_ring[(s.n + j) % string_legacy_ring_size];
+                                                     stored_ring[(s.n + j) % string_stored_ring_size];
                     }
                     TEST(ring_same);
                     ++compared;
@@ -2811,32 +2811,32 @@ static void check_string_mirror_dispersion()
 {
     static StringMirror a;
     static StringMirror b;
-    static StringMirror legacy;
+    static StringMirror stored;
     static float        out_a[2048];
     static float        out_b[2048];
     static float        out_l[2048];
     static float        ring_l[string_ring_size];
-    // (a) d = 0 is bit-identical to the frozen legacy loop.  At damping 0.5: 441 Hz gives N = 98 and 400 Hz N = 108
+    // (a) d = 0 is bit-identical to the frozen stored loop.  At damping 0.5: 441 Hz gives N = 98 and 400 Hz N = 108
     // (even), 420 Hz gives N = 103 (odd).
-    const float legacy_freqs[3] = { 441.0f, 400.0f, 420.0f };
-    for (const float f0 : legacy_freqs) {
+    const float stored_freqs[3] = { 441.0f, 400.0f, 420.0f };
+    for (const float f0 : stored_freqs) {
         const StringScalars plain = string_mirror_scalars(f0, 0.5f, 0.0f);
         TEST(plain.n % 2 == (f0 == 420.0f ? 1u : 0u));
         const StringScalars gated = string_mirror_scalars(f0, 0.5f, 0.0f, 0.0f);
         TEST(gated.num_sections == 0 && gated.disp_delay == 0.0f && gated.n == plain.n && gated.a == plain.a);
         memset(&a, 0, sizeof(a));
         memset(&b, 0, sizeof(b));
-        memset(&legacy, 0, sizeof(legacy));
+        memset(&stored, 0, sizeof(stored));
         string_mirror_init(&a, f0, 0.5f, 55, 1.0f, 0.0f);
         string_mirror_init(&b, f0, 0.5f, 55);
-        string_mirror_init(&legacy, f0, 0.5f, 55);
+        string_mirror_init(&stored, f0, 0.5f, 55);
         string_mirror_step(&a, f0, 0.5f, 0.0f, false, out_a, 2048, 0.0f);
         string_mirror_step(&b, f0, 0.5f, 0.0f, false, out_b, 2048);
         for (uint32_t i = 0; i < 2048; i += 256) {
-            string_legacy_step(&legacy, f0, 0.5f, out_l + i, 256);
+            string_stored_step(&stored, f0, 0.5f, out_l + i, 256);
         }
         TEST(memcmp(out_a, out_l, sizeof(out_a)) == 0 && memcmp(out_b, out_l, sizeof(out_b)) == 0);
-        memcpy(ring_l, legacy.ring, sizeof(ring_l));
+        memcpy(ring_l, stored.ring, sizeof(ring_l));
         TEST(memcmp(a.ring, ring_l, sizeof(ring_l)) == 0 && memcmp(b.ring, ring_l, sizeof(ring_l)) == 0);
         TEST(a.ds[0] == 0.0f);
     }
@@ -3202,7 +3202,7 @@ static void check_string_chain_recycled_slot()
         TEST(m.ds[k] == 0.0f);
     }
     TEST(string_chain_join(m.chain_lo, m.chain_hi) == a);
-    // Same as the legacy replace over the same dirty ring: no prior tail inside the window.
+    // Same as the stored replace over the same dirty ring: no prior tail inside the window.
     fresh = dirty;
     string_mirror_init(&fresh, chain_f0, chain_damping, b, chain_brightness, chain_dispersion);
     TEST(memcmp(fresh.ring, m.ring, sizeof(fresh.ring)) == 0);
@@ -3731,7 +3731,7 @@ struct StringOracleDeviation {
 
 // Verify the float mirror against an independent double reference of the legacy algorithm.
 // Exact init-path agreement remains separate from the cross-platform rounding bound.
-static void check_string_chain_legacy_oracle()
+static void check_string_chain_stored_oracle()
 {
     struct Row {
         float    f0;
@@ -3921,7 +3921,7 @@ static void string_chain_m2_regressions()
     check_string_chain_token_lifecycle();
     check_string_chain_seed_uniqueness();
     check_string_chain_skipped_work();
-    check_string_chain_legacy_oracle();
+    check_string_chain_stored_oracle();
     check_string_chain_widened_index();
     check_string_chain_ringing_continuity();
 }
@@ -3936,7 +3936,7 @@ static void string_mirror_m2_regressions_b()
     check_string_release_damping_curve();
     check_string_dispersion_modulation();
     check_string_dispersion_routed_codec();
-    check_string_natural_path_legacy_capacity();
+    check_string_natural_path_stored_capacity();
     check_string_mirror_brightness();
     check_string_mirror_fm_ring_read();
     check_string_mirror_ring_read_edges();
