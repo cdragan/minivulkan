@@ -2220,6 +2220,274 @@ static void m2_fir_kernel_mirror_regressions()
     }
 }
 
+// Mirrors the flagged multi-band FIR path with a shared center and positive bandpass polarity.
+static void fir_mb_align_band_mirror(uint32_t        lowpass_hz,
+                                     uint32_t        highpass_hz,
+                                     uint32_t        span,
+                                     uint32_t        work_group,
+                                     uint32_t        subgroup,
+                                     uint32_t        center,
+                                     FirCoeffMirror* out)
+{
+    constexpr uint32_t taps          = Synth::num_fir_taps;
+    constexpr float    pi_val        = 3.141592653589793f;
+    const float        sample_rate   = static_cast<float>(Synth::rt_sampling_rate);
+    const float        lowpass_norm  = static_cast<float>(lowpass_hz) / sample_rate;
+    const float        highpass_norm = static_cast<float>(highpass_hz) / sample_rate;
+
+    out->center_freq = (static_cast<float>(highpass_hz) + static_cast<float>(lowpass_hz)) * 0.5f;
+
+    const float center_omega = 2.0f * pi_val * out->center_freq / sample_rate;
+    const float half_span    = static_cast<float>(span) * 0.5f - 0.5f;
+    const float span_minus_1 = static_cast<float>(span - 1u);
+
+    for (uint32_t tap = 0; tap < taps; tap++) {
+        const float offset = static_cast<float>(tap) - static_cast<float>(center);
+
+        float value = (offset == 0.0f && lowpass_hz == 0 && highpass_hz == 0) ? 1.0f : 0.0f;
+        if (lowpass_hz > 0) {
+            value = (offset == 0.0f) ? 2.0f * lowpass_norm
+                                     : sinf(2.0f * pi_val * lowpass_norm * offset) / (pi_val * offset);
+        }
+
+        float norm_value = value;
+
+        if (highpass_hz > 0) {
+            const float hp_value = (offset == 0.0f)
+                                       ? 2.0f * highpass_norm
+                                       : sinf(2.0f * pi_val * highpass_norm * offset) / (pi_val * offset);
+            value -= hp_value;
+            if (highpass_hz < lowpass_hz) {
+                norm_value = hp_value;
+            }
+            else if (offset == 0.0f) {
+                value += 1.0f;
+                if (lowpass_hz == 0) {
+                    norm_value += 1.0f;
+                }
+            }
+        }
+
+        const float window_pos = offset + half_span;
+        const bool  in_span    = window_pos >= 0.0f && window_pos <= span_minus_1;
+        const float window     = in_span ? 0.42f - 0.5f * cosf((2.0f * pi_val * window_pos) / span_minus_1) +
+                                           0.08f * cosf((4.0f * pi_val * window_pos) / span_minus_1)
+                                         : 0.0f;
+        value *= window;
+
+        out->coefficients[tap] = value;
+        out->norm_terms[tap]   = norm_value * window;
+        if (in_span && highpass_hz > 0 && highpass_hz < lowpass_hz) {
+            out->cos_terms[tap] = value * cosf(center_omega * offset);
+            out->sin_terms[tap] = value * sinf(center_omega * offset);
+        }
+        else {
+            out->cos_terms[tap] = 0.0f;
+            out->sin_terms[tap] = 0.0f;
+        }
+    }
+
+    out->old_denominator  = fir_test_subgroup_sum(out->norm_terms, work_group, subgroup);
+    const float cos_sum   = fir_test_subgroup_sum(out->cos_terms, work_group, subgroup);
+    const float sin_sum   = fir_test_subgroup_sum(out->sin_terms, work_group, subgroup);
+    out->band_denominator = fir_test_bandpass_denominator(cos_sum, sin_sum, out->old_denominator);
+}
+
+// Mirrors one entry's masked band count and gain-weighted kernel accumulation.
+static void fir_mb_align_entry_mirror(const Synth::FirEffectCoeffEntry& entry, float* stored)
+{
+    constexpr uint32_t align_flag = 0x80000000u;
+    const bool         flagged    = (entry.band_count & align_flag) != 0;
+    const uint32_t     count      = entry.band_count & 0xFFu;
+
+    TEST(count <= Synth::max_fir_effect_bands);
+    if (count > Synth::max_fir_effect_bands) {
+        return;
+    }
+
+    uint32_t center = 0;
+    for (uint32_t band_idx = 0; band_idx < count; band_idx++) {
+        const uint32_t band_center = (entry.bands[band_idx].window_span - 1u) / 2u;
+        if (band_center > center) {
+            center = band_center;
+        }
+    }
+
+    static FirCoeffMirror band;
+    memset(stored, 0, Synth::num_fir_taps * sizeof(float));
+
+    for (uint32_t band_idx = 0; band_idx < count; band_idx++) {
+        const Synth::FirEffectCoeffBand& param = entry.bands[band_idx];
+        if (flagged) {
+            fir_mb_align_band_mirror(param.lowpass_cutoff_freq,
+                                     param.highpass_cutoff_freq,
+                                     param.window_span,
+                                     256,
+                                     32,
+                                     center,
+                                     &band);
+        }
+        else {
+            fir_test_mirror(param.lowpass_cutoff_freq, param.highpass_cutoff_freq, param.window_span, 256, 32, &band);
+        }
+
+        for (uint32_t tap = 0; tap < Synth::num_fir_taps; tap++) {
+            stored[tap] += param.gain * band.coefficients[tap] / band.band_denominator;
+            TEST(std::isfinite(stored[tap]));
+        }
+    }
+}
+
+static void fir_mb_align_flip_regressions()
+{
+    TEST(Synth::fir_multiband_align_flip == 0x80000000u);
+    constexpr uint32_t align_flag = 0x80000000u;
+    TEST((0x80000003u & 0xFFu) == 3u);
+    TEST(sizeof(Synth::FirEffectCoeffEntry) == 18u * sizeof(uint32_t));
+
+    // The staging helpers remain flag-free; the runtime alone adds the flag.
+    for (uint8_t count = 1; count <= 4; count++) {
+        float params[Synth::num_fir_effect_band_params] = {};
+        params[0]                                       = 4000.0f;
+        params[1]                                       = 2000.0f;
+        params[2]                                       = 1.0f;
+        params[3]                                       = 100.0f;
+
+        Synth::FirEffectCoeffEntry entry = {};
+        TEST(Synth::stage_fir_multiband_coeff_entry(0, count, params, &entry));
+        TEST(entry.band_count == 1 && (entry.band_count & align_flag) == 0);
+        TEST(Synth::stage_fir_effect_coeff_entry(0, count, 8000.0f, 0.0f, 100.0f, params, &entry));
+        TEST((entry.band_count & align_flag) == 0);
+
+        memset(params, 0, sizeof(params));
+        TEST(! Synth::stage_fir_multiband_coeff_entry(0, count, params, &entry));
+        TEST((entry.band_count & align_flag) == 0);
+    }
+
+    static float          actual[Synth::num_fir_taps];
+    static float          expected[Synth::num_fir_taps];
+    static float          low_kernel[Synth::num_fir_taps];
+    static float          pass_kernel[Synth::num_fir_taps];
+    static FirCoeffMirror band;
+
+    // Unflagged one-band entries reproduce the existing mirror byte for byte.
+    const uint32_t cutoffs[][2] = { { 8000, 0 }, { 0, 8000 }, { 14000, 6891 }, { 4000, 8000 }, { 0, 0 } };
+    const uint32_t spans[]      = { 11u, 513u, 1025u };
+
+    for (uint32_t pair_idx = 0; pair_idx < 5; pair_idx++) {
+        const uint32_t* pair = cutoffs[pair_idx];
+        for (uint32_t span_idx = 0; span_idx < 3; span_idx++) {
+            const uint32_t             span  = spans[span_idx];
+            Synth::FirEffectCoeffEntry entry = {};
+            entry.band_count                 = 1;
+            entry.bands[0]                   = { pair[1], pair[0], span, 1.0f };
+
+            fir_mb_align_entry_mirror(entry, actual);
+            fir_test_mirror(pair[0], pair[1], span, 256, 32, &band);
+            fir_test_stored_response(band, 0.0, expected);
+
+            for (uint32_t tap = 0; tap < Synth::num_fir_taps; tap++) {
+                // Canonicalize negative zero to match zero-initialized accumulation.
+                expected[tap] = 0.0f + expected[tap];
+            }
+
+            TEST(memcmp(actual, expected, sizeof(actual)) == 0);
+        }
+    }
+
+    // Oscillator-style unflagged entries retain each band's own center and polarity.
+    for (uint32_t count = 1; count <= 4; count++) {
+        Synth::FirEffectCoeffEntry multi = {};
+        multi.band_count                 = count;
+        memset(expected, 0, sizeof(expected));
+
+        for (uint32_t band_idx = 0; band_idx < count; band_idx++) {
+            const uint32_t span   = 11u + band_idx * 256u;
+            multi.bands[band_idx] = { 4000u + band_idx * 1000u, 8000u + band_idx * 1000u, span, 0.25f };
+            fir_test_mirror(multi.bands[band_idx].lowpass_cutoff_freq,
+                            multi.bands[band_idx].highpass_cutoff_freq,
+                            span,
+                            256,
+                            32,
+                            &band);
+            for (uint32_t tap = 0; tap < Synth::num_fir_taps; tap++) {
+                expected[tap] += 0.25f * band.coefficients[tap] / band.band_denominator;
+            }
+        }
+
+        fir_mb_align_entry_mirror(multi, actual);
+        TEST(memcmp(actual, expected, sizeof(actual)) == 0);
+    }
+
+    // The low-byte count excludes the fourth band from both the center scan and accumulation.
+    {
+        Synth::FirEffectCoeffEntry multi = {};
+        multi.band_count                 = align_flag | 3u;
+        multi.bands[0]                   = { 0, 6891, 513, 1.0f };
+        multi.bands[1]                   = { 6891, 14000, 1025, 1.0f };
+        multi.bands[2]                   = { 0, 4000, 11, 0.0f };
+        fir_mb_align_entry_mirror(multi, expected);
+
+        multi.bands[3] = { 0, 8000, 0xFFFFFFFFu, 1.0f };
+        fir_mb_align_entry_mirror(multi, actual);
+        TEST(memcmp(actual, expected, sizeof(actual)) == 0);
+    }
+
+    // Common-center positive kernels approach the ideal crossover sum 1.
+    Synth::FirEffectCoeffEntry entry = {};
+    entry.band_count                 = align_flag | 2u;
+    entry.bands[0]                   = { 0, 6891, 513, 1.0f };
+    entry.bands[1]                   = { 6891, 14000, 1025, 1.0f };
+    fir_mb_align_entry_mirror(entry, actual);
+    TEST(fabs(fir_test_response(actual, 6891.0) - 1.0) < 0.01);
+
+    entry.band_count = 2;
+    fir_mb_align_entry_mirror(entry, expected);
+    TEST(fir_test_response(expected, 6891.0) < 0.03);
+
+    // Isolate each band while retaining the other's span for the maximum.
+    entry.band_count    = align_flag | 2u;
+    entry.bands[1].gain = 0.0f;
+    fir_mb_align_entry_mirror(entry, low_kernel);
+
+    entry.bands[0].gain = 0.0f;
+    entry.bands[1].gain = 1.0f;
+    fir_mb_align_entry_mirror(entry, pass_kernel);
+    TEST(low_kernel[512] > 0.0f && pass_kernel[512] > 0.0f);
+
+    const float* const kernels[2] = { low_kernel, pass_kernel };
+    for (uint32_t kernel_idx = 0; kernel_idx < 2; kernel_idx++) {
+        const float* const kernel = kernels[kernel_idx];
+        uint32_t           peak   = 0;
+        for (uint32_t tap = 0; tap < Synth::num_fir_taps; tap++) {
+            if (fabsf(kernel[tap]) > fabsf(kernel[peak])) {
+                peak = tap;
+            }
+        }
+
+        TEST(peak == 512);
+        for (uint32_t delta = 0; delta <= 512; delta++) {
+            TEST(fabsf(kernel[512 - delta] - kernel[512 + delta]) < 1e-6f);
+        }
+    }
+
+    const double ideal_sum = fir_test_response(low_kernel, 6891.0) + fir_test_response(pass_kernel, 6891.0);
+    TEST(fabs(fir_test_response(actual, 6891.0) - ideal_sum) < 1e-5);
+
+    // A single-band flagged bandpass also flips without changing its center.
+    entry.band_count = align_flag | 1u;
+    entry.bands[0]   = { 6891, 14000, 513, 1.0f };
+    fir_mb_align_entry_mirror(entry, actual);
+
+    entry.band_count = 1;
+    fir_mb_align_entry_mirror(entry, expected);
+    TEST(actual[256] > 0.0f && expected[256] < 0.0f);
+
+    for (uint32_t tap = 0; tap < Synth::num_fir_taps; tap++) {
+        TEST(actual[tap] == -expected[tap]);
+    }
+}
+
 // ---- FIR effect multi-band staging, expansion, JSON and remap ----
 static void fir_effect_bands_regressions()
 {
@@ -5166,6 +5434,7 @@ int main()
     m2_band_button_gray_regressions();
     m2_per_band_modulation_regressions();
     m2_fir_kernel_mirror_regressions();
+    fir_mb_align_flip_regressions();
     fir_effect_bands_regressions();
     fir_effect_band_editor_regressions();
     m4_fix3_wave_regressions();
