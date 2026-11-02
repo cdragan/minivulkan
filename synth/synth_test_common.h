@@ -16,7 +16,6 @@
 #include "../sculptor/sculptor_instr_bank.h"
 #include "../sculptor/sculptor_instr_edit.h"
 
-
 #include "../sculptor/sculptor_instr_envelope_edit.h"
 #include "../sculptor/sculptor_instr_library.h"
 #include "../sculptor/sculptor_osc_graph.h"
@@ -300,6 +299,6 @@ void Synth::apply_midi_event(const Synth::MidiEvent&);
 void make_valid_bank(Synth::InstrumentBank& bank);
 
 static_assert(max_portable_records == Synth::instrument_graph_layout_capacity);
-static_assert(max_portable_records == 415);
+static_assert(max_portable_records == 443);
 int  test_exit_code();
 void test_silence_stdout();

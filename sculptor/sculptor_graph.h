@@ -99,14 +99,14 @@ extern const char* const lfo_wave_names[2];
 extern const char* const lfo_sync_names[6];
 extern const char* const lfo_start_names[3];
 
-// Sized for the widest projected node - the oscillator: 35 fixed slots
+// Sized for the widest projected node - the oscillator: 36 fixed slots
 // plus Filter Type and the Pluck Brightness and String Dispersion rows (string
 // damping reuses the duty/pad tone rows), then one uniform block per existing band (the "Band N" header label, its
 // [-]/[+] click slots, and four parameter rows each followed by a 12-slot modulation block; 55 slots per band, up to
-// four bands). The high-water mark is band 4's last block slot at 369, so 370 slots. The widest effect (a 5-param
+// four bands). The high-water mark is band 4's last block slot at 396, so 397 slots. The widest effect (a 5-param
 // effect's 3 + 5*10 = 53 slots) is well under it. Slot carries list_options[8][32], so a larger cap would balloon every
 // Node allocation.
-constexpr uint32_t max_node_slots = 370;
+constexpr uint32_t max_node_slots = 397;
 
 // One row label together with its hover text; the tooltip may be null.
 struct LabelTooltip {
@@ -144,8 +144,8 @@ struct Node {
 // Worst-case bound node population: one input node for six MIDI source
 // roles, the instrument-parameters node and sum, one oscillator per layer
 // (7), and per (layer, target) cell one envelope and one LFO instance
-// (2 * 7 * 29 = 406 with 29 targets).
-constexpr uint32_t max_nodes = 416;
+// (2 * 7 * 31 = 434 with 31 targets).
+constexpr uint32_t max_nodes = 444;
 
 struct EndPoint {
     uint32_t node_idx;
@@ -160,18 +160,18 @@ struct Connection {
 // Connection budget: the reachable worst case is one oscillator->sum edge
 // per layer, four direct modulator edges per (layer, target) cell
 // (envelope, LFO and two MIDI sources) and up to two source edges per
-// distinct LFO instance key - 1225 at seven layers with 29 targets and every
+// distinct LFO instance key - 1309 at seven layers with 31 targets and every
 // target cell wired, the bound pinned in sculptor_osc_graph.h; the effects graph adds
 // one enable edge per projected effect node (at most 4 per chain).  The
 // pool holds headroom above it, so no connection-budget refusal path exists.
 // sizeof(Connection) = 16 B, absorbed by the fixed max_graph_bytes reserve.
-constexpr uint32_t max_connections = 1236;
+constexpr uint32_t max_connections = 1320;
 
 // Static size cap for one editor-resident Graph instance.  The editor state
 // budget reserves the symbolic sizeof(osc_graph) per graph (the static
 // instance in sculptor_instr_edit.cpp); a capacity raise that outgrows it
 // must fail the build instead of silently busting that reserve.
-constexpr uint32_t max_graph_bytes = 50 * 1024 * 1024;
+constexpr uint32_t max_graph_bytes = 56 * 1024 * 1024;
 
 // Caller validation for connection attempts.  Runs after the widget's
 // structural checks (endpoint kinds, bounds, single connection per input);

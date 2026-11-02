@@ -228,10 +228,17 @@ enum OscParamRole : uint32_t {
     osc_string_dispersion_env,
     osc_string_dispersion_lfo,
     // clang-format on
+    osc_string_brightness_dest,
+    osc_string_brightness_env,
+    osc_string_brightness_lfo,
+    osc_string_strike_dest,
+    osc_string_strike_env,
+    osc_string_strike_lfo,
+
     num_osc_roles
 };
 
-static_assert(num_osc_roles == 87);
+static_assert(num_osc_roles == 93);
 
 constexpr uint32_t channel_block_base = 1;
 constexpr uint32_t voice_block_base   = channel_block_base + Synth::max_channels * num_channel_roles;
@@ -297,6 +304,8 @@ constexpr ModTargetNode mod_target_nodes[] = {
     { mod_string_damping, osc_string_damping_dest },
     { mod_string_release_damping, osc_string_release_damping_dest },
     { mod_string_dispersion, osc_string_dispersion_dest },
+    { mod_string_brightness, osc_string_brightness_dest },
+    { mod_string_strike, osc_string_strike_dest },
 };
 static_assert(sizeof(mod_target_nodes) / sizeof(mod_target_nodes[0]) == Synth::num_mod_targets,
               "mod target table must cover every ModTarget");
@@ -388,6 +397,9 @@ struct ShaderParams {
         float string_brightness;      // String pluck brightness 0..1, used by the note-on excitation
         float string_dispersion;      // String dispersion 0..1, 0 = off
         uint32_t string_chain;        // Note seed which started the string chain, kept across string takeovers
+        float    string_strike;       // Strike blend 0..1, captured at note-on
+        float    string_drive;        // Strike force window in milliseconds, captured at note-on
+        float    string_spectrum;     // Harmonic rolloff exponent, captured at note-on
     };
 
     // synth_chan_combine shader (binding 0); the master-mix pass reuses the
@@ -423,7 +435,7 @@ struct ShaderParams {
         uint32_t in_sound_offs;
     };
 
-    static_assert(sizeof(Oscillator) == 92);
+    static_assert(sizeof(Oscillator) == 104);
 
     static constexpr uint32_t max_param_range = sizeof(Oscillator) * 256;
 };
@@ -601,10 +613,13 @@ struct RunningOscillator {
     float    pad_tilt[2];            // Pad spectral tilt; harmonic exponent is 1 + clamp(tilt, -1, 1).
     float    string_damping;         // String damping 0..1, resolved each step
     float    string_release_damping; // String release damping 0..1, resolved each step
-    float    string_brightness;      // String pluck brightness 0..1, copied from the layer at note-on
+    float    string_brightness;      // String pluck brightness 0..1, resolved each step
     float    string_dispersion;      // String dispersion 0..1, resolved each step
     uint32_t string_state_offs;      // String state region offset in bytes, fixed per slot
     uint32_t string_chain;           // Note seed of the first note of the current string chain on this slot
+    float    string_strike;          // Strike blend 0..1, captured at note-on
+    float    string_drive;           // Force window in milliseconds, captured at note-on
+    float    string_spectrum;        // Harmonic rolloff, captured at note-on
     float    osc_mix;                // Mix between osc_type[0] and osc_type[1] (0..1)
     float    fm_index;               // FM modulation depth
 
@@ -1645,9 +1660,12 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         osc.osc_type[1]         = layer.osc_type[1];
         osc.osc_mode            = layer.osc_mode;
         osc.mod_ratio           = layer.mod_ratio;
-        osc.string_brightness   = layer.string_brightness;
-        osc.octave_offset       = layer.octave_offset;
-        osc.fir_type            = layer.fir_type;
+        osc.string_drive =
+            layer.string_drive >= 0.5f ? (layer.string_drive <= 10.0f ? layer.string_drive : 10.0f) : 0.5f;
+        osc.string_spectrum =
+            layer.string_spectrum >= 1.5f ? (layer.string_spectrum <= 4.0f ? layer.string_spectrum : 4.0f) : 1.5f;
+        osc.octave_offset  = layer.octave_offset;
+        osc.fir_type       = layer.fir_type;
         osc.fir_band_count = layer.fir_type == Synth::fir_bandpass ? (layer.fir_band_count < 1   ? 1
                                                                       : layer.fir_band_count > 4 ? 4
                                                                                                  : layer.fir_band_count)
@@ -1692,6 +1710,12 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         const uint32_t osc_slot = voice.osc_ids[layer_idx];
         for (const ModTargetNode& node : mod_target_nodes) {
             float base_extra = node.target == Synth::mod_pitch ? note_skew + layer_skew : 0.0f;
+            if (node.target == Synth::mod_string_brightness) {
+                base_extra = layer.string_brightness;
+            }
+            if (node.target == Synth::mod_string_strike) {
+                base_extra = layer.string_strike;
+            }
             if (node.target == Synth::mod_fir_slope) {
                 // Stored scalar inheritance: an unrouted (zeroed) slope binding starts from the
                 // layer's fir_slope scalar, a routed one from its own base.  The seed enters the
@@ -1713,6 +1737,12 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
                                         base_extra,
                                         env_seeds[layer_idx][node.target]);
         }
+
+        const float onset_strike =
+            Synth::param_onset_value(parameters,
+                                     param_descs,
+                                     static_cast<uint16_t>(osc_param(osc_slot, osc_string_strike_dest)));
+        osc.string_strike = onset_strike >= 0.0f ? (onset_strike <= 1.0f ? onset_strike : 1.0f) : 0.0f;
 
         // Trigger-time gate: the oscillator only sounds when its final
         // equivalent MIDI pitch at note-on lies within [0, 127].  The onset
@@ -2287,6 +2317,7 @@ static void update_modulation()
         osc.string_release_damping =
             unit_range_clamp(parameters[osc_param(osc_idx, osc_string_release_damping_dest)].value);
         osc.string_dispersion = unit_range_clamp(parameters[osc_param(osc_idx, osc_string_dispersion_dest)].value);
+        osc.string_brightness = unit_range_clamp(parameters[osc_param(osc_idx, osc_string_brightness_dest)].value);
         osc.osc_mix           = parameters[osc_param(osc_idx, osc_mix_dest)].value;
         osc.fm_index          = parameters[osc_param(osc_idx, osc_fm_index_dest)].value;
         // The ratio clamps like the static row: stored 0 ratios play at the
@@ -2766,6 +2797,9 @@ static void render_audio_step()
         param.string_brightness      = oscillator.string_brightness;
         param.string_dispersion      = oscillator.string_dispersion;
         param.string_chain           = oscillator.string_chain;
+        param.string_strike          = oscillator.string_strike;
+        param.string_drive           = oscillator.string_drive;
+        param.string_spectrum        = oscillator.string_spectrum;
 
         // Wrap the phases so float precision does not degrade on long notes.
         oscillator.phase += phase_step;

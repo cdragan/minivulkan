@@ -290,6 +290,13 @@ static bool validate_oscillator_body(const Synth::Oscillator& osc)
             return false;
         }
     }
+    if (! (osc.string_strike >= 0.0f && osc.string_strike <= 1.0f) ||
+        osc.targets[Synth::mod_string_brightness].base_value != 0.0f ||
+        osc.targets[Synth::mod_string_strike].base_value != 0.0f ||
+        ! (osc.string_drive >= 0.5f && osc.string_drive <= 10.0f) ||
+        ! (osc.string_spectrum >= 1.5f && osc.string_spectrum <= 4.0f)) {
+        return false;
+    }
     // Pluck brightness is a plain scalar in [0,1] as well.
     if (! (osc.string_brightness >= 0.0f && osc.string_brightness <= 1.0f)) {
         return false;

@@ -330,16 +330,37 @@ constexpr const char* effect_type_names[Synth::num_effect_types] = { "none",   "
 constexpr uint32_t    num_param_kinds                   = 4;
 constexpr const char* param_kind_names[num_param_kinds] = { "external", "envelope", "lfo", "plain" };
 
-constexpr const char* mod_target_names[Synth::num_mod_targets] = {
-    "volume",           "pitch",           "panning",          "duty_a",
-    "duty_b",           "osc_mix",         "fm_index",         "fir_pitch_spread",
-    "fm_ratio",         "pad_tone_a",      "pad_tone_b",       "fir_slope",
-    "fir_band0_offset", "fir_band0_gain",  "fir_band1_offset", "fir_band1_spread",
-    "fir_band1_gain",   "fir_band1_slope", "fir_band2_offset", "fir_band2_spread",
-    "fir_band2_gain",   "fir_band2_slope", "fir_band3_offset", "fir_band3_spread",
-    "fir_band3_gain",   "fir_band3_slope", "string_damping",   "string_release_damping",
-    "string_dispersion"
-};
+constexpr const char* mod_target_names[Synth::num_mod_targets] = { "volume",
+                                                                   "pitch",
+                                                                   "panning",
+                                                                   "duty_a",
+                                                                   "duty_b",
+                                                                   "osc_mix",
+                                                                   "fm_index",
+                                                                   "fir_pitch_spread",
+                                                                   "fm_ratio",
+                                                                   "pad_tone_a",
+                                                                   "pad_tone_b",
+                                                                   "fir_slope",
+                                                                   "fir_band0_offset",
+                                                                   "fir_band0_gain",
+                                                                   "fir_band1_offset",
+                                                                   "fir_band1_spread",
+                                                                   "fir_band1_gain",
+                                                                   "fir_band1_slope",
+                                                                   "fir_band2_offset",
+                                                                   "fir_band2_spread",
+                                                                   "fir_band2_gain",
+                                                                   "fir_band2_slope",
+                                                                   "fir_band3_offset",
+                                                                   "fir_band3_spread",
+                                                                   "fir_band3_gain",
+                                                                   "fir_band3_slope",
+                                                                   "string_damping",
+                                                                   "string_release_damping",
+                                                                   "string_dispersion",
+                                                                   "string_brightness",
+                                                                   "string_strike" };
 
 static_assert(static_cast<uint32_t>(Synth::WaveType::string_wave) == num_waves - 1);
 static_assert(static_cast<uint32_t>(Synth::ModSource::cc) == num_mod_sources - 1);
@@ -581,6 +602,13 @@ static void enc_oscillator(Out& o, const Synth::Oscillator& osc)
     // Full brightness is the default and stays out of the document.
     if (osc.string_brightness != 1.0f) {
         key_float(o, "string_brightness", osc.string_brightness);
+    }
+    key_float_nonzero(o, "string_strike", osc.string_strike);
+    if (osc.string_drive != 3.0f) {
+        key_float(o, "string_drive", osc.string_drive);
+    }
+    if (osc.string_spectrum != 2.0f) {
+        key_float(o, "string_spectrum", osc.string_spectrum);
     }
     key_dispersion(o, osc);
     key_float_nonzero(o, "octave_offset", static_cast<float>(osc.octave_offset));
@@ -2270,6 +2298,10 @@ static void decode_routing(Walker&               w,
     }
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "base_value") || key_eq(w, key_idx, "base")) {
+            if (target == Synth::mod_string_brightness || target == Synth::mod_string_strike) {
+                w.failed = true;
+                return;
+            }
             // The spread base is slider-bounded (semitones or Hz by filter type),
             // validated before the binary32 narrowing; the FIR slope base is an
             // integer percent 1..100 like the layer scalar; the higher bands'
@@ -2407,8 +2439,10 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
     float    pitch_offset                         = 0.0f;
     float    string_brightness                    = 1.0f; // absent means full brightness, not the zeroed bank memory
 
-    float                   string_dispersion_sections = 4.0f;
-    const Synth::FilterType fir_type                   = prescan_fir_type(w, obj);
+    float string_dispersion_sections = 4.0f;
+    osc.string_drive                 = 3.0f;
+    osc.string_spectrum              = 2.0f;
+    const Synth::FilterType fir_type = prescan_fir_type(w, obj);
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
         if (key_eq(w, key_idx, "wave_a")) {
@@ -2429,6 +2463,12 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
             want_bounded_real(w, val_idx, 0.0, 1.0, &string_brightness);
         else if (key_eq(w, key_idx, "string_dispersion") && w.toks[val_idx].type != JSMN_OBJECT)
             want_bounded_real(w, val_idx, 0.0, 1.0, &osc.targets[Synth::mod_string_dispersion].base_value);
+        else if (key_eq(w, key_idx, "string_strike"))
+            want_bounded_real(w, val_idx, 0.0, 1.0, &osc.string_strike);
+        else if (key_eq(w, key_idx, "string_drive"))
+            want_bounded_real(w, val_idx, 0.5, 10.0, &osc.string_drive);
+        else if (key_eq(w, key_idx, "string_spectrum"))
+            want_bounded_real(w, val_idx, 1.5, 4.0, &osc.string_spectrum);
         else if (key_eq(w, key_idx, "string_dispersion_sections"))
             want_dispersion_sections(w, val_idx, &string_dispersion_sections);
         else if (key_eq(w, key_idx, "mod_ratio"))
@@ -3826,9 +3866,14 @@ static void canonicalize_editor_bank(Synth::InstrumentEditorBank* editor_bank)
         instr.release_seconds      = canonical_float(instr.release_seconds);
 
         for (uint32_t l = 0; l < instr.layer_count; l++) {
-            Synth::Oscillator& osc = instr.layers[l];
-            osc.mod_ratio          = canonical_float(osc.mod_ratio);
-            osc.string_brightness  = canonical_float(osc.string_brightness);
+            Synth::Oscillator& osc                               = instr.layers[l];
+            osc.mod_ratio                                        = canonical_float(osc.mod_ratio);
+            osc.string_brightness                                = canonical_float(osc.string_brightness);
+            osc.string_strike                                    = canonical_float(osc.string_strike);
+            osc.targets[Synth::mod_string_brightness].base_value = 0.0f;
+            osc.targets[Synth::mod_string_strike].base_value     = 0.0f;
+            osc.string_drive                                     = canonical_float(osc.string_drive);
+            osc.string_spectrum                                  = canonical_float(osc.string_spectrum);
 
             osc.string_dispersion_sections = canonical_float(osc.string_dispersion_sections);
             for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
@@ -4202,7 +4247,7 @@ static void decode_target_doc(Walker&             w,
 {
     const Sculptor::OscTargetView view = Sculptor::osc_target_view(target, fir_type);
 
-    float base        = doc_base_default(target);
+    float base        = target == Synth::mod_string_brightness ? 1.0f : doc_base_default(target);
     bool  base_set    = false;
     bool  sources_set = false;
     if (touched) {
@@ -4215,7 +4260,9 @@ static void decode_target_doc(Walker&             w,
             // validated before the binary32 narrowing; the FIR slope base is an
             // integer percent 1..100 like the layer scalar; every other target
             // keeps the generic free-level parsing.
-            if (target == Synth::mod_fir_spread)
+            if (target == Synth::mod_string_brightness || target == Synth::mod_string_strike)
+                want_bounded_real(w, val_idx, 0.0, 1.0, &base);
+            else if (target == Synth::mod_fir_spread)
                 want_bounded_real(w, val_idx, 0.0, static_cast<double>(view.max_value), &base);
             else if (target == Synth::mod_fir_slope) {
                 int32_t base_int = 0;
@@ -4338,7 +4385,15 @@ static void decode_target_doc(Walker&             w,
         return;
     }
 
-    if (base_set || sources_set) {
+    if (target == Synth::mod_string_brightness || target == Synth::mod_string_strike) {
+        if (target == Synth::mod_string_brightness) {
+            osc.string_brightness = base;
+        }
+        else {
+            osc.string_strike = base;
+        }
+    }
+    else if (base_set || sources_set) {
         osc.targets[target].base_value = base * view.bank_scale;
     }
     if (! base_set && ! sources_set &&
@@ -4365,7 +4420,9 @@ static void decode_layer_doc(Walker&                     w,
     bool     fm_ratio_set      = false;
     float    string_brightness = 1.0f;
 
-    float                   string_dispersion_sections          = 4.0f;
+    float string_dispersion_sections                            = 4.0f;
+    osc.string_drive                                            = 3.0f;
+    osc.string_spectrum                                         = 2.0f;
     bool                    doc_slope_routed                    = false;
     uint32_t                doc_band_count                      = 1;
     bool                    doc_touched[Synth::num_mod_targets] = {};
@@ -4383,10 +4440,40 @@ static void decode_layer_doc(Walker&                     w,
             if (wave_b > static_cast<uint32_t>(Synth::WaveType::pad_wave))
                 w.failed = true; // string is wave A only
         }
-        else if (key_eq(w, key_idx, "string_brightness"))
-            want_bounded_real(w, val_idx, 0.0, 1.0, &string_brightness);
+        else if (key_eq(w, key_idx, "string_brightness")) {
+            if (w.toks[val_idx].type == JSMN_OBJECT) {
+                decode_target_doc(w,
+                                  val_idx,
+                                  Synth::mod_string_brightness,
+                                  fir_type,
+                                  osc,
+                                  doc,
+                                  &doc_touched[Synth::mod_string_brightness]);
+            }
+            else {
+                want_bounded_real(w, val_idx, 0.0, 1.0, &string_brightness);
+            }
+        }
         else if (key_eq(w, key_idx, "string_dispersion") && w.toks[val_idx].type != JSMN_OBJECT)
             want_bounded_real(w, val_idx, 0.0, 1.0, &osc.targets[Synth::mod_string_dispersion].base_value);
+        else if (key_eq(w, key_idx, "string_strike")) {
+            if (w.toks[val_idx].type == JSMN_OBJECT) {
+                decode_target_doc(w,
+                                  val_idx,
+                                  Synth::mod_string_strike,
+                                  fir_type,
+                                  osc,
+                                  doc,
+                                  &doc_touched[Synth::mod_string_strike]);
+            }
+            else {
+                want_bounded_real(w, val_idx, 0.0, 1.0, &osc.string_strike);
+            }
+        }
+        else if (key_eq(w, key_idx, "string_drive"))
+            want_bounded_real(w, val_idx, 0.5, 10.0, &osc.string_drive);
+        else if (key_eq(w, key_idx, "string_spectrum"))
+            want_bounded_real(w, val_idx, 1.5, 4.0, &osc.string_spectrum);
         else if (key_eq(w, key_idx, "string_dispersion_sections"))
             want_dispersion_sections(w, val_idx, &string_dispersion_sections);
         else if (key_eq(w, key_idx, "mode"))
@@ -4480,11 +4567,13 @@ static void decode_layer_doc(Walker&                     w,
         return;
     }
 
-    osc.osc_type[0]       = static_cast<Synth::WaveType>(wave_a);
-    osc.osc_type[1]       = static_cast<Synth::WaveType>(wave_b);
-    osc.osc_mode          = static_cast<Synth::OscMode>(mode);
-    osc.mod_ratio         = mod_ratio;
-    osc.string_brightness = string_brightness;
+    osc.osc_type[0] = static_cast<Synth::WaveType>(wave_a);
+    osc.osc_type[1] = static_cast<Synth::WaveType>(wave_b);
+    osc.osc_mode    = static_cast<Synth::OscMode>(mode);
+    osc.mod_ratio   = mod_ratio;
+    if (! doc_touched[Synth::mod_string_brightness]) {
+        osc.string_brightness = string_brightness;
+    }
 
     osc.string_dispersion_sections = string_dispersion_sections;
     // Stored documents state only the scalar ratio; when the document has
@@ -5156,8 +5245,19 @@ static uint32_t encode_instrument_json_for_domain(char*                         
         o.key("mod_ratio");
         o.float_value(osc.mod_ratio);
         // Full brightness is the default and stays out of the document.
-        if (osc.string_brightness != 1.0f) {
+        if (osc.string_brightness != 1.0f && routing_is_default(osc.targets[Synth::mod_string_brightness]) &&
+            gen_is_default(osc.targets[Synth::mod_string_brightness])) {
             key_float(o, "string_brightness", osc.string_brightness);
+        }
+        if (routing_is_default(osc.targets[Synth::mod_string_strike]) &&
+            gen_is_default(osc.targets[Synth::mod_string_strike])) {
+            key_float_nonzero(o, "string_strike", osc.string_strike);
+        }
+        if (osc.string_drive != 3.0f) {
+            key_float(o, "string_drive", osc.string_drive);
+        }
+        if (osc.string_spectrum != 2.0f) {
+            key_float(o, "string_spectrum", osc.string_spectrum);
         }
         key_dispersion(o, osc);
         o.key("octave_offset");
@@ -5191,6 +5291,10 @@ static uint32_t encode_instrument_json_for_domain(char*                         
                 continue; // a band beyond the active count never leaks into the document
             }
 
+            if ((mod_target == Synth::mod_string_brightness || mod_target == Synth::mod_string_strike) &&
+                routing_is_default(osc.targets[target]) && gen_is_default(osc.targets[target])) {
+                continue;
+            }
             if (mod_target == Synth::mod_string_dispersion && ! dispersion_routed(osc.targets[target])) {
                 continue; // the unmodulated value rides the plain "string_dispersion" number above
             }
@@ -5220,7 +5324,12 @@ static uint32_t encode_instrument_json_for_domain(char*                         
             // (its own legitimate zero), so a base-0 routed slope block omits
             // the key and reloads with the same zero instead of stating a
             // base its integer grammar rejects.
-            if (layer == 0 || routing.base_value != 0.0f || routing.num_inputs != 0) {
+            if (mod_target == Synth::mod_string_brightness || mod_target == Synth::mod_string_strike) {
+                key_float(o,
+                          "base",
+                          mod_target == Synth::mod_string_brightness ? osc.string_brightness : osc.string_strike);
+            }
+            else if (layer == 0 || routing.base_value != 0.0f || routing.num_inputs != 0) {
                 // A gain-0 band must survive the round trip as an inactive band: the
                 // empty block marks "present, base omitted" and decodes 0, so the
                 // zero base is never stated for a gain key.
@@ -5232,31 +5341,30 @@ static uint32_t encode_instrument_json_for_domain(char*                         
                     o.key("base");
                     o.float_value(routing.base_value / view.bank_scale);
                 }
-
-                if (routing.num_inputs > Synth::max_mod_inputs)
-                    return 0;
-                if (routing.num_inputs != 0) {
-                    o.key("sources");
-                    o.ch('[');
-                    for (uint32_t input = 0; input < routing.num_inputs; input++) {
-                        const Synth::ModInput& in = routing.inputs[input];
-                        if (in.op > Synth::SourceOp::multiply)
+            }
+            if (routing.num_inputs > Synth::max_mod_inputs)
+                return 0;
+            if (routing.num_inputs != 0) {
+                o.key("sources");
+                o.ch('[');
+                for (uint32_t input = 0; input < routing.num_inputs; input++) {
+                    const Synth::ModInput& in = routing.inputs[input];
+                    if (in.op > Synth::SourceOp::multiply)
+                        return 0;
+                    if (in.source == Synth::ModSource::cc) {
+                        // The assignable cc source is admitted with
+                        // cc_number 16..31, like the bank validator.
+                        if (! Synth::cc_is_assignable(in.cc_number))
                             return 0;
-                        if (in.source == Synth::ModSource::cc) {
-                            // The assignable cc source is admitted with
-                            // cc_number 16..31, like the bank validator.
-                            if (! Synth::cc_is_assignable(in.cc_number))
-                                return 0;
-                        }
-                        else if (in.source > Synth::ModSource::pressure_combine || in.cc_number != 0)
-                            // A non-CC input must carry no stale CC number
-                            // (canonicalization hole).
-                            return 0;
-                        o.sep();
-                        enc_mod_input(o, in);
                     }
-                    o.ch(']');
+                    else if (in.source > Synth::ModSource::pressure_combine || in.cc_number != 0)
+                        // A non-CC input must carry no stale CC number
+                        // (canonicalization hole).
+                        return 0;
+                    o.sep();
+                    enc_mod_input(o, in);
                 }
+                o.ch(']');
             }
 
             const Synth::TargetBinding& gen = osc.targets[target];

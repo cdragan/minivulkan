@@ -272,7 +272,7 @@ static Synth::InstrumentBank pending_bank;
 // user state on disk to protect, the first frames save the default bank.
 // A present-but-invalid or oversized file keeps auto-save disarmed so the
 // default bank never silently overwrites it.
-static bool save_pending = false;
+static bool     save_pending         = false;
 static bool     bank_auto_save_armed = false;
 static uint32_t frames_since_publish = 0;
 
@@ -504,10 +504,10 @@ constexpr size_t editor_resident_state_bytes =
     4 * Synth::instrument_graph_layout_capacity * sizeof(Synth::InstrumentGraphLayout) +
     4096; // remaining editor scalar flags, constants and alignment
 static_assert(editor_resident_state_bytes <=
-              128 * 1024 * 1024); // per-bank driver: the oscillator graph pre-provisions twenty-eight
-                                  // 12-slot target blocks per node (max_node_slots 360), which
+              130 * 1024 * 1024); // per-bank driver: the oscillator graph pre-provisions thirty-one
+                                  // 12-slot target blocks per node (max_node_slots 397), which
                                   // grows sizeof(Graph); the resident total stays below the
-                                  // 128 MiB assert.  The per-zone source rows contribute 20 live
+                                  // 130 MiB assert.  The per-zone source rows contribute 20 live
                                   // InstrumentEditorBank copies x max_channels x
                                   // max_instr_per_channel x Synth::max_layers bytes; the assert
                                   // tracks it through sizeof(InstrumentEditorBank).

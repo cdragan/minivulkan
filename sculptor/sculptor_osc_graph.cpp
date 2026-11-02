@@ -108,7 +108,7 @@ static char                        clipboard_destination_name[Synth::max_name_le
 static_assert(static_cast<uint32_t>(Synth::mod_panning) == 2);
 static_assert(static_cast<uint32_t>(Synth::mod_duty0) == 3);
 static_assert(static_cast<uint32_t>(Synth::mod_fm_index) == 6);
-static_assert(Synth::num_mod_targets == 29);
+static_assert(Synth::num_mod_targets == 31);
 static_assert(static_cast<uint32_t>(Synth::mod_fm_ratio) == 8);
 static_assert(static_cast<uint32_t>(Synth::mod_pad_tilt0) == 9);
 static_assert(Synth::max_mod_inputs == 2);
@@ -146,6 +146,8 @@ const LabelTooltip target_descs[Synth::num_mod_targets] = {
     { "Sustain Damping", "How fast the string vibration decays and darkens while the key is held" },
     { "Release Damping", "Extra string damping applied while the key is released" },
     { "String Dispersion", "Stiff-string inharmonicity: raises the upper partials, strongest on low notes (0 = off)" },
+    { "Pluck Brightness", "Brightness of the initial burst.  Route a source to control the attack tone." },
+    { "Strike", "Blend from the noise pluck to a streamed tonal strike.  Routing is captured at note-on." },
 };
 const char* const wave_names[7]       = { "off", "sine", "sawtooth", "pulse", "noise", "pad", "string" };
 const char* const voice_mode_names[3] = { "multiple", "reuse per-note", "single" };
@@ -163,56 +165,25 @@ const LabelTooltip fir_spread_descs[Synth::num_filter_types] = { { "Filter Off",
                                                                  { "Cutoff (Hz)", "Cutoff frequency (in Hz)" },
                                                                  { "Cutoff (Hz)", "Cutoff frequency (in Hz)" } };
 
-// Oscillator node slot layout. The order is fixed: project fills slots in
-// exactly this order and compile reads properties back by index, so the two
-// stay consistent by construction.
-// 0 output
-// 1 waveform a (list)
-// 2 duty a (per-layer value, [0, 1])
-// 3..14 duty a's 12-slot modulation block
-// 15 pad tone a (per-layer value, [-1, +1])
-// 16..27 pad tone a's 12-slot modulation block
-// 28 release damping (per-layer value, [0, 1]; string wave only; nested under waveform a)
-// 29..40 release damping's 12-slot modulation block
-// 41 pluck brightness (per oscillator, plain scalar 0..1, 1 = unfiltered; string wave only; nested under waveform a)
-// String Dispersion and Sustain Damping have no rows of their own: with waveform a ==
-// string, the duty a row (2) projects as String Dispersion (target 28) and the pad tone
-// a row (15) as Sustain Damping (target 26), each with its block.
-// 42 waveform b (list)
-// 43 duty b (per-layer value, [0, 1])
-// 44..55 duty b's 12-slot modulation block
-// 56 pad tone b (per-layer value, [-1, +1])
-// 57..68 pad tone b's 12-slot modulation block
-// 69 mix mode (list)
-// 70 waveform mix (per-layer value, [0, 1])
-// 71..82 waveform mix's 12-slot modulation block
-// 83 fm depth (per-layer value)
-// 84..95 fm depth's 12-slot modulation block
-// 96 fm ratio (per-layer base value)
-// 97..108 fm ratio's 12-slot modulation block
-// 109 volume (per-layer base value)
-// 110..121 volume's 12-slot modulation block
-// 122 pan (per-layer base value)
-// 123..134 pan's 12-slot modulation block
-// 135 pitch (per-layer base value)
-// 136..147 pitch's 12-slot modulation block
-// 148 octave offset (per oscillator, [-12, +12] whole octaves)
-// 149 filter type (per oscillator, list)
-// 150.. one uniform block per existing band, starting at
-// osc_band_first_slot (150) with a 55-slot stride (osc_band_block_stride):
-// the "Band N" header label, the band's [-] click slot, the band's [+]
-// click slot, then the band's four parameter rows, each followed by its
-// 12-slot modulation block (a 13-slot stride, in osc_target_row_slot
-// order). Only the stored band count's blocks are projected; band 0's
-// rows sit at 153/166/179/192 and bands 1..3 shift by 3 slots per
-// earlier band (208/221/234/247, 263/276/289/302, 318/331/344/357).
+// Oscillator slot layout.  Every target row is followed by a twelve-slot block.
+// 0 output; 1 Waveform A; 2 Duty A / String Dispersion; 3..14 its block
+// 15 Pad Tone A / Sustain Damping; 16..27 its block
+// 28 Release Damping; 29..40 its block; 41 Pluck Brightness; 42..53 its block
+// 54 Strike; 55..66 its block; 67 Drive Time; 68 Strike Spectrum
+// 69 Waveform B; 70 Duty B; 71..82 its block; 83 Pad Tone B; 84..95 its block
+// 96 Mix Mode; 97 Waveform Mix; 98..109 its block; 110 FM Depth; 111..122 its block
+// 123 FM Ratio; 124..135 its block; 136 Volume; 137..148 its block
+// 149 Pan; 150..161 its block; 162 Pitch; 163..174 its block
+// 175 Octave Offset; 176 Filter Type; 177 Band 1 header; 178..179 buttons
+// 180 Offset; 193 Spread; 206 Gain; 219 FIR Slope
+// Bands 2..4 repeat the header/buttons/four-target grammar with a 55-slot stride.
 constexpr uint32_t osc_waveform_a_prop    = 1;
-constexpr uint32_t osc_waveform_b_prop    = 42;
-constexpr uint32_t osc_mode_prop          = 69;
-constexpr uint32_t osc_fm_ratio_prop      = 96;
-constexpr uint32_t osc_octave_offset_prop = 148;
-constexpr uint32_t osc_fir_slope_prop     = 192;
-constexpr uint32_t osc_fir_type_prop      = 149;
+constexpr uint32_t osc_waveform_b_prop    = 69;
+constexpr uint32_t osc_mode_prop          = 96;
+constexpr uint32_t osc_fm_ratio_prop      = 123;
+constexpr uint32_t osc_octave_offset_prop = 175;
+constexpr uint32_t osc_fir_slope_prop     = 219;
+constexpr uint32_t osc_fir_type_prop      = 176;
 // Header labels of the band blocks, indexed by band.
 const char* const band_header_names[Sculptor::osc_band_max_bands] = { "Band 1", "Band 2", "Band 3", "Band 4" };
 // Per-target presentation views: the single source of truth for value
@@ -249,6 +220,8 @@ constexpr Sculptor::OscTargetView osc_target_views[Synth::num_mod_targets] = {
     { 0.0f, 1.0f, 1.0f, false },                                         // string damping
     { 0.0f, 1.0f, 1.0f, false },                                         // string release damping
     { 0.0f, 1.0f, 1.0f, false },                                         // string dispersion
+    { 0.0f, 1.0f, 1.0f, false },                                         // string brightness
+    { 0.0f, 1.0f, 1.0f, false },                                         // string strike
 };
 
 // Low-pass and high-pass cutoff slider.  The editor writes a zero cutoff (edge off)
@@ -306,8 +279,11 @@ bool Sculptor::oscillator_slot_waveform_mode_disabled(const Sculptor::Node& node
     // Waveform a's list starts at sine, so pad sits one below the stored value.
     const uint32_t wave_a = node.slots.entries[osc_waveform_a_prop].value.list_index;
     if (wave_a != static_cast<uint32_t>(Synth::WaveType::string_wave) - 1u &&
-        slot_idx >= osc_string_extras_first_slot && slot_idx <= osc_brightness_slot) {
-        return true; // release damping and pluck brightness only apply to the string waveform
+        slot_idx >= osc_string_extras_first_slot && slot_idx <= osc_string_extras_last_slot) {
+        // Through osc_string_extras_last_slot (68): Release Damping row/block,
+        // Pluck Brightness row (41) and block (42..53), and Strike row/block (54..66) and the Drive Time/Spectrum rows
+        // (67..68).
+        return true;
     }
     if (wave_a != static_cast<uint32_t>(Synth::WaveType::pad_wave) - 1u &&
         wave_a != static_cast<uint32_t>(Synth::WaveType::string_wave) - 1u && slot_idx >= tone0 &&
@@ -524,7 +500,8 @@ static Synth::ModTarget osc_row_target_for_wave(bool string_wave, Synth::ModTarg
 static bool osc_target_owns_row(bool string_wave, uint32_t target)
 {
     const bool string_only = target == Synth::mod_string_dispersion || target == Synth::mod_string_damping ||
-                             target == Synth::mod_string_release_damping;
+                             target == Synth::mod_string_release_damping || target == Synth::mod_string_brightness ||
+                             target == Synth::mod_string_strike;
     const bool shared      = target == Synth::mod_duty0 || target == Synth::mod_pad_tilt0;
     return string_wave ? ! shared : ! string_only;
 }
@@ -977,8 +954,8 @@ static void project_osc_node(Sculptor::Graph*           graph,
                                               true));
     append_target_block(graph, node, tone_row_target, osc.targets[tone_row_target], 2);
 
-    // Release Damping exists only under the string wave (hidden otherwise).  Pluck Brightness, a plain layer
-    // scalar without a block, follows it, both nested under Waveform A.
+    // Release Damping and Pluck Brightness own blocks.  Strike owns a block.
+    // These controls nest under Waveform A and are hidden on other waves.
     graph->add_slot(node,
                     osc_view_connectable_slot(target_descs[Synth::mod_string_release_damping].name,
                                               osc.targets[Synth::mod_string_release_damping].base_value,
@@ -989,12 +966,26 @@ static void project_osc_node(Sculptor::Graph*           graph,
                         Synth::mod_string_release_damping,
                         osc.targets[Synth::mod_string_release_damping],
                         2);
-    Sculptor::Slot brightness_slot =
-        with_tooltip(bounded_real_slot("Pluck Brightness", osc.string_brightness, 0.0f, 1.0f),
-                     "Brightness of the pluck; lower values low-pass the initial burst for a warmer, softer attack");
-    brightness_slot.child_row = true;
-    graph->add_slot(node, brightness_slot);
-
+    graph->add_slot(node,
+                    osc_view_connectable_slot(target_descs[Synth::mod_string_brightness].name,
+                                              osc.string_brightness,
+                                              Synth::mod_string_brightness,
+                                              true));
+    append_target_block(graph, node, Synth::mod_string_brightness, osc.targets[Synth::mod_string_brightness], 2);
+    graph->add_slot(node,
+                    osc_view_connectable_slot(target_descs[Synth::mod_string_strike].name,
+                                              osc.string_strike,
+                                              Synth::mod_string_strike,
+                                              true));
+    append_target_block(graph, node, Synth::mod_string_strike, osc.targets[Synth::mod_string_strike], 2);
+    Sculptor::Slot drive_slot = with_tooltip(bounded_real_slot("Drive Time", osc.string_drive, 0.5f, 10.0f),
+                                             "Strike force window in milliseconds.  Captured at note-on.");
+    drive_slot.child_row      = true;
+    graph->add_slot(node, drive_slot);
+    Sculptor::Slot spectrum_slot = with_tooltip(bounded_real_slot("Strike Spectrum", osc.string_spectrum, 1.5f, 4.0f),
+                                                "Harmonic rolloff exponent.  Captured at note-on.");
+    spectrum_slot.child_row      = true;
+    graph->add_slot(node, spectrum_slot);
     graph->add_slot(node,
                     with_tooltip(list_slot("Waveform B", wave_names, 6, static_cast<uint32_t>(osc.osc_type[1])),
                                  "Secondary oscillator wave shape"));
@@ -1490,10 +1481,12 @@ bool Sculptor::osc_node_slot_hidden(const Graph& graph, const uint32_t node_idx,
         }
     }
 
-    // Release Damping, its block and Pluck Brightness exist only under the
-    // string wave: other waves have no row for them.
+    // String-only extras extend through osc_string_extras_last_slot (68):
+    // Release Damping row/block, Pluck Brightness row and its twelve-slot
+    // block (42..53), and Strike row/block (54..66) and the Drive Time/Spectrum rows (67..68).  Other waves hide this
+    // range.
     const Sculptor::Node& node = graph.node(node_idx);
-    if (node.oscillator && slot_idx >= osc_string_extras_first_slot && slot_idx <= osc_brightness_slot &&
+    if (node.oscillator && slot_idx >= osc_string_extras_first_slot && slot_idx <= osc_string_extras_last_slot &&
         ! osc_node_wave_a_is_string(node)) {
         return true;
     }
@@ -2005,6 +1998,9 @@ static bool read_oscillator_layer(const Sculptor::Graph&           graph,
     }
     osc.fir_type          = static_cast<Synth::FilterType>(index);
     osc.string_brightness = slots[osc_brightness_slot].value.real;
+    osc.string_strike     = slots[Sculptor::osc_strike_slot].value.real;
+    osc.string_drive      = slots[Sculptor::osc_drive_slot].value.real;
+    osc.string_spectrum   = slots[Sculptor::osc_spectrum_slot].value.real;
 
     // The projected band blocks encode the count: one uniform block per
     // existing band after Filter Type.
@@ -2038,7 +2034,7 @@ static bool read_oscillator_layer(const Sculptor::Graph&           graph,
                 gen.base_value = osc.fir_slope_percent;
             }
         }
-        else {
+        else if (target != Synth::mod_string_brightness && target != Synth::mod_string_strike) {
             // The per-band slope rows are integer-percent slots like the
             // stored FIR slope row, so their base reads from the integer
             // property instead of the real union field.

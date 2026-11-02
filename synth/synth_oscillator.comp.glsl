@@ -56,6 +56,9 @@ struct OscillatorParams {
     float string_brightness;          // String pluck brightness [0..1], 1 = unfiltered burst, applied at note-on
     float string_dispersion;          // String dispersion [0..1], 0 = off (the plain string, bit-identical)
     uint  string_chain;               // Note seed which started the string chain; a takeover keeps it
+    float string_strike;              // Strike blend
+    float string_drive;               // Force window in milliseconds
+    float string_spectrum;            // Harmonic rolloff exponent
 };
 
 layout(binding = 0) buffer data_buf { float data[]; };
@@ -270,20 +273,64 @@ float string_ring_read(uint ring_offs, float loop_phase)
 // tuning allpass.  Its phase delay at f0 is subtracted from the loop delay so the pitch stays put,
 // while its delay falls with frequency, which lifts the partials.  Dispersion 0 skips all of it.
 // Header layout: 0 write pos, 1 prev lowpass, 2 prev allpass, 3 release gain, 4 loop length,
-// 5-6 seed tag, 7 dispersion section state, 8-9 chain token (two-word integer), 10-13 unused.
+// 5-6 seed tag, 7 dispersion section state, 8-9 chain token (two-word integer),
+// 10 strike drive counter, 11-13 unused.
+// Positive-Strike scratch shaping.  Keep the legacy zero path inline below.
+void string_shape_excitation(uint delay_whole, float sum, float brightness)
+{
+    const float mean = sum / float(delay_whole);
+    for (uint k = 0u; k < delay_whole; k++) {
+        string_burst[k] -= mean;
+    }
+    if (brightness < 1.0) {
+        // Pluck brightness: a circular one-pole lowpass over the finished burst, skipped at 1 so
+        // the default excitation stays bit-identical.  A zero-state lap gives the tail, which
+        // fixes the exact wrap-around start state so the ring closes without a seam.  The
+        // result is re-centered and rescaled to the burst RMS, so brightness shapes tone only.
+        const float tone_coeff = 0.95 * (1.0 - clamp(brightness, 0.0, 1.0));
+        float       tone_state = 0.0;
+        float       energy_in  = 0.0;
+        for (uint k = 0u; k < delay_whole; k++) {
+            const float sample_in = string_burst[k];
+            tone_state            = (1.0 - tone_coeff) * sample_in + tone_coeff * tone_state;
+            energy_in += sample_in * sample_in;
+        }
+        tone_state /= 1.0 - pow(tone_coeff, float(delay_whole));
+        float tone_sum    = 0.0;
+        float tone_energy = 0.0;
+        for (uint k = 0u; k < delay_whole; k++) {
+            tone_state          = (1.0 - tone_coeff) * string_burst[k] + tone_coeff * tone_state;
+            string_burst[k]     = tone_state;
+            tone_sum += tone_state;
+            tone_energy += tone_state * tone_state;
+        }
+        const float tone_mean = tone_sum / float(delay_whole);
+        const float tone_var  = tone_energy - tone_sum * tone_mean;
+        const float tone_gain = tone_var > 0.0 ? sqrt(energy_in / tone_var) : 1.0;
+        for (uint k = 0u; k < delay_whole; k++) {
+            string_burst[k] = (string_burst[k] - tone_mean) * tone_gain;
+        }
+    }
+}
+
 void string_pass(uint  base,
-                 float f0,
-                 float damping,
-                 float release_damping,
-                 float brightness,
-                 float dispersion,
-                 bool  release,
-                 uint  note_seed,
-                 uint  chain_token)
+        float f0,
+        float damping,
+        float release_damping,
+        float brightness,
+        float dispersion,
+        bool  release,
+        uint  note_seed,
+        uint chain_token, float strike,
+        float drive_ms,
+        float spectrum)
 {
     const uint  lane        = gl_LocalInvocationID.x;
     const uint  ring_offs   = base + string_header_words;
     const float sample_rate = float(sampling_rate);
+    strike = strike >= 0.0 ? (strike <= 1.0 ? strike : 1.0) : 0.0;
+    drive_ms = drive_ms >= 0.5 ? (drive_ms <= 10.0 ? drive_ms : 10.0) : 0.5;
+    spectrum = spectrum >= 1.5 ? (spectrum <= 4.0 ? spectrum : 4.0) : 1.5;
 
     if (lane == 0u) {
         string_write_pos   = 0u;
@@ -302,7 +349,7 @@ void string_pass(uint  base,
     const float decay_t60            = 20.0 * pow(0.25 / 20.0, damping);
     const float omega                = 6.2831853 * f0 / sample_rate;
     const float lowpass_mag      = (1.0 - string_damping_coeff) / sqrt(1.0 - 2.0 * string_damping_coeff * cos(omega) +
-                                                                       string_damping_coeff * string_damping_coeff);
+            string_damping_coeff * string_damping_coeff);
     const float loop_gain_raw    = pow(10.0, -3.0 * loop_length / (sample_rate * decay_t60)) / lowpass_mag;
     const float string_loop_gain = loop_gain_raw < 0.9999 ? loop_gain_raw : 0.9999;
 
@@ -349,47 +396,69 @@ void string_pass(uint  base,
     float       string_release_gain;
     float       disp_state;
     if (init) {
-        // Note-on or retrigger: noise burst, then zero mean.  Lane 0 owns the whole excitation; the other
-        // lanes leave the init block and reach the barrier in main() after the pass.
-        if (lane == 0u) {
-            float sum = 0.0;
-            for (uint i = 0u; i < delay_whole; i++) {
-                const float noise_value = float(pcg_hash(note_seed + i) & 0xFFFFu) / 32767.5 - 1.0;
-                string_burst[i]         = noise_value;
-                sum += noise_value;
-            }
-            const float mean = sum / float(delay_whole);
-            for (uint k = 0u; k < delay_whole; k++) {
-                string_burst[k] -= mean;
+        if (strike > 0.0) {
+            if (lane == 0u) {
+                for (uint i = 0u; i < delay_whole; i++) {
+                    string_burst[i] = 0.0;
+                }
+                if (strike < 1.0) {
+                    float sum = 0.0;
+                    for (uint i = 0u; i < delay_whole; i++) {
+                        const float noise_value = float(pcg_hash(i) & 0xFFFFu) / 32767.5 - 1.0;
+                        string_burst[i] = noise_value;
+                        sum += noise_value;
+                    }
+                    string_shape_excitation(delay_whole, sum, brightness);
+                    for (uint i = 0u; i < delay_whole; i++) {
+                        string_burst[i] *= 1.0 - strike;
+                    }
+                }
+                data[base + 10u] = 0.0;
             }
         }
-        if (lane == 0u && brightness < 1.0) {
-            // Pluck brightness: a circular one-pole lowpass over the finished burst, skipped at 1 so
-            // the default excitation stays bit-identical.  A zero-state lap gives the tail, which
-            // fixes the exact wrap-around start state so the ring closes without a seam.  The
-            // result is re-centered and rescaled to the burst RMS, so brightness shapes tone only.
-            const float tone_coeff = 0.95 * (1.0 - clamp(brightness, 0.0, 1.0));
-            float       tone_state = 0.0;
-            float       energy_in  = 0.0;
-            for (uint k = 0u; k < delay_whole; k++) {
-                const float sample_in = string_burst[k];
-                tone_state            = (1.0 - tone_coeff) * sample_in + tone_coeff * tone_state;
-                energy_in += sample_in * sample_in;
+        else {
+            // Note-on or retrigger: noise burst, then zero mean.  Lane 0 owns the whole excitation; the other
+            // lanes leave the init block and reach the barrier in main() after the pass.
+            if (lane == 0u) {
+                float sum = 0.0;
+                for (uint i = 0u; i < delay_whole; i++) {
+                    const float noise_value = float(pcg_hash(note_seed + i) & 0xFFFFu) / 32767.5 - 1.0;
+                    string_burst[i]         = noise_value;
+                    sum += noise_value;
+                }
+                const float mean = sum / float(delay_whole);
+                for (uint k = 0u; k < delay_whole; k++) {
+                    string_burst[k] -= mean;
+                }
             }
-            tone_state /= 1.0 - pow(tone_coeff, float(delay_whole));
-            float tone_sum    = 0.0;
-            float tone_energy = 0.0;
-            for (uint k = 0u; k < delay_whole; k++) {
-                tone_state          = (1.0 - tone_coeff) * string_burst[k] + tone_coeff * tone_state;
-                string_burst[k]     = tone_state;
-                tone_sum += tone_state;
-                tone_energy += tone_state * tone_state;
-            }
-            const float tone_mean = tone_sum / float(delay_whole);
-            const float tone_var  = tone_energy - tone_sum * tone_mean;
-            const float tone_gain = tone_var > 0.0 ? sqrt(energy_in / tone_var) : 1.0;
-            for (uint k = 0u; k < delay_whole; k++) {
-                string_burst[k] = (string_burst[k] - tone_mean) * tone_gain;
+            if (lane == 0u && brightness < 1.0) {
+                // Pluck brightness: a circular one-pole lowpass over the finished burst, skipped at 1 so
+                // the default excitation stays bit-identical.  A zero-state lap gives the tail, which
+                // fixes the exact wrap-around start state so the ring closes without a seam.  The
+                // result is re-centered and rescaled to the burst RMS, so brightness shapes tone only.
+                const float tone_coeff = 0.95 * (1.0 - clamp(brightness, 0.0, 1.0));
+                float       tone_state = 0.0;
+                float       energy_in  = 0.0;
+                for (uint k = 0u; k < delay_whole; k++) {
+                    const float sample_in = string_burst[k];
+                    tone_state            = (1.0 - tone_coeff) * sample_in + tone_coeff * tone_state;
+                    energy_in += sample_in * sample_in;
+                }
+                tone_state /= 1.0 - pow(tone_coeff, float(delay_whole));
+                float tone_sum    = 0.0;
+                float tone_energy = 0.0;
+                for (uint k = 0u; k < delay_whole; k++) {
+                    tone_state          = (1.0 - tone_coeff) * string_burst[k] + tone_coeff * tone_state;
+                    string_burst[k]     = tone_state;
+                    tone_sum += tone_state;
+                    tone_energy += tone_state * tone_state;
+                }
+                const float tone_mean = tone_sum / float(delay_whole);
+                const float tone_var  = tone_energy - tone_sum * tone_mean;
+                const float tone_gain = tone_var > 0.0 ? sqrt(energy_in / tone_var) : 1.0;
+                for (uint k = 0u; k < delay_whole; k++) {
+                    string_burst[k] = (string_burst[k] - tone_mean) * tone_gain;
+                }
             }
         }
         if (lane == 0u) {
@@ -410,6 +479,11 @@ void string_pass(uint  base,
                 }
             }
             else {
+                if (strike > 0.0) {
+                    for (uint i = 0u; i < string_ring_size; i++) {
+                        data[ring_offs + i] = 0.0;
+                    }
+                }
                 for (uint i = 0u; i < delay_whole; i++) {
                     data[ring_offs + i] = string_burst[i];
                 }
@@ -430,10 +504,83 @@ void string_pass(uint  base,
         disp_state          = data[base + 7u];
     }
 
+    if (strike > 0.0) {
+        // cached_input is not live until the later FIR pass.  All lanes rendezvous
+        // before lane 0 borrows it; main publishes completion before FIR writes.
+        memoryBarrierShared();
+        barrier();
+    }
     if (lane != 0u) {
         return;
     }
 
+    float drive_age = 0.0;
+    float contact_samples = 0.0;
+    if (strike > 0.0) {
+        drive_age = data[base + 10u];
+        contact_samples = drive_ms * 0.001 * sample_rate;
+        if (drive_age < contact_samples) {
+            // Match the drive to the deterministic noise burst before applying Strike.
+            float noise_sum = 0.0;
+            for (uint i = 0u; i < delay_whole; i++) {
+                const float noise_value = float(pcg_hash(i) & 0xFFFFu) / 32767.5 - 1.0;
+                string_burst[i] = noise_value;
+                noise_sum += noise_value;
+            }
+            string_shape_excitation(delay_whole, noise_sum, brightness);
+            float noise_energy = 0.0;
+            for (uint i = 0u; i < delay_whole; i++) {
+                noise_energy += string_burst[i] * string_burst[i];
+            }
+            const float target_rms = sqrt(noise_energy / float(delay_whole));
+            for (uint i = 0u; i < delay_whole; i++) {
+                string_burst[i] = 0.0;
+            }
+            const uint max_harmonic = min((delay_whole - 1u) / 2u, 2896u);
+            for (uint n = 1u; n <= max_harmonic; n++) {
+                const float amplitude = n % 8u == 0u ? 0.0 : sin(3.141592653589793 * float(n) / 8.0) / pow(float(n), spectrum);
+                const float phase_offs = 6.283185307179586 * float(pcg_hash(n * 0x85ebca6bu)) / 4294967296.0;
+                const float angle_step = 6.283185307179586 * float(n) / float(delay_whole);
+                for (uint i = 0u; i < delay_whole; i++) {
+                    string_burst[i] += amplitude * cos(angle_step * float(i) + phase_offs);
+                }
+            }
+            float sum = 0.0;
+            for (uint i = 0u; i < delay_whole; i++) {
+                sum += string_burst[i];
+            }
+            string_shape_excitation(delay_whole, sum, brightness);
+            const uint window_samples = uint(ceil(contact_samples));
+            const uint touched = min(window_samples, delay_whole);
+            float drive_gain = 1.0;
+            if (touched <= num_taps - 1u + work_group_size) {
+                for (uint j = 0u; j < touched; j++) {
+                    cached_input[j] = 0.0;
+                }
+                for (uint k = 0u; k < window_samples; k++) {
+                    const float age = float(k);
+                    const float position = fract(age / loop_length) * float(delay_whole);
+                    const uint first = uint(floor(position));
+                    const uint next = first + 1u == delay_whole ? 0u : first + 1u;
+                    const float shaped_wave = string_burst[first] + (string_burst[next] - string_burst[first]) * (position - float(first));
+                    const float force = 0.5 - 0.5 * cos(6.283185307179586 * age / contact_samples);
+                    cached_input[k % delay_whole] += force * shaped_wave;
+                }
+                float drive_energy = 0.0;
+                for (uint j = 0u; j < touched; j++) {
+                    drive_energy += cached_input[j] * cached_input[j];
+                }
+                const float drive_rms = sqrt(drive_energy / float(delay_whole));
+                const float drive_rms_epsilon = 0.000001;
+                drive_gain = drive_rms > drive_rms_epsilon ? target_rms / drive_rms : 1.0;
+            }
+            // Measured 22 Hz, 0.5 ms boundary: the next larger float trips the flush guard.
+            drive_gain = min(drive_gain, 16.5609913);
+            for (uint i = 0u; i < delay_whole; i++) {
+                string_burst[i] *= drive_gain;
+            }
+        }
+    }
     const float release_gain_target  = pow(10.0, -release_damping * 3.0 * loop_length / (sample_rate * 0.05));
     const float release_smooth_coeff = 1.0 - exp(-1.0 / (sample_rate * 0.003));
     const float release_target       = release ? release_gain_target : 1.0;
@@ -457,6 +604,20 @@ void string_pass(uint  base,
             cascade_out             = section_out;
         }
         float loop_output = cascade_out * (string_loop_gain * string_release_gain);
+        if (strike > 0.0) {
+            if (drive_age < contact_samples) {
+                const float position = fract(drive_age / loop_length) * float(delay_whole);
+                const uint first = uint(floor(position));
+                const uint next = first + 1u == delay_whole ? 0u : first + 1u;
+                const float shaped_wave = string_burst[first] + (string_burst[next] - string_burst[first]) * (position - float(first));
+                const float force = strike * (0.5 - 0.5 * cos(6.283185307179586 * drive_age / contact_samples));
+                const float injection = force * shaped_wave;
+                string_block_out[i] += injection;
+                loop_output += injection;
+            }
+            drive_age += 1.0;
+        }
+
 
         // Flush runaway or non-finite values to silence so a blown-up loop cannot poison the ring.
         loop_output                 = abs(loop_output) < 8.0 ? loop_output : 0.0;
@@ -466,6 +627,9 @@ void string_pass(uint  base,
         write_pos                   = write_pos + 1u == string_ring_size ? 0u : write_pos + 1u;
     }
 
+    if (strike > 0.0) {
+        data[base + 10u] = drive_age;
+    }
     data[base]         = uintBitsToFloat(write_pos);
     data[base + 1u]    = string_prev_lowpass;
     data[base + 2u]    = string_prev_allpass;
@@ -508,14 +672,14 @@ void main()
     const bool is_string = type1 == string_wave;
     if (is_string && !(type2 != no_wave && osc_mode == osc_mode_hard_sync)) {
         string_pass(param.string_state_offs,
-                    param.phase_step * float(sampling_rate),
-                    param.string_damping,
-                    param.string_release_damping,
-                    param.string_brightness,
-                    param.string_dispersion,
-                    ((param.osc_pack >> 24) & 1u) != 0u,
-                    note_seed,
-                    param.string_chain);
+                param.phase_step * float(sampling_rate),
+                param.string_damping,
+                param.string_release_damping,
+                param.string_brightness,
+                param.string_dispersion,
+                ((param.osc_pack >> 24) & 1u) != 0u,
+                note_seed,
+                param.string_chain, param.string_strike, param.string_drive, param.string_spectrum);
         // barrier() alone does not publish the data[] ring writes.
         memoryBarrierBuffer();
         memoryBarrierShared();

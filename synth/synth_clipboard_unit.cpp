@@ -255,7 +255,16 @@ static uint32_t build_clipboard_max_fixture(Synth::InstrumentBank*        bank,
                                 target == Synth::mod_string_dispersion)
                                  ? 0.5f
                                  : 2.0f + static_cast<float>(target);
-        routing.num_inputs = 2;
+        if (target == Synth::mod_string_brightness || target == Synth::mod_string_strike) {
+            routing.base_value = 0.0f;
+            if (target == Synth::mod_string_brightness) {
+                instrument->layers[0].string_brightness = 0.5f;
+            }
+            else {
+                instrument->layers[0].string_strike = 0.5f;
+            }
+        }
+        routing.num_inputs       = 2;
         routing.inputs[0].source = Synth::ModSource::velocity;
         routing.inputs[0].op     = Synth::SourceOp::add;
         routing.inputs[0].scale  = 0.5f;

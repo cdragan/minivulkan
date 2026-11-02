@@ -1026,7 +1026,7 @@ static void canvas_menu_adds_node(void* user_data)
 // hold every reachable state, not just the common one.
 static void test_connection_capacity_reaches_max()
 {
-    TEST(max_connections == 1236);
+    TEST(max_connections == 1320);
 
     Graph& g = reset_unit_graph(0);
     g.clear();
@@ -1048,12 +1048,12 @@ static void test_connection_capacity_reaches_max()
             TEST(g.add_slot(sinks[sink], in_slot) != Sculptor::pool_no_slot);
         }
     }
-    for (uint32_t i = 0; i < 1236; ++i) {
+    for (uint32_t i = 0; i < 1320; ++i) {
         const EndPoint out = { source, 0 };
         const EndPoint in  = { sinks[i / max_node_slots], i % max_node_slots };
         TEST(g.add_connection(out, in) != Sculptor::pool_no_slot);
     }
-    TEST(g.connection_count() == 1236);
+    TEST(g.connection_count() == 1320);
 }
 
 // Render harness shared by the renderer-side tests: one full window frame

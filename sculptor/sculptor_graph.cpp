@@ -361,8 +361,9 @@ uint32_t Sculptor::Graph::create_node(const char* name, vmath::vec2 position)
     if (node_idx == pool_no_slot) {
         return pool_no_slot;
     }
-    Node& new_node = nodes.entries[node_idx];
-    new_node       = Node();
+    static const Node empty_node = {};
+    Node&             new_node   = nodes.entries[node_idx];
+    new_node                     = empty_node;
     // Defensive: parallel per-slot arrays must not leak state into a reused
     // slot (delete_node clears them too; this covers slots freed elsewhere).
     selected[node_idx]      = false;
@@ -471,11 +472,11 @@ void Sculptor::Graph::clear()
     // Pool entries keep their bytes after deletion.  clear() resets the
     // retained pool storage so freed node bytes never survive a rebuild.
     // Normal creation is safe regardless: create_node() value-initializes
-    // each entry.  Reset per entry instead of assigning a fresh Pool
-    // temporary: the temporary is pool-sized and overflows the 8 MiB main
-    // stack under AddressSanitizer now that the pool holds 178 nodes.
+    // each entry.  Keep the empty node in static storage: even a single
+    // node-sized temporary can overflow the default stack in deep callers.
+    static const Node empty_node = {};
     for (uint32_t i = 0; i < max_nodes; ++i) {
-        nodes.entries[i] = Node{};
+        nodes.entries[i] = empty_node;
     }
     // The canvas popup and the error overlay describe pre-clear state: a
     // stale popup must not delete a reused connection index, and no stale

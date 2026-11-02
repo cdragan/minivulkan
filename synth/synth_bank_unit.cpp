@@ -214,10 +214,10 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
     const Sculptor::Node& sum = graph.node(mapping.output_node);
     TEST(sum.position.x == 600 && sum.position.y == -450);
     TEST(sum.content_width_override == 360 && sum.content_height_override == 270);
-    const uint32_t          wave_b_slot   = 42; // waveform b, layout contract
-    const uint32_t          mode_slot     = 69; // mix mode, layout contract
+    const uint32_t          wave_b_slot   = 69; // waveform b, layout contract
+    const uint32_t          mode_slot     = 96; // mix mode, layout contract
     const uint32_t          fm_depth_slot = Sculptor::osc_target_row(Synth::mod_fm_index);
-    const uint32_t          fm_ratio_slot = 96; // fm ratio, layout contract
+    const uint32_t          fm_ratio_slot = 123; // fm ratio, layout contract
     Sculptor::PropertyValue wave          = {};
     wave.list_index                       = 0;
     graph.set_slot_value(mapping.osc_nodes[0], wave_b_slot, wave);
@@ -248,7 +248,7 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
         const uint32_t tone1        = Sculptor::osc_target_row(Synth::mod_pad_tilt1);
         for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
             const bool gated =
-                (row >= Sculptor::osc_string_extras_first_slot && row <= Sculptor::osc_brightness_slot) ||
+                (row >= Sculptor::osc_string_extras_first_slot && row <= Sculptor::osc_string_extras_last_slot) ||
                 row == Sculptor::osc_target_row(Synth::mod_duty1) || row == mode_slot ||
                 row == Sculptor::osc_target_row(Synth::mod_osc_mix) || row == fm_depth_slot || row == fm_ratio_slot ||
                 (tone_a_gated && row >= tone0 && row <= tone0 + Sculptor::osc_target_block_stride) ||
@@ -273,7 +273,7 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
         const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
         for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
             const bool gated =
-                (row >= Sculptor::osc_string_extras_first_slot && row <= Sculptor::osc_brightness_slot) ||
+                (row >= Sculptor::osc_string_extras_first_slot && row <= Sculptor::osc_string_extras_last_slot) ||
                 (row >= duty1_row && row <= duty1_row + Sculptor::osc_target_block_stride) ||
                 (row >= tone0 && row <= tone0 + Sculptor::osc_target_block_stride) ||
                 (row >= tone1 && row <= tone1 + Sculptor::osc_target_block_stride) || row == mix_row ||
@@ -294,7 +294,7 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
         const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
         for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
             const bool gated =
-                (row >= Sculptor::osc_string_extras_first_slot && row <= Sculptor::osc_brightness_slot) ||
+                (row >= Sculptor::osc_string_extras_first_slot && row <= Sculptor::osc_string_extras_last_slot) ||
                 (row >= tone_b_row && row <= tone_b_row + Sculptor::osc_target_block_stride) ||
                 row == Sculptor::osc_target_row(Synth::mod_duty1) || row == mode_slot ||
                 row == Sculptor::osc_target_row(Synth::mod_osc_mix) || row == fm_depth_slot || row == fm_ratio_slot ||
@@ -312,7 +312,7 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
         const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
         for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
             const bool gated =
-                (row >= Sculptor::osc_string_extras_first_slot && row <= Sculptor::osc_brightness_slot) ||
+                (row >= Sculptor::osc_string_extras_first_slot && row <= Sculptor::osc_string_extras_last_slot) ||
                 (row >= spread_row &&
                  row <= Sculptor::osc_target_row(Synth::mod_fir_slope) + Sculptor::osc_target_block_stride) ||
                 row == Sculptor::osc_target_row(Synth::mod_osc_mix);
@@ -329,7 +329,7 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
         const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
         for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
             const bool gated =
-                (row >= Sculptor::osc_string_extras_first_slot && row <= Sculptor::osc_brightness_slot) ||
+                (row >= Sculptor::osc_string_extras_first_slot && row <= Sculptor::osc_string_extras_last_slot) ||
                 (row >= duty0_row && row <= duty0_row + Sculptor::osc_target_block_stride) ||
                 (row >= tone0 && row <= tone0 + Sculptor::osc_target_block_stride) || row == mix_row ||
                 (row >= spread_row &&
@@ -1005,7 +1005,7 @@ static void check_zero_fm_clipboard_library_round_trips()
                     TEST(instr.layers[l].osc_mode == (active ? Synth::osc_mode_fm : Synth::osc_mode_blend));
                     const Sculptor::Node& node = graph.node(mapping.osc_nodes[l]);
                     TEST(node.slots.entries[Sculptor::osc_target_row(Synth::mod_fm_index)].value.real == depth);
-                    TEST(node.slots.entries[96].value.real == ratio); // fm ratio, layout contract
+                    TEST(node.slots.entries[123].value.real == ratio); // fm ratio, layout contract
                     TEST(fm_widget_enabled(graph, mapping.osc_nodes[l]) == (active != 0));
                 }
             }
@@ -4359,8 +4359,9 @@ static void check_bank_inline_0()
             }
             for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
                 Synth::TargetBinding& routing = instr.layers[0].targets[target];
-                routing.base_value            = 0.25f;
-                routing.num_inputs            = Synth::max_mod_inputs;
+                routing.base_value =
+                    (target == Synth::mod_string_brightness || target == Synth::mod_string_strike) ? 0.0f : 0.25f;
+                routing.num_inputs = Synth::max_mod_inputs;
                 for (uint32_t in = 0; in < Synth::max_mod_inputs; in++) {
                     routing.inputs[in].source = Synth::ModSource::velocity;
                     routing.inputs[in].op     = Synth::SourceOp::multiply;
@@ -4813,8 +4814,8 @@ static void check_bank_inline_1()
             }
         }
 
-        // Overfull implied node projection: the fully-wired fixture implies 304 nodes;
-        // 113 detached records push it past 416, 112 land exactly on 416.
+        // Overfull implied node projection: the fully-wired fixture implies 318 nodes;
+        // 113 detached records push it past 444, 112 land exactly on 444.
         const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
         Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
         const std::unique_ptr<Synth::InstrumentEditorBank> max_bank_storage =
@@ -4824,11 +4825,13 @@ static void check_bank_inline_1()
         uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
         uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
-        // The max_nodes pool (416) leaves the four-target fixture's 66
+        // The max_nodes pool (444) leaves the four-target fixture's 66
         // implied nodes too far below the pool for the 120-record detached cap to
         // reach the per-zone node-pool refusal, so this test alone wires fifteen
-        // more targets (FM ratio and the fourteen band targets) with full
+        // more targets, including Strike after the target append, with full
         // envelope + LFO bindings.
+        constexpr uint32_t strike_target_index =
+            Synth::mod_string_strike; // Appended after brightness in the approved enum.
         for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
             Synth::Oscillator& osc                       = instrument.layers[layer];
             osc.fir_type                                 = Synth::fir_bandpass;
@@ -4837,7 +4840,8 @@ static void check_bank_inline_1()
             for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
                 const bool extra = target == Synth::mod_fm_ratio ||
                                    (target >= Synth::mod_fir_band0_offset && target <= Synth::mod_fir_band3_slope) ||
-                                   target == Synth::mod_string_damping || target == Synth::mod_string_release_damping;
+                                   target == Synth::mod_string_damping || target == Synth::mod_string_release_damping ||
+                                   target == Synth::mod_string_brightness || target == strike_target_index;
                 if (osc_graph_target(static_cast<Synth::ModTarget>(target)) || ! extra) {
                     continue;
                 }
@@ -4893,7 +4897,7 @@ static void check_bank_inline_1()
         build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 112, 2, 1, 0, 0);
         TEST(decode_bank_with_editor_section(max_bank, editor_json, &restored));
         // The accepted boundary fills the node pool exactly: the projection
-        // still succeeds at 304 + 112 = 416 nodes.
+        // still succeeds at 332 + 112 = 444 nodes after the Strike append.
         const std::unique_ptr<Sculptor::Graph> boundary_graph_storage = std::make_unique<Sculptor::Graph>();
         Sculptor::Graph&                       boundary_graph         = *boundary_graph_storage;
         Sculptor::OscGraphMapping              boundary_mapping       = {};
