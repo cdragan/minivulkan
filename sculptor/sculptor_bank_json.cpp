@@ -2943,7 +2943,7 @@ static void decode_binding(Walker&                    w,
         const float max_value = type == Synth::EffectType::delay ? 1000.0f : 50.0f;
         const float old       = binding.base_value;
         binding.base_value =
-            isfinite(old) ? fmaxf(0.0f, fminf(old, max_value)) : Sculptor::effect_param_default(type, index);
+            std::isfinite(old) ? fmaxf(0.0f, fminf(old, max_value)) : Sculptor::effect_param_default(type, index);
         if (old != binding.base_value)
             record_ignored("clamped base_value_ms");
     }

@@ -568,6 +568,7 @@ void build_zone_fixture(Synth::InstrumentEditorBank* bank, Synth::Instrument* in
     uint16_t lfo_id        = 0;
     uint16_t volume_env_id = 0;
     build_osc_graph_small_fixture(&bank->bank, instrument, &shared_env_id, &lfo_id, &volume_env_id);
+    instrument->pitch_bend_lock   = 1;
     bank->bank.channel_enabled[0] = 1;
     TEST(bank->bank.instruments.allocate() == 0);
     bank->bank.instruments.entries[0]         = *instrument;

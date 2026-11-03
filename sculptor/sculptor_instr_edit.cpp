@@ -5,6 +5,15 @@
 #include <stdio.h>
 #include <string.h>
 
+// GCC rejects memset on the non-trivial ViewEntry, so the view tables
+// clear through value-initialized assignment instead.
+static void clear_view_entries(ViewEntry* entries, uint32_t count)
+{
+    for (uint32_t index = 0; index < count; index++) {
+        entries[index] = ViewEntry{};
+    }
+}
+
 // Private editor operations shared only with the criterion tests.
 
 void drop_zone_view_entries(ViewEntry* entries, uint32_t zone)
@@ -33,7 +42,7 @@ void reconcile_view_entries(ViewEntry (&osc)[Synth::max_channels][Synth::max_ins
     for (uint32_t ch = 0; ch < Synth::max_channels; ++ch) {
         if (memcmp(zones[ch], after.channel_zones[ch], sizeof(zones[ch])) != 0 ||
             enabled[ch] != after.channel_enabled[ch]) {
-            memset(osc[ch], 0, sizeof(osc[ch]));
+            clear_view_entries(osc[ch], Synth::max_instr_per_channel);
         }
         if (enabled[ch] != after.channel_enabled[ch])
             fx[ch] = {};
@@ -317,7 +326,7 @@ static void restore_widget_view(ViewEntry* entry)
 
 static void invalidate_channel_views(uint32_t channel)
 {
-    memset(osc_views[channel], 0, sizeof(osc_views[channel]));
+    clear_view_entries(osc_views[channel], Synth::max_instr_per_channel);
     fx_views[channel] = {};
     widget_key        = nullptr;
 }
@@ -2047,8 +2056,8 @@ static bool load_editor_bank(const char* path)
     }
 
     save_widget_view();
-    memset(osc_views, 0, sizeof(osc_views));
-    memset(fx_views, 0, sizeof(fx_views));
+    clear_view_entries(&osc_views[0][0], Synth::max_channels * Synth::max_instr_per_channel);
+    clear_view_entries(fx_views, Synth::max_channels + 1);
     widget_key           = nullptr;
     instr_bank           = scratch; // names ride in the bank file
     osc_graph_reproject  = true;

@@ -4441,13 +4441,6 @@ static void check_string_strike_loudness()
                 energy += static_cast<double>(value) * static_cast<double>(value);
             }
             const double ratio = sqrt(energy / n) / reference;
-            fprintf(stderr,
-                    "gain pitch=%g strike=%g ratio=%g peak=%g flushes=%u\n",
-                    static_cast<double>(pitch),
-                    static_cast<double>(strike),
-                    ratio,
-                    static_cast<double>(string_strike_peak),
-                    string_strike_flushes);
             if (! report_only) {
                 // Ruling 1f3c9857 keys the floor on the physical period, not delay_whole.
                 const double intermediate_floor = string_fs / pitch < 100.0f ? 0.5 : 0.6;
@@ -4476,14 +4469,6 @@ static void check_string_strike_corner_flush()
                 string_strike_flushes        = 0;
                 string_strike_step(&m, pitch, 0.0f, out, static_cast<uint32_t>(ceilf(drive * 0.001f * string_fs)));
                 TEST(string_strike_flushes == 0);
-                fprintf(stderr,
-                        "corner pitch=%g drive=%g strike=%g injection=%g peak=%g flushes=%u\n",
-                        static_cast<double>(pitch),
-                        static_cast<double>(drive),
-                        static_cast<double>(strike),
-                        static_cast<double>(string_strike_injection_peak),
-                        static_cast<double>(string_strike_peak),
-                        string_strike_flushes);
             }
         }
     }

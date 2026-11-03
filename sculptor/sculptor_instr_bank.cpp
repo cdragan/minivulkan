@@ -35,6 +35,7 @@ bool Synth::init_default_channel(InstrumentBank* bank, uint32_t channel)
     const uint32_t     instr         = bank->instruments.allocate();
     Synth::Instrument& instrument    = bank->instruments.entries[instr];
     instrument                       = {};
+    instrument.pitch_bend_lock       = 1;
     instrument.layer_count           = 1;
     instrument.layers[0].osc_type[0] = Synth::WaveType::sine_wave;
     instrument.layers[0].osc_type[1] = Synth::WaveType::no_wave;

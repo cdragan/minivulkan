@@ -154,7 +154,7 @@ struct Instrument {
                                      // applies to the volume target only, runtime-interpreted
     uint8_t    voice_mode;           // Voice allocation: 0 = multiple, 1 = reuse per-note, 2 = single;
                                      // zero is the stored behavior
-    uint8_t    pitch_bend_lock = 1;
+    uint8_t    pitch_bend_lock;
 };
 
 // Keyboard zone table entry. start_note stores the zone's first note + 1 (1..128), so a
