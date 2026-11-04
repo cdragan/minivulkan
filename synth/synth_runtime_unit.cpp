@@ -2797,10 +2797,9 @@ static void check_runtime_inline_0()
         TEST(strstr(pool_reencoded, "release_seconds") == nullptr); // zero is omitted on encode
     }
 
-    // A standalone-parameter LFO carries full 16-bit depth/rate parameter ids (they
-    // are ParamDescriptor ids, not 7-bit controller numbers): ids above 127 decode
-    // and round-trip byte-identically. Regression: the decoder once applied the
-    // 7-bit cc_number bound here, rejecting old banks whose ids exceeded 127.
+    // Parameter references now encode as declared file ids (slot+1). Runtime slots
+    // stay within max_parameters; arbitrary 16-bit file ids are covered in bank
+    // portability tests. Round trips preserve referenced depth/rate slots.
     {
         const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
             std::make_unique<Synth::InstrumentEditorBank>();
@@ -2808,12 +2807,15 @@ static void check_runtime_inline_0()
         memset(static_cast<void*>(&source), 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         Sculptor::set_identity_osc_sources(&source, 0, 0);
+        while (source.bank.parameters.num_allocated <= 30) {
+            TEST(source.bank.parameters.allocate() != pool_no_slot);
+        }
         const uint32_t param = source.bank.parameters.allocate();
         TEST(param != pool_no_slot);
         Synth::LFODescriptor lfo = {};
         lfo.wave                 = Synth::WaveType::sine_wave;
         lfo.period_ms            = 50;
-        Synth::configure_lfo(&source.bank.parameters.entries[param], lfo, Synth::SourceOp::add, 0.5f, 200, 300, 0.0f);
+        Synth::configure_lfo(&source.bank.parameters.entries[param], lfo, Synth::SourceOp::add, 0.5f, 20, 30, 0.0f);
         TEST(Synth::validate_instrument_bank(&source.bank));
         const std::unique_ptr<FixedArray<char, 64 * 1024>> text_storage =
             std::make_unique<FixedArray<char, 64 * 1024>>();
@@ -2821,16 +2823,16 @@ static void check_runtime_inline_0()
         const uint32_t len      = Synth::encode_editor_bank_json(&source, text, sizeof(text));
         TEST(len > 0);
         text[len] = '\0';
-        TEST(strstr(text, "\"depth_param_id\":200") != nullptr);
-        TEST(strstr(text, "\"rate_param_id\":300") != nullptr);
+        TEST(strstr(text, "\"depth_param_id\":21") != nullptr);
+        TEST(strstr(text, "\"rate_param_id\":31") != nullptr);
         const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
             std::make_unique<Synth::InstrumentEditorBank>();
         Synth::InstrumentEditorBank& decoded = *decoded_storage;
         TEST(Synth::decode_editor_bank_json(text, len, &decoded));
         const Synth::ParamDescriptor& decoded_param = decoded.bank.parameters.entries[param];
         TEST(decoded_param.kind == Synth::ParamKind::lfo);
-        TEST(decoded_param.lfo.depth_param_id == 200);
-        TEST(decoded_param.lfo.rate_param_id == 300);
+        TEST(decoded_param.lfo.depth_param_id == 20);
+        TEST(decoded_param.lfo.rate_param_id == 30);
         TEST(Synth::validate_instrument_bank(&decoded.bank));
         const std::unique_ptr<FixedArray<char, 64 * 1024>> again_storage =
             std::make_unique<FixedArray<char, 64 * 1024>>();

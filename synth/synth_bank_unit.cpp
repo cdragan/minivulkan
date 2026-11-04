@@ -51,18 +51,24 @@ static uint32_t build_detached_layouts_json(char*    dest,
     uint32_t pos = 0;
     pos += static_cast<uint32_t>(snprintf(dest + pos, size - pos, "{\"layouts\":["));
     for (uint32_t i = 0; i < total; i++) {
-        const uint32_t zone = zone_count > 0 ? i % zone_count : 0;
-        const uint32_t uid  = (i / zone_count) + 1;
-        const int written = snprintf(dest + pos,
-                                     size - pos,
-                                     "{\"channel\":0,\"zone\":%u,\"kind\":%u,\"index\":%u,\"x\":11.0,\"y\":22.0,"
-                                     "\"width\":0.0,\"height\":0.0,\"depth_source\":%u,\"rate_source\":%u,\"uid\":%u},",
-                                     zone,
-                                     kind,
-                                     index,
-                                     depth_source,
-                                     rate_source,
-                                     uid);
+        const uint32_t    zone      = zone_count > 0 ? i % zone_count : 0;
+        const uint32_t    uid       = (i / zone_count) + 1;
+        const char* const roles[]   = { "none",     "pitch_bend", "mod_wheel",        "channel_pressure",
+                                        "velocity", "aftertouch", "pressure_combine", "cc" };
+        const char* const kind_name = kind == 0 ? "oscillator" : kind == 1 ? "envelope" : kind == 2 ? "lfo" : "effect";
+        const char* const locator   = kind == 0 ? "layer" : kind == 1 ? "envelope_id" : kind == 2 ? "lfo_id" : "index";
+        const int         written =
+            snprintf(dest + pos,
+                     size - pos,
+                     "{\"channel\":0,\"zone\":%u,\"kind\":\"%s\",\"%s\":%u,\"x\":11.0,\"y\":22.0,"
+                     "\"width\":0.0,\"height\":0.0,\"depth_source\":\"%s\",\"rate_source\":\"%s\",\"uid\":%u},",
+                     zone,
+                     kind_name,
+                     locator,
+                     kind == 0 && index >= 2 ? index - 2 : index,
+                     depth_source < 8 ? roles[depth_source] : "unknown",
+                     rate_source < 8 ? roles[rate_source] : "unknown",
+                     uid);
         if (written < 0 || pos + static_cast<uint32_t>(written) >= size) {
             TEST(false); // builder buffer too small
             return 0;
@@ -1102,9 +1108,10 @@ static void check_library_metadata_transactions()
     char* const layouts = strstr(payload, "\"layouts\":[");
     TEST(layouts != nullptr);
     if (layouts) {
-        char* const  insert      = layouts + strlen("\"layouts\":[");
-        const char   duplicate[] = "{\"channel\":0,\"zone\":0,\"kind\":1,\"index\":1,\"uid\":1,\"x\":999,\"y\":888},";
-        const size_t offset      = static_cast<size_t>(insert - payload);
+        char* const insert = layouts + strlen("\"layouts\":[");
+        const char  duplicate[] =
+            "{\"channel\":0,\"zone\":0,\"kind\":\"envelope\",\"envelope_id\":1,\"uid\":1,\"x\":999,\"y\":888},";
+        const size_t offset = static_cast<size_t>(insert - payload);
         memmove(insert + sizeof(duplicate) - 1, insert, length - offset + 1);
         memcpy(insert, duplicate, sizeof(duplicate) - 1);
         length += sizeof(duplicate) - 1;
@@ -1753,7 +1760,7 @@ static void check_validator_skips_depth_rate_for_unused_kinds()
     char (&lfo_payload)[Synth::library_payload_max] = lfo_payload_storage->elements;
 
     const uint32_t lfo_length = Synth::encode_editor_bank_json(&lfo_bank, lfo_payload, sizeof(lfo_payload));
-    TEST(lfo_length > 0);
+    TEST(lfo_length == 0); // Invalid source roles refuse encoding without an out-of-bounds table read.
 
     const std::unique_ptr<Synth::InstrumentEditorBank> lfo_decoded_storage =
         std::make_unique<Synth::InstrumentEditorBank>();
@@ -2332,7 +2339,7 @@ static void check_pad_json_codec()
     // "lfos" array must refuse "pad" the same way the inline layer LFO does.
     {
         static const char pad_bank_lfo_doc[] =
-            "{\"instrument_editor_bank\":{\"lfos\":[{\"wave\":\"pad\",\"period_ms\":100}]}}";
+            "{\"instrument_editor_bank\":{\"lfos\":[{\"id\":1,\"wave\":\"pad\",\"period_ms\":100}]}}";
         const std::unique_ptr<Synth::InstrumentEditorBank> bank_guarded_storage =
             std::make_unique<Synth::InstrumentEditorBank>();
         Synth::InstrumentEditorBank& bank_guarded = *bank_guarded_storage;
@@ -3274,8 +3281,8 @@ static void check_bank_inline_0()
     // even though bank validation accepts it (disabled channels skip zone checks).
     {
         const char* const payload =
-            "{\"instrument_editor_bank\":{\"instruments\":[{}],\"channels\":"
-            "[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0},{\"start\":60,\"instrument\":0}]}]}}";
+            "{\"instrument_editor_bank\":{\"instruments\":[{\"id\":1}],\"channels\":"
+            "[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":1},{\"start\":60,\"instrument\":1}]}]}}";
         const uint32_t payload_len = static_cast<uint32_t>(strlen(payload));
 
         const char* const path = "synth_library_zoneshape.tmp";
@@ -3898,9 +3905,9 @@ static void check_bank_inline_0()
                         std::make_unique<Synth::InstrumentEditorBank>();
                     Synth::InstrumentEditorBank& from_escape = *from_escape_storage;
                     const char* const            literal_doc =
-                        "{\"instrument_editor_bank\":{\"channel_names\":[\"Channel 01\",\"\xc3\xa9\"]}}";
+                        "{\"instrument_editor_bank\":{\"channels\":[{\"name\":\"Channel 01\"},{\"name\":\"\xc3\xa9\"}]}}";
                     const char* const escape_doc =
-                        "{\"instrument_editor_bank\":{\"channel_names\":[\"Channel 01\",\"\\u00e9\"]}}";
+                        "{\"instrument_editor_bank\":{\"channels\":[{\"name\":\"Channel 01\"},{\"name\":\"\\u00e9\"}]}}";
                     TEST(Synth::decode_editor_bank_json(literal_doc,
                                                         static_cast<uint32_t>(strlen(literal_doc)),
                                                         &from_literal));
@@ -3912,7 +3919,7 @@ static void check_bank_inline_0()
                     TEST(static_cast<unsigned char>(from_escape.channel_names[1][1]) == 0xA9);
                     // A surrogate pair decodes to its code point's UTF-8 spelling.
                     const char* const pair_doc =
-                        "{\"instrument_editor_bank\":{\"channel_names\":[\"Channel 01\",\"\\uD83D\\uDE00\"]}}";
+                        "{\"instrument_editor_bank\":{\"channels\":[{\"name\":\"Channel 01\"},{\"name\":\"\\uD83D\\uDE00\"}]}}";
                     TEST(Synth::decode_editor_bank_json(pair_doc,
                                                         static_cast<uint32_t>(strlen(pair_doc)),
                                                         &from_escape));
@@ -3924,7 +3931,7 @@ static void check_bank_inline_0()
                     // Malformed literal UTF-8 in a name is refused: it would come back out
                     // as an unencodable document.
                     const char* const malformed_doc =
-                        "{\"instrument_editor_bank\":{\"channel_names\":[\"Channel 01\",\"\xc3\x28\"]}}";
+                        "{\"instrument_editor_bank\":{\"channels\":[{\"name\":\"Channel 01\"},{\"name\":\"\xc3\x28\"}]}}";
                     TEST(! Synth::decode_editor_bank_json(malformed_doc,
                                                           static_cast<uint32_t>(strlen(malformed_doc)),
                                                           &from_escape));
@@ -3933,24 +3940,24 @@ static void check_bank_inline_0()
                     // truncated literal sequence are all refused, so nothing decodes
                     // into text the encoder could not re-emit as valid JSON.
                     const char* const lone_low_doc =
-                        "{\"instrument_editor_bank\":{\"channel_names\":[\"Channel 01\",\"\\uDC00\"]}}";
+                        "{\"instrument_editor_bank\":{\"channels\":[{\"name\":\"Channel 01\"},{\"name\":\"\\uDC00\"}]}}";
                     TEST(! Synth::decode_editor_bank_json(lone_low_doc,
                                                           static_cast<uint32_t>(strlen(lone_low_doc)),
                                                           &from_escape));
                     const char* const unpaired_high_doc =
-                        "{\"instrument_editor_bank\":{\"channel_names\":[\"Channel 01\",\"\\uD800xx\\uDC00\"]}}";
+                        "{\"instrument_editor_bank\":{\"channels\":[{\"name\":\"Channel 01\"},{\"name\":\"\\uD800xx\\uDC00\"}]}}";
                     TEST(! Synth::decode_editor_bank_json(unpaired_high_doc,
                                                           static_cast<uint32_t>(strlen(unpaired_high_doc)),
                                                           &from_escape));
                     const char* const short_literal_doc =
-                        "{\"instrument_editor_bank\":{\"channel_names\":[\"Channel 01\",\"\xe1\x80\x41\"]}}";
+                        "{\"instrument_editor_bank\":{\"channels\":[{\"name\":\"Channel 01\"},{\"name\":\"\xe1\x80\x41\"}]}}";
                     TEST(! Synth::decode_editor_bank_json(short_literal_doc,
                                                           static_cast<uint32_t>(strlen(short_literal_doc)),
                                                           &from_escape));
                     // Enum spellings dispatch on DECODED text, so an escape-per-character
                     // spelling of a wave name loads identically to its literal form.
                     const char* const enum_doc =
-                        "{\"instrument_editor_bank\":{\"lfos\":[{\"wave\":\"\\u0073\\u0069\\u006E\\u0065\",\"period_ms\":100}]}}";
+                        "{\"instrument_editor_bank\":{\"lfos\":[{\"id\":1,\"wave\":\"\\u0073\\u0069\\u006E\\u0065\",\"period_ms\":100}]}}";
                     TEST(Synth::decode_editor_bank_json(enum_doc,
                                                         static_cast<uint32_t>(strlen(enum_doc)),
                                                         &from_escape));
@@ -4031,17 +4038,19 @@ static void check_bank_inline_0()
             std::make_unique<Synth::InstrumentEditorBank>();
         Synth::InstrumentEditorBank& bank = *bank_storage;
 
-        const char* const bad[] = { "{",
-                                    "{\"instrument_editor_bank\":}",
-                                    "{\"instrument_editor_bank\":{\"drum_track_channel\":9,}}",
-                                    "{\"instrument_editor_bank\":{\"envelopes\":[{\"num_points\":\"x\"}]}}",
-                                    "{\"instrument_editor_bank\":{\"drum_track_channel\":01}}",
-                                    "{\"instrument_editor_bank\":{\"envelopes\":[{\"num_points\":1e999}]}}",
-                                    "{\"instrument_editor_bank\":{\"drum_track_channel\":9}} trailing",
-                                    ("{\"instrument_editor_bank\":{\"envelopes\":[{\"num_points\":3,\"points\":"
-                                     "[{\"position\":0},{\"position\":1}]}]}}"),
-                                    "[1,2,3]",
-                                    "garbage" };
+        const char* const bad[] = {
+            "{",
+            "{\"instrument_editor_bank\":}",
+            "{\"instrument_editor_bank\":{\"drum_track_channel\":9,}}",
+            "{\"instrument_editor_bank\":{\"envelopes\":[{\"id\":1,\"num_points\":\"x\"}]}}",
+            "{\"instrument_editor_bank\":{\"drum_track_channel\":01}}",
+            "{\"instrument_editor_bank\":{\"envelopes\":[{\"id\":1,\"num_points\":1e999}]}}",
+            "{\"instrument_editor_bank\":{\"drum_track_channel\":9}} trailing",
+            ("{\"instrument_editor_bank\":{\"envelopes\":[{\"id\":1,\"num_points\":3,\"points\":"
+             "[{\"position\":0},{\"position\":1}]}]}}"),
+            "[1,2,3]",
+            "garbage"
+        };
 
         for (uint32_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
             // The destination holds a recognizable pattern; every failure keeps it
@@ -4056,7 +4065,7 @@ static void check_bank_inline_0()
         // A semantically invalid document (zero-period LFO) is rejected by the
         // validation stage, and the destination is still untouched
         memset(static_cast<void*>(&bank), 0x5A, sizeof(bank));
-        const char* const semantic = "{\"instrument_editor_bank\":{\"lfos\":[{}]}}";
+        const char* const semantic = "{\"instrument_editor_bank\":{\"lfos\":[{\"id\":1,}]}}";
         TEST(! Synth::decode_editor_bank_json(semantic, static_cast<uint32_t>(strlen(semantic)), &bank));
         TEST(static_cast<const uint8_t*>(static_cast<const void*>(&bank))[0] == 0x5A);
     }
@@ -4098,7 +4107,7 @@ static void check_bank_inline_0()
         // written with escapes is that field, and an unknown escaped name
         // is logged by its decoded form
         const char* const escaped =
-            "{\"\\u0069nstrument_editor_bank\":{\"\\u0063hannel_names\":[\"Probe\"]},\"\\u0066uture\":1}";
+            "{\"\\u0069nstrument_editor_bank\":{\"channels\":[{\"\\u006eame\":\"Probe\"}]},\"\\u0066uture\":1}";
         TEST(Synth::decode_editor_bank_json(escaped, static_cast<uint32_t>(strlen(escaped)), &bank));
         TEST(strcmp(bank.channel_names[0], "Probe") == 0);
     }
@@ -4224,7 +4233,7 @@ static void check_bank_inline_0()
             len += static_cast<uint32_t>(snprintf(doc + len, sizeof(doc) - len, i ? "," : ""));
             len += static_cast<uint32_t>(snprintf(doc + len, sizeof(doc) - len, "{}"));
         }
-        len += static_cast<uint32_t>(snprintf(doc + len, sizeof(doc) - len, "],\"instruments\":[{}]}}"));
+        len += static_cast<uint32_t>(snprintf(doc + len, sizeof(doc) - len, "],\"instruments\":[{\"id\":1,}]}}"));
         TEST(len < sizeof(doc));
 
         TEST(! Synth::decode_editor_bank_json(doc, len, &bank)); // pool exhaustion
@@ -4237,8 +4246,9 @@ static void check_bank_inline_0()
         len2 += static_cast<uint32_t>(snprintf(doc2 + len2, sizeof(doc2) - len2, "{"));
         for (uint32_t i = 0; i < Synth::max_instruments + 1; i++) {
             len2 += static_cast<uint32_t>(snprintf(doc2 + len2, sizeof(doc2) - len2, i ? "," : ""));
-            len2 += static_cast<uint32_t>(
-                snprintf(doc2 + len2, sizeof(doc2) - len2, "\"instrument_editor_bank\":{\"instruments\":[{}]}"));
+            len2 += static_cast<uint32_t>(snprintf(doc2 + len2,
+                                                   sizeof(doc2) - len2,
+                                                   "\"instrument_editor_bank\":{\"instruments\":[{\"id\":1,}]}"));
         }
         len2 += static_cast<uint32_t>(snprintf(doc2 + len2, sizeof(doc2) - len2, "}"));
         TEST(len2 < sizeof(doc2));
@@ -4742,7 +4752,8 @@ static void check_bank_inline_1()
 
         // Kind byte past the four record kinds.
         build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 1, 4, 1, 0, 0);
-        TEST(! decode_bank_with_editor_section(bank, editor_json, &restored));
+        TEST(decode_bank_with_editor_section(bank, editor_json, &restored));
+        TEST(restored.graph_layout_count == 0);
 
         // A kind-0 record is keyed by canonical index alone: a nonzero uid
         // would name the same bound node twice.
@@ -4765,7 +4776,8 @@ static void check_bank_inline_1()
 
         // Source bytes past pressure_combine would index past the input nodes.
         build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 1, 2, 1, 7, 0);
-        TEST(! decode_bank_with_editor_section(bank, editor_json, &restored));
+        TEST(decode_bank_with_editor_section(bank, editor_json, &restored));
+        TEST(restored.graph_layout_count == 0); // cc is not a recognized detached-LFO role
 
         // Over-cap counts: 121 detached records in one zone (per-zone cap 120)
         // and 2561 records over 16 channels x 16 zones (global cap 2560).
@@ -4804,8 +4816,8 @@ static void check_bank_inline_1()
                 two_records,
                 sizeof(two_records),
                 "{\"layouts\":["
-                "{\"channel\":0,\"zone\":0,\"kind\":2,\"index\":1,\"x\":1.0,\"y\":2.0,\"width\":0.0,\"height\":0.0,\"depth_source\":0,\"rate_source\":0,\"uid\":7},"
-                "{\"channel\":0,\"zone\":0,\"kind\":2,\"index\":1,\"x\":3.0,\"y\":4.0,\"width\":0.0,\"height\":0.0,\"depth_source\":0,\"rate_source\":0,\"uid\":7}]}");
+                "{\"channel\":0,\"zone\":0,\"kind\":\"lfo\",\"lfo_id\":1,\"x\":1.0,\"y\":2.0,\"width\":0.0,\"height\":0.0,\"depth_source\":\"none\",\"rate_source\":\"none\",\"uid\":7},"
+                "{\"channel\":0,\"zone\":0,\"kind\":\"lfo\",\"lfo_id\":1,\"x\":3.0,\"y\":4.0,\"width\":0.0,\"height\":0.0,\"depth_source\":\"none\",\"rate_source\":\"none\",\"uid\":7}]}");
             const bool decoded = decode_bank_with_editor_section(bank, two_records, &restored);
             TEST(decoded);
             if (decoded) {
@@ -5181,9 +5193,903 @@ static void plan_batch_envelope_and_lock_regressions()
     TEST(origin.x == 32.0f && origin.y == -17.0f && zoom == 2.0f);
 }
 
+// New-form fixtures intentionally use public codec entry points only. Pool ids
+// here are deliberately not dense ordinals, to detect positional interpretation.
+static const char* const portability_bank_pools =
+    "\"instruments\":[{\"id\":41,\"name\":\"Lead\",\"layer_count\":2,\"layers\":["
+    "{\"wave_a\":\"sine\",\"routing\":{\"volume\":{\"base_value\":1}},\"generators\":{\"volume\":{\"envelope_desc_id\":19,\"lfo_desc_id\":23}}},"
+    "{\"wave_a\":\"sine\",\"routing\":{\"volume\":{\"base_value\":1}}}]}],"
+    "\"envelopes\":[{\"id\":19,\"num_points\":2,\"sustain_last\":1,\"points\":[{}, {\"position\":100,\"value\":65535}]}],"
+    "\"lfos\":[{\"id\":23,\"wave\":\"sine\",\"period_ms\":300}],"
+    "\"channels\":[{\"name\":\"Performance\",\"zones\":[{\"start\":0,\"instrument\":41}]}]";
+
+static bool portability_decode_bank(const char* fields, const char* editor, Synth::InstrumentEditorBank* out)
+{
+    static char text[1024 * 1024];
+    const int   n = snprintf(text,
+                             sizeof(text),
+                             "{\"instrument_editor_bank\":{\"format\":\"synth-bank-v2\",%s%s%s%s%s}}",
+                             portability_bank_pools,
+                             *fields ? "," : "",
+                             fields,
+                             *editor ? ",\"editor\":" : "",
+                             editor);
+    TEST(n > 0 && static_cast<uint32_t>(n) < sizeof(text));
+    return n > 0 && Synth::decode_editor_bank_json(text, static_cast<uint32_t>(n), out);
+}
+
+static void portability_bank_sources_and_ccs()
+{
+    static Synth::InstrumentEditorBank decoded, snapshot;
+    static char                        encoded[1024 * 1024], again[1024 * 1024];
+    char                               ignored[64][48];
+    const uint8_t                      zero[Synth::max_layers] = {};
+    TEST(portability_decode_bank("", "{}", &decoded));
+    Synth::take_ignored_fields(ignored, 64);
+    TEST(portability_decode_bank("\"instrument_names\":[\"Legacy\"],\"channel_names\":[\"Legacy channel\"]",
+                                 "{\"effect_routing\":[17]}",
+                                 &decoded));
+    TEST(strcmp(decoded.instrument_names[0], "Lead") == 0);
+    TEST(strcmp(decoded.channel_names[0], "Performance") == 0);
+    TEST(Synth::take_ignored_fields(ignored, 64) > 0);
+    TEST(memcmp(decoded.graph_osc_source[0][0], zero, sizeof(zero)) == 0);
+    TEST(strcmp(decoded.instrument_names[0], "Lead") == 0);
+    TEST(strcmp(decoded.channel_names[0], "Performance") == 0);
+    TEST(decoded.bank.channel_zones[0][0].instrument == 0);
+    TEST(decoded.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].envelope_desc_id == 1);
+    TEST(decoded.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].lfo_desc_id == 1);
+    const char* editor =
+        "{\"osc_sources\":[{\"channel\":0,\"zone\":0,\"wiring\":[{\"slot\":0,\"layer\":2},{\"slot\":6,\"layer\":1}]}],"
+        "\"added_ccs\":[{\"chain\":0,\"ccs\":[16,18,31]},{\"chain\":3,\"ccs\":[17,20]},{\"chain\":\"master\",\"ccs\":[19,30]}]}";
+    TEST(portability_decode_bank("", editor, &decoded));
+    TEST(decoded.graph_osc_source[0][0][0] == 2 && decoded.graph_osc_source[0][0][6] == 1);
+    TEST(decoded.graph_osc_source[0][0][1] == 0);
+    TEST(memcmp(decoded.graph_osc_source[0][1], zero, sizeof(zero)) == 0);
+    TEST(decoded.added_cc_mask[0] == 0x8005 && decoded.added_cc_mask[3] == 0x12);
+    TEST(decoded.added_cc_mask[Synth::max_channels] == 0x4008);
+    TEST(decoded.added_cc_mask[Synth::max_channels + 1] == 0);
+    uint32_t n = Synth::encode_editor_bank_json(&decoded, encoded, sizeof(encoded));
+    TEST(n > 0 && n < sizeof(encoded));
+    if (n) {
+        encoded[n] = 0;
+        TEST(strstr(encoded, "\"format\":\"synth-bank-v2\"") != nullptr);
+        TEST(strstr(encoded, "instrument_names") == nullptr && strstr(encoded, "channel_names") == nullptr);
+        TEST(strstr(encoded, "effect_routing") == nullptr);
+        TEST(strstr(encoded, "\"chain\":\"master\"") != nullptr);
+        TEST(Synth::decode_editor_bank_json(encoded, n, &snapshot));
+        const uint32_t m = Synth::encode_editor_bank_json(&snapshot, again, sizeof(again));
+        TEST(n == m && memcmp(encoded, again, n) == 0);
+        TEST(Synth::encode_editor_bank_json(&snapshot, again, n) == 0);
+    }
+    for (const char* bad : { "{\"osc_sources\":[{\"channel\":0,\"zone\":0,\"wiring\":[]}]}",
+                             "{\"osc_sources\":[{\"channel\":0,\"zone\":0,\"wiring\":[{\"slot\":7,\"layer\":1}]}]}",
+                             "{\"osc_sources\":[[1,0,0,0,0,0,0]]}",
+                             "{\"added_ccs\":[17]}",
+                             "{\"added_ccs\":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2]}",
+                             "{\"added_ccs\":[{\"chain\":\"unknown\",\"ccs\":[16]}]}",
+                             "{\"added_ccs\":[{\"chain\":0,\"ccs\":[15,32]}]}" }) {
+        Synth::take_ignored_fields(ignored, 64);
+        TEST(portability_decode_bank("", bad, &decoded));
+        TEST(Synth::take_ignored_fields(ignored, 64) > 0);
+        TEST(memcmp(decoded.graph_osc_source[0][0], zero, sizeof(zero)) == 0);
+        for (uint32_t c = 0; c < Synth::max_channels + 2; ++c)
+            TEST(decoded.added_cc_mask[c] == 0);
+    }
+    Synth::take_ignored_fields(ignored, 64);
+    TEST(portability_decode_bank("",
+                                 "{\"added_ccs\":[{\"chain\":0,\"ccs\":[16]},{\"chain\":0,\"ccs\":[17]}]}",
+                                 &decoded));
+    TEST(decoded.added_cc_mask[0] == 1); // repeat skipped, not overwritten or merged
+    TEST(Synth::take_ignored_fields(ignored, 64) > 0);
+    Synth::take_ignored_fields(ignored, 64);
+    TEST(portability_decode_bank("",
+                                 "{\"osc_sources\":[{\"channel\":0,\"zone\":0,\"wiring\":[{\"slot\":0,\"layer\":1}]},"
+                                 "{\"channel\":0,\"zone\":0,\"wiring\":[{\"slot\":0,\"layer\":2}]}]}",
+                                 &decoded));
+    TEST(decoded.graph_osc_source[0][0][0] == 1);
+    TEST(Synth::take_ignored_fields(ignored, 64) > 0);
+    snapshot = decoded;
+    TEST(! portability_decode_bank(
+        "",
+        "{\"osc_sources\":[{\"channel\":0,\"zone\":0,\"wiring\":[{\"slot\":0,\"layer\":3}]}]}",
+        &decoded));
+    TEST(memcmp(&snapshot, &decoded, sizeof(decoded)) == 0);
+    TEST(portability_decode_bank("", "{}", &decoded));
+    n = Synth::encode_editor_bank_json(&decoded, encoded, sizeof(encoded));
+    TEST(n > 0);
+    if (n)
+        TEST(strstr(encoded, "added_ccs") == nullptr);
+}
+
+static void portability_bank_graph_locators()
+{
+    static Synth::InstrumentEditorBank decoded, snapshot;
+    static char                        editor[8192], text[1024 * 1024], again[1024 * 1024];
+    char                               ignored[64][48];
+    const char*                        records[] = {
+        "{\"channel\":0,\"zone\":0,\"kind\":\"input\",\"x\":11}",
+        "{\"channel\":0,\"zone\":0,\"kind\":\"sum\",\"x\":12}",
+        "{\"channel\":0,\"zone\":0,\"kind\":\"oscillator\",\"layer\":0,\"name\":\"Voice\",\"x\":13}",
+        "{\"channel\":0,\"zone\":0,\"kind\":\"envelope\",\"envelope_id\":19,\"uid\":7,\"x\":14}",
+        "{\"channel\":0,\"zone\":0,\"kind\":\"lfo\",\"lfo_id\":23,\"uid\":9,\"depth_source\":\"velocity\",\"rate_source\":\"mod_wheel\",\"x\":15}",
+        "{\"kind\":\"effect\",\"chain\":0,\"name\":\"Channel input\",\"x\":16}",
+        "{\"kind\":\"effect\",\"chain\":\"master\",\"node\":\"lfo\",\"lfo_id\":23,\"x\":17}",
+        "{\"channel\":0,\"zone\":0,\"kind\":\"parameters\",\"x\":18}"
+    };
+    const uint8_t kinds[]   = { 0, 0, 0, 1, 2, 4, 4, 5 };
+    const uint8_t indices[] = { 0, 1, 2, 1, 1, 0, 0, 0 };
+    for (uint32_t i = 0; i < 8; ++i) {
+        snprintf(editor, sizeof(editor), "{\"layouts\":[%s]}", records[i]);
+        TEST(portability_decode_bank("", editor, &decoded));
+        TEST(decoded.graph_layout_count == 1);
+        if (decoded.graph_layout_count != 1)
+            continue;
+        const auto& r = decoded.graph_layout[0];
+        TEST(r.kind == kinds[i] && r.index == indices[i] && r.x == 11.0f + static_cast<float>(i));
+        if (i == 3)
+            TEST(r.uid == 7);
+        if (i == 4)
+            TEST(r.uid == 9 && r.depth_source == 4 && r.rate_source == 2);
+        if (i == 6)
+            TEST(r.channel == Synth::max_channels && strcmp(r.name, "LFO 1") == 0);
+        const uint32_t n = Synth::encode_editor_bank_json(&decoded, text, sizeof(text));
+        TEST(n > 0);
+        TEST(Synth::decode_editor_bank_json(text, n, &snapshot));
+        const uint32_t m = Synth::encode_editor_bank_json(&snapshot, again, sizeof(again));
+        TEST(m == n && memcmp(text, again, n) == 0);
+    }
+    for (const char* kind : { "0", "1", "2", "3", "4", "5", "\"future\"" }) {
+        // Unknown records must be skipped BEFORE their nonsense locators are validated.
+        snprintf(editor,
+                 sizeof(editor),
+                 "{\"layouts\":[{\"kind\":%s,\"channel\":255,\"index\":255,\"uid\":255}]}",
+                 kind);
+        Synth::take_ignored_fields(ignored, 64);
+        TEST(portability_decode_bank("", editor, &decoded));
+        TEST(decoded.graph_layout_count == 0);
+        TEST(Synth::take_ignored_fields(ignored, 64) > 0);
+    }
+    for (const char* record : { "{\"channel\":255,\"zone\":0,\"kind\":\"input\"}",
+                                "{\"channel\":0,\"zone\":0,\"kind\":\"input\",\"uid\":7}",
+                                "{\"channel\":0,\"zone\":0,\"kind\":\"lfo\",\"lfo_id\":23,\"uid\":0}",
+                                "{\"channel\":0,\"zone\":0,\"kind\":\"envelope\",\"envelope_id\":999,\"uid\":1}" }) {
+        snprintf(editor, sizeof(editor), "{\"layouts\":[%s]}", record);
+        TEST(! portability_decode_bank("", editor, &decoded));
+    }
+}
+
+static void portability_bank_parameter_ids_and_reordering()
+{
+    static Synth::InstrumentEditorBank a, b;
+    static char                        text[32768], reordered[32768], out_a[1024 * 1024], out_b[1024 * 1024];
+    // Parameter references are ZERO-based in memory, while env/LFO descriptor
+    // references are ONE-based. Pin first-entry id 1 -> parameter slot 0.
+    const char* parameters =
+        "\"parameters\":[{\"id\":1,\"kind\":\"external\"},"
+        "{\"id\":17,\"kind\":\"plain\",\"sources\":[{\"param_id\":1,\"scale\":2}]},"
+        "{\"id\":23,\"kind\":\"lfo\",\"lfo\":{\"period_ms\":300},\"depth_param_id\":1,\"rate_param_id\":17}]";
+    TEST(portability_decode_bank(parameters, "{}", &a));
+    TEST(a.bank.parameters.entries[1].plain.sources[0].param_id == 0);
+    TEST(a.bank.parameters.entries[2].lfo.depth_param_id == 0);
+    TEST(a.bank.parameters.entries[2].lfo.rate_param_id == 1);
+    TEST(portability_decode_bank(
+        "\"parameters\":[{\"id\":23,\"kind\":\"lfo\",\"lfo\":{\"period_ms\":300},\"depth_param_id\":1,\"rate_param_id\":17},"
+        "{\"id\":17,\"kind\":\"plain\",\"sources\":[{\"param_id\":1,\"scale\":2}]},{\"id\":1,\"kind\":\"external\"}]",
+        "{}",
+        &b));
+    TEST(b.bank.parameters.entries[0].lfo.depth_param_id == 2);
+    TEST(b.bank.parameters.entries[0].lfo.rate_param_id == 1);
+    TEST(b.bank.parameters.entries[1].plain.sources[0].param_id == 2);
+    for (const char* bad :
+         { "\"parameters\":[{\"id\":1,\"kind\":\"external\"},{\"id\":1,\"kind\":\"external\"}]",
+           "\"parameters\":[{\"id\":1,\"kind\":\"plain\",\"sources\":[{\"param_id\":999}]}]",
+           "\"parameters\":[{\"id\":1,\"kind\":\"lfo\",\"lfo\":{\"period_ms\":300},\"rate_param_id\":999}]" })
+        TEST(! portability_decode_bank(bad, "{}", &a));
+
+    // A second live zone references instrument id 9. Reverse all pools while
+    // keeping references stable. Descriptor content distinguishes their identity.
+    const char* instruments[] = {
+        "{\"id\":41,\"name\":\"A\",\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\",\"generators\":{\"volume\":{\"envelope_desc_id\":19,\"lfo_desc_id\":23}}}]}",
+        "{\"id\":9,\"name\":\"B\",\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\",\"generators\":{\"volume\":{\"envelope_desc_id\":8,\"lfo_desc_id\":6}}}]}"
+    };
+    const char* envs[] = { "{\"id\":19,\"num_points\":2,\"points\":[{}, {\"position\":100}]}",
+                           "{\"id\":8,\"num_points\":2,\"points\":[{}, {\"position\":200}]}" };
+    const char* lfos[] = { "{\"id\":23,\"wave\":\"sine\",\"period_ms\":300}",
+                           "{\"id\":6,\"wave\":\"sine\",\"period_ms\":600}" };
+    for (uint32_t reverse = 0; reverse < 2; ++reverse) {
+        char* dest = reverse ? reordered : text;
+        snprintf(
+            dest,
+            sizeof(text),
+            "{\"instrument_editor_bank\":{\"format\":\"synth-bank-v2\",\"instruments\":[%s,%s],\"envelopes\":[%s,%s],\"lfos\":[%s,%s],"
+            "\"channels\":[{\"zones\":[{\"start\":0,\"instrument\":41},{\"start\":64,\"instrument\":9}]}],"
+            "\"editor\":{\"layouts\":[{\"channel\":0,\"zone\":0,\"kind\":\"envelope\",\"envelope_id\":19,\"uid\":7,\"x\":10},"
+            "{\"channel\":0,\"zone\":0,\"kind\":\"lfo\",\"lfo_id\":23,\"uid\":9,\"x\":20},"
+            "{\"kind\":\"effect\",\"chain\":0,\"node\":\"lfo\",\"lfo_id\":23,\"x\":30}]}}}",
+            instruments[reverse],
+            instruments[1 - reverse],
+            envs[reverse],
+            envs[1 - reverse],
+            lfos[reverse],
+            lfos[1 - reverse]);
+        auto* bank = reverse ? &b : &a;
+        TEST(Synth::decode_editor_bank_json(dest, static_cast<uint32_t>(strlen(dest)), bank));
+        const uint32_t slot = bank->bank.channel_zones[0][0].instrument;
+        TEST(slot < bank->bank.instruments.num_allocated);
+        if (slot < bank->bank.instruments.num_allocated) {
+            TEST(strcmp(bank->instrument_names[slot], "A") == 0);
+            const auto& binding = bank->bank.instruments.entries[slot].layers[0].targets[Synth::mod_volume];
+            TEST(binding.lfo_desc_id > 0 && bank->bank.lfos.entries[binding.lfo_desc_id - 1].period_ms == 300);
+        }
+        bool env_seen = false, lfo_seen = false, effect_seen = false;
+        for (uint32_t i = 0; i < bank->graph_layout_count; ++i) {
+            const auto& r = bank->graph_layout[i];
+            if (r.kind == 1) {
+                env_seen = r.uid == 7 && bank->bank.envelopes.entries[r.index - 1].points[1].position == 100;
+            }
+            if (r.kind == 2) {
+                lfo_seen = r.uid == 9 && bank->bank.lfos.entries[r.index - 1].period_ms == 300;
+            }
+            if (r.kind == 4) {
+                char expected[32];
+                snprintf(expected, sizeof(expected), "LFO %u", reverse ? 2u : 1u);
+                effect_seen = strcmp(r.name, expected) == 0;
+            }
+        }
+        TEST(env_seen && lfo_seen && effect_seen);
+        // File order allocates dense pools. Renormalize ONLY in the test;
+        // production is not required to sort pools on save.
+        if (reverse && bank->bank.instruments.num_allocated == 2 && bank->bank.envelopes.num_allocated == 2 &&
+            bank->bank.lfos.num_allocated == 2) {
+            const auto instrument             = bank->bank.instruments.entries[0];
+            bank->bank.instruments.entries[0] = bank->bank.instruments.entries[1];
+            bank->bank.instruments.entries[1] = instrument;
+            char name[Synth::max_name_len];
+            memcpy(name, bank->instrument_names[0], sizeof(name));
+            memcpy(bank->instrument_names[0], bank->instrument_names[1], sizeof(name));
+            memcpy(bank->instrument_names[1], name, sizeof(name));
+            const auto envelope             = bank->bank.envelopes.entries[0];
+            bank->bank.envelopes.entries[0] = bank->bank.envelopes.entries[1];
+            bank->bank.envelopes.entries[1] = envelope;
+            const auto lfo                  = bank->bank.lfos.entries[0];
+            bank->bank.lfos.entries[0]      = bank->bank.lfos.entries[1];
+            bank->bank.lfos.entries[1]      = lfo;
+            for (uint32_t z = 0; z < 2; ++z)
+                bank->bank.channel_zones[0][z].instrument =
+                    static_cast<uint8_t>(1 - bank->bank.channel_zones[0][z].instrument);
+            for (uint32_t i = 0; i < 2; ++i) {
+                auto& binding            = bank->bank.instruments.entries[i].layers[0].targets[Synth::mod_volume];
+                binding.envelope_desc_id = static_cast<uint16_t>(3 - binding.envelope_desc_id);
+                binding.lfo_desc_id      = static_cast<uint16_t>(3 - binding.lfo_desc_id);
+            }
+            for (uint32_t i = 0; i < bank->graph_layout_count; ++i) {
+                auto& r = bank->graph_layout[i];
+                if (r.kind == 1 || r.kind == 2)
+                    r.index = static_cast<uint8_t>(3 - r.index);
+                if (r.kind == 4)
+                    memcpy(r.name, "LFO 1", 6);
+            }
+        }
+        // Each already-normalized document is independently byte stable.
+        const uint32_t n = Synth::encode_editor_bank_json(bank, out_a, sizeof(out_a));
+        TEST(n > 0);
+        TEST(Synth::decode_editor_bank_json(out_a, n, bank));
+        const uint32_t m = Synth::encode_editor_bank_json(bank, out_b, sizeof(out_b));
+        TEST(m == n && memcmp(out_a, out_b, n) == 0);
+    }
+    // Equivalent after normalization, including uid-stable detached records.
+    const uint32_t na = Synth::encode_editor_bank_json(&a, out_a, sizeof(out_a));
+    const uint32_t nb = Synth::encode_editor_bank_json(&b, out_b, sizeof(out_b));
+    TEST(na > 0 && na == nb && memcmp(out_a, out_b, na) == 0);
+    for (
+        const char* bad :
+        { "{\"instrument_editor_bank\":{\"format\":\"synth-bank-v2\",\"instruments\":[{\"id\":1},{\"id\":1}]}}",
+          "{\"instrument_editor_bank\":{\"format\":\"synth-bank-v2\",\"channels\":[{\"zones\":[{\"start\":0,\"instrument\":999}]}]}}",
+          "{\"instrument_editor_bank\":{\"format\":\"synth-bank-v2\",\"lfos\":[{\"id\":1,\"period_ms\":300},{\"id\":1,\"period_ms\":600}]}}",
+          "{\"instrument_editor_bank\":{\"format\":\"synth-bank-v2\",\"envelopes\":[{\"id\":1,\"num_points\":2,\"points\":[{},{}]},{\"id\":1,\"num_points\":2,\"points\":[{},{}]}]}}" })
+        TEST(! Synth::decode_editor_bank_json(bad, static_cast<uint32_t>(strlen(bad)), &a));
+}
+
+static void portability_bank_omission_cleanup()
+{
+    static Synth::InstrumentEditorBank source, decoded, full;
+    static char                        text[1024 * 1024], again[1024 * 1024], expanded[1024 * 1024];
+    char                               ignored[64][48];
+    source = {};
+    Synth::init_default_bank(&source.bank);
+    zero_dormant_layers(source.bank.instruments.entries[0]);
+    for (uint32_t c = 0; c < Synth::max_channels; ++c) {
+        source.bank.channel_enabled[c] = 0;
+        memset(source.bank.channel_zones[c], 0, sizeof(source.bank.channel_zones[c]));
+        Synth::get_default_channel_name(c, source.channel_names[c], Synth::max_name_len);
+    }
+    const uint32_t n = Synth::encode_editor_bank_json(&source, text, sizeof(text));
+    TEST(n > 0);
+    if (! n)
+        return;
+    text[n] = 0;
+    TEST(strstr(text, "\"layer_count\"") == nullptr);
+    TEST(strstr(text, "\"effects\":[]") == nullptr);
+    TEST(strstr(text, "\"chain\":") == nullptr);
+    TEST(strstr(text, "\"master_chain\":") == nullptr);
+    TEST(strstr(text, "\"channels\"") == nullptr);
+    Synth::take_ignored_fields(ignored, 64);
+    TEST(Synth::decode_editor_bank_json(text, n, &decoded));
+    TEST(Synth::take_ignored_fields(ignored, 64) == 0);
+    TEST(decoded.bank.instruments.entries[0].layer_count == source.bank.instruments.entries[0].layer_count);
+    for (uint32_t c = 0; c < Synth::max_channels; ++c) {
+        TEST(decoded.bank.channel_enabled[c] == 0);
+        TEST(strcmp(decoded.channel_names[c], source.channel_names[c]) == 0);
+    }
+    uint32_t m = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
+    TEST(m == n && memcmp(text, again, n) == 0);
+
+    // Empty names and factory names both mean no custom channel name.
+    for (uint32_t names = 0; names < 2; ++names) {
+        for (uint32_t c = 0; c < Synth::max_channels; ++c) {
+            if (names == 0)
+                source.channel_names[c][0] = 0;
+            else
+                Synth::get_default_channel_name(c, source.channel_names[c], Synth::max_name_len);
+        }
+        for (uint32_t last = 0; last < Synth::max_channels; ++last) {
+            memcpy(source.channel_names[last], "Last", 5);
+            const uint32_t length = Synth::encode_editor_bank_json(&source, text, sizeof(text));
+            TEST(length > 0);
+            text[length]         = 0;
+            const char* channels = strstr(text, "\"channels\":[");
+            TEST(channels != nullptr);
+            if (channels) {
+                channels += strlen("\"channels\":[");
+                for (uint32_t c = 0; c < last; ++c) {
+                    TEST(strncmp(channels, "{},", 3) == 0);
+                    channels += 3;
+                }
+                TEST(strncmp(channels, "{\"name\":\"Last\"}]", 16) == 0);
+            }
+            TEST(Synth::decode_editor_bank_json(text, length, &decoded));
+            TEST(strcmp(decoded.channel_names[last], "Last") == 0);
+            m = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
+            TEST(m == length && memcmp(text, again, length) == 0);
+            if (names == 0)
+                source.channel_names[last][0] = 0;
+            else
+                Synth::get_default_channel_name(last, source.channel_names[last], Synth::max_name_len);
+        }
+        uint32_t length = Synth::encode_editor_bank_json(&source, text, sizeof(text));
+        text[length]    = 0;
+        TEST(strstr(text, "\"channels\"") == nullptr);
+        TEST(Synth::decode_editor_bank_json(text, length, &decoded));
+        m = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
+        TEST(m == length && memcmp(text, again, length) == 0);
+        source.effect_routing[2].in = Sculptor::effect_in_output;
+        length                      = Synth::encode_editor_bank_json(&source, text, sizeof(text));
+        text[length]                = 0;
+        TEST(strstr(text, "\"channels\":[{},{},{\"chain\":{\"input\":\"output\"}}]") != nullptr);
+        TEST(Synth::decode_editor_bank_json(text, length, &decoded));
+        char default_name[Synth::max_name_len];
+        Synth::get_default_channel_name(2, default_name, sizeof(default_name));
+        TEST(strcmp(decoded.channel_names[2], default_name) == 0);
+        m = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
+        TEST(m == length && memcmp(text, again, length) == 0);
+        source.effect_routing[2] = {};
+    }
+
+    // Enabled empty channels have no representable playback state.
+    for (uint32_t names = 0; names < 2; ++names) {
+        for (uint32_t c = 0; c < Synth::max_channels; ++c) {
+            source.bank.channel_enabled[c] = 1;
+            if (names == 0)
+                source.channel_names[c][0] = 0;
+            else
+                Synth::get_default_channel_name(c, source.channel_names[c], Synth::max_name_len);
+        }
+        memcpy(source.channel_names[3], "Custom", 7);
+        uint32_t length = Synth::encode_editor_bank_json(&source, text, sizeof(text));
+        text[length]    = 0;
+        TEST(strstr(text, "\"channels\":[{},{},{},{\"name\":\"Custom\"}]") != nullptr);
+        TEST(strstr(text, "\"enabled\"") == nullptr);
+        TEST(Synth::decode_editor_bank_json(text, length, &decoded));
+        // With allocated instruments, the name-only channel stays enabled.
+        for (uint32_t c = 0; c < Synth::max_channels; ++c)
+            TEST(decoded.bank.channel_enabled[c] == (c == 3 ? 1 : 0));
+        TEST(strcmp(decoded.channel_names[3], "Custom") == 0);
+        m = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
+        TEST(m == length && memcmp(text, again, length) == 0);
+        // With no instruments, the existing auto-disable pass normalizes once.
+        const uint32_t instrument_count       = source.bank.instruments.num_allocated;
+        source.bank.instruments.num_allocated = 0;
+        length                                = Synth::encode_editor_bank_json(&source, text, sizeof(text));
+        TEST(Synth::decode_editor_bank_json(text, length, &decoded));
+        TEST(decoded.bank.channel_enabled[3] == 0);
+        m        = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
+        again[m] = 0;
+        TEST(strstr(again, "\"name\":\"Custom\"") != nullptr);
+        TEST(Synth::decode_editor_bank_json(again, m, &decoded));
+        length = Synth::encode_editor_bank_json(&decoded, text, sizeof(text));
+        TEST(length == m && memcmp(text, again, m) == 0);
+        source.bank.instruments.num_allocated = instrument_count;
+        if (names == 0)
+            source.channel_names[3][0] = 0;
+        else
+            Synth::get_default_channel_name(3, source.channel_names[3], Synth::max_name_len);
+        length       = Synth::encode_editor_bank_json(&source, text, sizeof(text));
+        text[length] = 0;
+        TEST(strstr(text, "\"channels\"") == nullptr);
+        TEST(Synth::decode_editor_bank_json(text, length, &decoded));
+        m = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
+        TEST(m == length && memcmp(text, again, length) == 0);
+    }
+    // The enabled flag is not part of the format; present content decodes enabled.
+    for (uint32_t enabled = 0; enabled < 2; ++enabled) {
+        for (uint32_t c = 0; c < Synth::max_channels; ++c)
+            source.bank.channel_enabled[c] = 0;
+        source.bank.channel_enabled[2]             = static_cast<uint8_t>(enabled);
+        source.bank.channel_zones[2][0].start_note = 1;
+        source.bank.channel_zones[2][0].instrument = 0;
+        const uint32_t length                      = Synth::encode_editor_bank_json(&source, text, sizeof(text));
+        text[length]                               = 0;
+        TEST(strstr(text, "\"enabled\"") == nullptr);
+        TEST(Synth::decode_editor_bank_json(text, length, &decoded));
+        TEST(decoded.bank.channel_enabled[2] == 1);
+        TEST(decoded.bank.channel_zones[2][0].start_note == 1);
+        m = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
+        TEST(m == length && memcmp(text, again, length) == 0);
+    }
+    const char* implicit_enabled =
+        "{\"instrument_editor_bank\":{\"format\":\"synth-bank-v2\",\"instruments\":[{\"id\":1,\"layers\":[{\"wave_a\":\"sine\"}]}],"
+        "\"channels\":[{},{\"zones\":[{\"start\":0,\"instrument\":1}]},{\"zones\":[{\"start\":0,\"instrument\":1}]}]}}";
+    TEST(Synth::decode_editor_bank_json(implicit_enabled, static_cast<uint32_t>(strlen(implicit_enabled)), &decoded));
+    TEST(decoded.bank.channel_enabled[0] == 0);
+    TEST(decoded.bank.channel_enabled[1] == 1);
+    TEST(decoded.bank.channel_enabled[2] == 1);
+    source.bank.channel_enabled[2] = 0;
+    memset(source.bank.channel_zones[2], 0, sizeof(source.bank.channel_zones[2]));
+
+    // Standalone effects and clipboard documents require the empty effects array.
+    static Synth::EffectsDocument empty_effects, decoded_effects;
+    empty_effects                 = {};
+    const uint32_t effects_length = Synth::encode_effects_json(&empty_effects, expanded, sizeof(expanded));
+    TEST(effects_length > 0);
+    expanded[effects_length] = 0;
+    TEST(strstr(expanded, "\"effects\":[]") != nullptr);
+    TEST(Synth::decode_effects_json(expanded, effects_length, &decoded_effects));
+    const uint32_t effects_again = Synth::encode_effects_json(&decoded_effects, again, sizeof(again));
+    TEST(effects_again == effects_length && memcmp(expanded, again, effects_length) == 0);
+
+    // Full old objects and compact empty objects have identical decode defaults.
+    int written =
+        snprintf(expanded,
+                 sizeof(expanded),
+                 "{\"instrument_editor_bank\":{\"format\":\"synth-bank-v2\","
+                 "\"instruments\":[{\"id\":1,\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\"}]}],\"channels\":[");
+    if (written < 0 || static_cast<uint32_t>(written) >= sizeof(expanded)) {
+        TEST(false);
+        return;
+    }
+    uint32_t pos = static_cast<uint32_t>(written);
+    for (uint32_t c = 0; c < Synth::max_channels; ++c) {
+        char name[Synth::max_name_len];
+        Synth::get_default_channel_name(c, name, sizeof(name));
+        written = snprintf(expanded + pos,
+                           sizeof(expanded) - pos,
+                           "%s{\"name\":\"%s\",\"zones\":[],\"chain\":{\"effects\":[]}}",
+                           c ? "," : "",
+                           name);
+        if (written < 0 || pos + static_cast<uint32_t>(written) >= sizeof(expanded)) {
+            TEST(false);
+            return;
+        }
+        pos += static_cast<uint32_t>(written);
+    }
+    written = snprintf(expanded + pos, sizeof(expanded) - pos, "],\"master_chain\":{\"effects\":[]}}}");
+    if (written < 0 || pos + static_cast<uint32_t>(written) >= sizeof(expanded)) {
+        TEST(false);
+        return;
+    }
+    pos += static_cast<uint32_t>(written);
+    TEST(Synth::decode_editor_bank_json(expanded, pos, &full));
+    const char* compact = "{\"instrument_editor_bank\":{\"format\":\"synth-bank-v2\","
+                          "\"instruments\":[{\"id\":1,\"layers\":[{\"wave_a\":\"sine\"}]}],"
+                          "\"channels\":[{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}]}}";
+    Synth::take_ignored_fields(ignored, 64);
+    TEST(Synth::decode_editor_bank_json(compact, static_cast<uint32_t>(strlen(compact)), &decoded));
+    TEST(Synth::take_ignored_fields(ignored, 64) == 0);
+    // Verbose empty sub-objects decode enabled; the compact form stays
+    // disabled. Both normalize to the same canonical encoding.
+    for (uint32_t c = 0; c < Synth::max_channels; ++c) {
+        TEST(full.bank.channel_enabled[c] == 1);
+        TEST(decoded.bank.channel_enabled[c] == 0);
+    }
+    const uint32_t full_len    = Synth::encode_editor_bank_json(&full, expanded, sizeof(expanded));
+    const uint32_t compact_len = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
+    TEST(full_len > 0 && full_len == compact_len && memcmp(expanded, again, full_len) == 0);
+    for (const char* instrument : { "{\"id\":1,\"layer_count\":2,\"layers\":[{\"wave_a\":\"sine\"}]}",
+                                    "{\"id\":1,\"layers\":[{\"wave_a\":\"sine\"}],\"layer_count\":2}" }) {
+        snprintf(expanded,
+                 sizeof(expanded),
+                 "{\"instrument_editor_bank\":{\"format\":\"synth-bank-v2\",\"instruments\":[%s]}}",
+                 instrument);
+        Synth::take_ignored_fields(ignored, 64);
+        TEST(Synth::decode_editor_bank_json(expanded, static_cast<uint32_t>(strlen(expanded)), &decoded));
+        TEST(decoded.bank.instruments.entries[0].layer_count == 1);
+        TEST(Synth::take_ignored_fields(ignored, 64) == 1);
+        TEST(strcmp(ignored[0], "layer_count mismatch") == 0);
+    }
+    const char* absent =
+        "{\"instrument_editor_bank\":{\"format\":\"synth-bank-v2\",\"instruments\":[{\"id\":1,\"layer_count\":2}]}}";
+    TEST(Synth::decode_editor_bank_json(absent, static_cast<uint32_t>(strlen(absent)), &decoded));
+    TEST(decoded.bank.instruments.entries[0].layer_count == 0);
+
+    // A custom name, disabled zone, disconnected effects and bypass are authored state.
+    memcpy(source.channel_names[0], "Custom", 7);
+    source.bank.channel_zones[1][0].start_note = 1;
+    source.bank.channel_zones[1][0].instrument = 0;
+    source.bank.channel_chains[2].num_effects  = 1;
+    Sculptor::fx_init_slot(&source.bank.channel_chains[2], 0, Synth::EffectType::delay);
+    source.effect_routing[3].in = Sculptor::effect_in_output;
+    for (uint32_t master = 0; master < 3; ++master) {
+        source.bank.master_chain                   = {};
+        source.effect_routing[Synth::max_channels] = {};
+        if (master == 1)
+            source.effect_routing[Synth::max_channels].in = Sculptor::effect_in_output;
+        if (master == 2)
+            source.bank.master_chain = source.bank.channel_chains[2];
+        const uint32_t length = Synth::encode_editor_bank_json(&source, text, sizeof(text));
+        TEST(length > 0);
+        text[length] = 0;
+        TEST(strstr(text, "\"name\":\"Custom\"}") != nullptr);
+        TEST(strstr(text, "\"zones\":[{\"start\":0,\"instrument\":1}]") != nullptr);
+        TEST(strstr(text, "\"chain\":{\"effects\":[") != nullptr);
+        TEST(strstr(text, "\"chain\":{\"input\":\"output\"}") != nullptr);
+        TEST((strstr(text, "\"master_chain\"") != nullptr) == (master != 0));
+        TEST(strstr(text, "\"effects\":[]") == nullptr);
+        TEST(Synth::decode_editor_bank_json(text, length, &decoded));
+        TEST(decoded.bank.channel_chains[2].num_effects == 1);
+        TEST(decoded.effect_routing[2].in == Sculptor::effect_in_disconnected);
+        m = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
+        TEST(m == length && memcmp(text, again, length) == 0);
+    }
+}
+
+static void portability_bank_tags_and_effect_types()
+{
+    static Synth::InstrumentEditorBank source, decoded;
+    static char                        text[1024 * 1024], again[1024 * 1024];
+    char                               ignored[64][48];
+    for (const char* tag : { "synth-bank-v1", "wrong", "" }) {
+        snprintf(text,
+                 sizeof(text),
+                 "{\"instrument_editor_bank\":{%s%s%s}}",
+                 *tag ? "\"format\":\"" : "",
+                 tag,
+                 *tag ? "\"" : "");
+        Synth::take_ignored_fields(ignored, 64);
+        TEST(Synth::decode_editor_bank_json(text, static_cast<uint32_t>(strlen(text)), &decoded));
+        TEST(Synth::take_ignored_fields(ignored, 64) > 0);
+    }
+    const char* misplaced = "{\"format\":\"synth-bank-v2\",\"instrument_editor_bank\":{\"format\":\"synth-bank-v2\"}}";
+    Synth::take_ignored_fields(ignored, 64);
+    TEST(Synth::decode_editor_bank_json(misplaced, static_cast<uint32_t>(strlen(misplaced)), &decoded));
+    TEST(Synth::take_ignored_fields(ignored, 64) > 0); // sibling tag is unknown
+    for (uint32_t t = 1; t < Synth::num_effect_types; ++t) {
+        source = {};
+        Synth::init_default_bank(&source.bank);
+        auto& chain       = source.bank.channel_chains[0];
+        chain.num_effects = 1;
+        Sculptor::fx_init_slot(&chain, 0, static_cast<Synth::EffectType>(t));
+        source.effect_routing[0].in                = Sculptor::effect_in_first_slot;
+        source.effect_routing[0].out[0]            = Sculptor::effect_out_output;
+        source.bank.master_chain                   = chain;
+        source.effect_routing[Synth::max_channels] = source.effect_routing[0];
+        const uint32_t n                           = Synth::encode_editor_bank_json(&source, text, sizeof(text));
+        TEST(n > 0);
+        if (! n)
+            continue;
+        text[n] = 0;
+        TEST(strstr(text, "\"params\":{") != nullptr);
+        TEST(strstr(text, "\"input\":\"first_slot\"") != nullptr);
+        TEST(strstr(text, "\"feeds\":\"output\"") != nullptr);
+        TEST(count_clipboard_tokens(text, n) > 0);
+        TEST(Synth::decode_editor_bank_json(text, n, &decoded));
+        TEST(decoded.effect_routing[0].in == Sculptor::effect_in_first_slot);
+        TEST(decoded.effect_routing[Synth::max_channels].out[0] == Sculptor::effect_out_output);
+        // One normalization permits the pre-existing zeroed multiband bands to
+        // acquire neutral dormant gain/slope defaults.
+        const uint32_t m = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
+        TEST(m > 0);
+        TEST(Synth::decode_editor_bank_json(again, m, &decoded));
+        const uint32_t k = Synth::encode_editor_bank_json(&decoded, text, sizeof(text));
+        TEST(k == m && memcmp(text, again, m) == 0);
+    }
+    source.bank.lfos.num_allocated = Synth::max_lfos + 1;
+    TEST(Synth::encode_editor_bank_json(&source, text, sizeof(text)) == 0);
+}
+
+static uint32_t portability_read_fixture(const char* path, char* text, uint32_t capacity)
+{
+    FILE* file = fopen(path, "rb");
+    TEST(file != nullptr);
+    if (! file)
+        return 0;
+    const size_t got      = fread(text, 1, capacity - 1, file);
+    const bool   complete = fgetc(file) == EOF && ! ferror(file);
+    TEST(fclose(file) == 0);
+    TEST(complete && got > 0);
+    text[got] = 0;
+    return complete ? static_cast<uint32_t>(got) : 0;
+}
+
+static void portability_migration_and_examples()
+{
+    static Synth::InstrumentEditorBank  bank, again;
+    static Synth::EffectsDocument       effects;
+    static Synth::Instrument            instrument;
+    static Synth::EnvelopeDescriptor    envelopes[Synth::instrument_max_envelopes];
+    static Synth::LFODescriptor         lfos[Synth::instrument_max_lfos];
+    static Synth::InstrumentGraphLayout layout[Synth::instrument_graph_layout_capacity];
+    static char                         text[1024 * 1024], encoded[1024 * 1024], encoded_again[1024 * 1024];
+    for (const char* path : { "tools/migration_fixtures/bank.expected.json" }) {
+        const uint32_t n = portability_read_fixture(path, text, sizeof(text));
+        TEST(Synth::decode_editor_bank_json(text, n, &bank));
+        TEST(bank.bank.instruments.num_allocated == 1 && bank.bank.envelopes.num_allocated == 1 &&
+             bank.bank.lfos.num_allocated == 1);
+        TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].base_value == 0.75f);
+        TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].envelope_desc_id == 1);
+        TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].lfo_desc_id == 1);
+        TEST(bank.bank.channel_zones[0][0].instrument == 0);
+        TEST(bank.bank.parameters.entries[1].plain.sources[0].param_id == 0);
+        TEST(bank.bank.parameters.entries[2].lfo.rate_param_id == 1);
+        TEST(strcmp(bank.instrument_names[0], "Migrated lead") == 0);
+        TEST(strcmp(bank.channel_names[0], "Performance") == 0);
+        TEST(bank.bank.channel_chains[0].effects[0].bindings[0].base_value == 240);
+        TEST(bank.effect_routing[0].in == Sculptor::effect_in_first_slot &&
+             bank.effect_routing[0].out[0] == Sculptor::effect_out_output);
+        TEST(bank.graph_osc_source[0][0][0] == 1 && bank.graph_osc_source[0][0][1] == 0);
+        TEST(bank.added_cc_mask[0] == 5 && bank.added_cc_mask[Synth::max_channels] == 2);
+        TEST(bank.graph_layout_count == 8 && bank.graph_layout[3].uid == 7 && bank.graph_layout[4].uid == 9);
+        TEST(strcmp(bank.graph_layout[6].name, "LFO 1") == 0);
+        const uint32_t a = Synth::encode_editor_bank_json(&bank, encoded, sizeof(encoded));
+        TEST(a > 0 && Synth::decode_editor_bank_json(encoded, a, &again));
+        const uint32_t b = Synth::encode_editor_bank_json(&again, encoded_again, sizeof(encoded_again));
+        TEST(a == b && memcmp(encoded, encoded_again, a) == 0);
+        // Strict production library reader accepts framing from a migrated payload.
+        const char*    library_path = "synth_portability_migrated_library.tmp";
+        const uint32_t library_n =
+            portability_read_fixture("tools/migration_fixtures/library-bank.expected.json", text, sizeof(text));
+        TEST(library_n > 0);
+        write_library_fixture(library_path, text, library_n);
+        Synth::LibraryEntry entry = {};
+        TEST(Synth::read_library_index(library_path, &entry, 1) == 1);
+        again         = {};
+        uint16_t slot = 0xFFFF;
+        TEST(Synth::load_library_instrument(library_path, &entry, &again, 0, &slot));
+        TEST(slot == 0 &&
+             again.bank.instruments.entries[slot].layers[0].targets[Synth::mod_volume].base_value == 0.75f);
+        TEST(remove(library_path) == 0);
+    }
+    for (const char* path : { "doc/synth_effects_example.json", "tools/migration_fixtures/effects.expected.json" }) {
+        const uint32_t n = portability_read_fixture(path, text, sizeof(text));
+        TEST(Synth::decode_effects_json(text, n, &effects));
+        TEST(effects.lfo_count == 2 && effects.chain.num_effects == 2);
+        TEST(effects.chain.effects[0].bindings[0].base_value == 100);
+        TEST(effects.chain.effects[0].bindings[1].lfo_desc_id == 1);
+        const uint32_t a = Synth::encode_effects_json(&effects, encoded, sizeof(encoded));
+        TEST(a > 0 && Synth::decode_effects_json(encoded, a, &effects));
+        const uint32_t b = Synth::encode_effects_json(&effects, encoded_again, sizeof(encoded_again));
+        TEST(a == b && memcmp(encoded, encoded_again, a) == 0);
+    }
+    for (const char* path :
+         { "doc/synth_instrument_example.json", "tools/migration_fixtures/instrument.expected.json" }) {
+        const uint32_t n         = portability_read_fixture(path, text, sizeof(text));
+        uint32_t       env_count = 0, lfo_count = 0, layout_count = 0;
+        TEST(Synth::decode_instrument_json(text,
+                                           n,
+                                           &instrument,
+                                           envelopes,
+                                           &env_count,
+                                           lfos,
+                                           &lfo_count,
+                                           layout,
+                                           Synth::instrument_graph_layout_capacity,
+                                           &layout_count));
+        TEST(instrument.layer_count == 2 && instrument.layers[0].osc_mode == Synth::osc_mode_fm);
+        TEST(env_count == 2 && lfo_count == 2 && layout_count == 1 && layout[0].kind == 0);
+    }
+    char        ignored[32][48];
+    const char* missing = "{\"instrument_editor_bank\":{\"format\":\"synth-bank-v2\",\"lfos\":[{\"period_ms\":100}]}}";
+    Synth::take_ignored_fields(ignored, 32);
+    TEST(Synth::decode_editor_bank_json(missing, static_cast<uint32_t>(strlen(missing)), &bank));
+    TEST(bank.bank.lfos.num_allocated == 0 && Synth::take_ignored_fields(ignored, 32) > 0);
+    const char* dangling =
+        "{\"instrument_editor_bank\":{\"lfos\":[{\"period_ms\":100}],\"master_chain\":{\"effects\":[{\"type\":\"delay\",\"params\":{\"time\":{\"lfo_desc_id\":1}}}]}}}";
+    TEST(Synth::decode_editor_bank_json(dangling, static_cast<uint32_t>(strlen(dangling)), &bank));
+    TEST(bank.bank.master_chain.effects[0].bindings[0].lfo_desc_id == 0);
+    const char* high_id =
+        "{\"instrument_editor_bank\":{\"instruments\":[{\"id\":65535,\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\",\"generators\":{\"volume\":{\"lfo_desc_id\":65535}}}]}],\"lfos\":[{\"id\":65535,\"wave\":\"sine\",\"period_ms\":100}],\"channels\":[{\"zones\":[{\"start\":0,\"instrument\":65535}]}],\"editor\":{\"layouts\":[{\"channel\":0,\"zone\":0,\"kind\":\"lfo\",\"lfo_id\":65535,\"uid\":1}]}}}";
+    TEST(Synth::decode_editor_bank_json(high_id, static_cast<uint32_t>(strlen(high_id)), &bank));
+    TEST(bank.bank.channel_zones[0][0].instrument == 0 && bank.graph_layout[0].index == 1);
+}
+
+static void portability_review_regressions()
+{
+    static Synth::InstrumentEditorBank  bank;
+    static Synth::EffectsDocument       effects;
+    static Synth::Instrument            instrument;
+    static Synth::EnvelopeDescriptor    envelopes[Synth::instrument_max_envelopes];
+    static Synth::LFODescriptor         lfos[Synth::instrument_max_lfos];
+    static Synth::InstrumentGraphLayout layouts[Synth::instrument_graph_layout_capacity];
+    static char                         text[8192];
+    char                                ignored[64][48];
+    // Missing kinds warn and skip consistently in every carrier.
+    Synth::take_ignored_fields(ignored, 64);
+    TEST(portability_decode_bank("", "{\"layouts\":[{\"channel\":0,\"zone\":0}]}", &bank));
+    TEST(bank.graph_layout_count == 0 && Synth::take_ignored_fields(ignored, 64) > 0);
+    const char* missing_effect_kind =
+        "{\"format\":\"synth-effects-v4\",\"effects\":[],\"graph_layout\":[{\"x\":0,\"y\":0}]}";
+    TEST(Synth::decode_effects_json(missing_effect_kind, static_cast<uint32_t>(strlen(missing_effect_kind)), &effects));
+    TEST(effects.graph_layout_count == 0 && Synth::take_ignored_fields(ignored, 64) > 0);
+    const char* missing_clip_kind =
+        "{\"format\":\"synth-instrument-v2\",\"layers\":[{\"wave_a\":\"sine\"}],\"graph_layout\":[{\"x\":0,\"y\":0,\"width\":0,\"height\":0}]}";
+    uint32_t missing_envs = 0, missing_lfos = 0, missing_layouts = 0;
+    TEST(Synth::decode_instrument_json(missing_clip_kind,
+                                       static_cast<uint32_t>(strlen(missing_clip_kind)),
+                                       &instrument,
+                                       envelopes,
+                                       &missing_envs,
+                                       lfos,
+                                       &missing_lfos,
+                                       layouts,
+                                       Synth::instrument_graph_layout_capacity,
+                                       &missing_layouts));
+    TEST(missing_layouts == 0 && Synth::take_ignored_fields(ignored, 64) > 0);
+    // Recognized role names retain a known-but-stale layer locator; unknown names skip.
+    const char* stale_clip_layer =
+        "{\"format\":\"synth-instrument-v2\",\"layers\":[{\"wave_a\":\"sine\"}],\"graph_layout\":[{\"kind\":\"lfo\",\"layer\":7,\"target\":\"volume\",\"depth_source\":\"none\",\"rate_source\":\"mod_wheel\",\"x\":0,\"y\":0,\"width\":0,\"height\":0}]}";
+    TEST(Synth::decode_instrument_json(stale_clip_layer,
+                                       static_cast<uint32_t>(strlen(stale_clip_layer)),
+                                       &instrument,
+                                       envelopes,
+                                       &missing_envs,
+                                       lfos,
+                                       &missing_lfos,
+                                       layouts,
+                                       Synth::instrument_graph_layout_capacity,
+                                       &missing_layouts));
+    TEST(missing_layouts == 1 && layouts[0].layer == 7 && layouts[0].rate_source == 2);
+    for (const char* value : { "\"future\"", "1", "null", "{}" }) {
+        snprintf(text,
+                 sizeof(text),
+                 "{\"format\":\"synth-effects-v4\",\"input\":%s,\"effects\":[{\"type\":\"delay\",\"feeds\":%s}]}",
+                 value,
+                 value);
+        Synth::take_ignored_fields(ignored, 64);
+        TEST(Synth::decode_effects_json(text, static_cast<uint32_t>(strlen(text)), &effects));
+        TEST(effects.routing.in == 0 && effects.routing.out[0] == 0);
+        TEST(Synth::take_ignored_fields(ignored, 64) > 0);
+    }
+    const char* extra =
+        "{\"format\":\"synth-effects-v4\",\"effects\":[],\"graph_layout\":[{\"kind\":\"input\",\"x\":1,\"y\":2,\"future\":42}]}";
+    TEST(Synth::decode_effects_json(extra, static_cast<uint32_t>(strlen(extra)), &effects));
+    TEST(effects.graph_layout_count == 1 && effects.graph_layout[0].x == 1);
+    const char* clip =
+        "{\"format\":\"synth-instrument-v2\",\"layers\":[{\"wave_a\":\"sine\"}],\"graph_layout\":[{\"kind\":\"input\",\"canonical_index\":84,\"future\":1,\"x\":3,\"y\":4,\"width\":0,\"height\":0}]}";
+    uint32_t env_count = 0, lfo_count = 0, layout_count = 0;
+    TEST(Synth::decode_instrument_json(clip,
+                                       static_cast<uint32_t>(strlen(clip)),
+                                       &instrument,
+                                       envelopes,
+                                       &env_count,
+                                       lfos,
+                                       &lfo_count,
+                                       layouts,
+                                       Synth::instrument_graph_layout_capacity,
+                                       &layout_count));
+    TEST(layout_count == 1 && layouts[0].canonical_index == 0 && layouts[0].x == 3);
+    const char* bypass =
+        "{\"format\":\"synth-effects-v4\",\"input\":\"output\",\"effects\":[{\"type\":\"delay\",\"feeds\":\"output\"}]}";
+    TEST(Synth::decode_effects_json(bypass, static_cast<uint32_t>(strlen(bypass)), &effects));
+    TEST(effects.routing.in == Sculptor::effect_in_output && effects.routing.out[0] == 0);
+    TEST(portability_decode_bank(
+        "\"master_chain\":{\"input\":\"output\",\"effects\":[{\"type\":\"delay\",\"feeds\":\"output\"}]}",
+        "{}",
+        &bank));
+    TEST(bank.effect_routing[Synth::max_channels].in == Sculptor::effect_in_output &&
+         bank.effect_routing[Synth::max_channels].out[0] == 0);
+    for (const char* owner : { "-1", "true", "null", "100000", "\"future\"" }) {
+        snprintf(text, sizeof(text), "{\"added_ccs\":[{\"chain\":%s,\"ccs\":[16]}]}", owner);
+        TEST(portability_decode_bank("", text, &bank));
+        TEST(bank.added_cc_mask[0] == 0);
+    }
+    TEST(portability_decode_bank("", "{\"added_ccs\":[{\"chain\":0,\"ccs\":[16,32]}]}", &bank));
+    TEST(bank.added_cc_mask[0] == 0);
+    TEST(portability_decode_bank("",
+                                 "{\"added_ccs\":[{\"chain\":0,\"ccs\":[16,32]},{\"chain\":0,\"ccs\":[18]}]}",
+                                 &bank));
+    TEST(bank.added_cc_mask[0] == 4); // invalid record did not consume owner
+    for (const char* record : { "{\"kind\":\"oscillator\",\"channel\":0,\"zone\":0}",
+                                "{\"kind\":\"input\",\"channel\":0}",
+                                "{\"kind\":\"lfo\",\"channel\":0,\"zone\":0,\"uid\":1}",
+                                "{\"kind\":\"effect\",\"chain\":0}",
+                                "{\"kind\":\"effect\",\"chain\":0,\"node\":\"lfo\"}" }) {
+        snprintf(text, sizeof(text), "{\"layouts\":[%s]}", record);
+        Synth::take_ignored_fields(ignored, 64);
+        TEST(portability_decode_bank("", text, &bank));
+        TEST(bank.graph_layout_count == 0 && Synth::take_ignored_fields(ignored, 64) > 0);
+    }
+    TEST(portability_decode_bank(
+        "",
+        "{\"layouts\":[{\"kind\":\"lfo\",\"channel\":0,\"zone\":0,\"uid\":1,\"lfo_id\":23,\"depth_source\":1,\"rate_source\":\"future\"}]}",
+        &bank));
+    TEST(bank.graph_layout_count == 0); // unknown roles skip the entire record
+    for (const char* roles : { "\"depth_source\":\"future\",\"rate_source\":\"none\"",
+                               "\"depth_source\":\"none\",\"rate_source\":\"future\"" }) {
+        snprintf(text,
+                 sizeof(text),
+                 "{\"layouts\":[{\"kind\":\"lfo\",\"channel\":0,\"zone\":0,\"uid\":1,\"lfo_id\":23,%s}]}",
+                 roles);
+        Synth::take_ignored_fields(ignored, 64);
+        TEST(portability_decode_bank("", text, &bank));
+        TEST(bank.graph_layout_count == 0 && Synth::take_ignored_fields(ignored, 64) > 0);
+    }
+    TEST(portability_decode_bank(
+        "",
+        "{\"layouts\":[{\"kind\":\"lfo\",\"channel\":0,\"zone\":0,\"uid\":1,\"lfo_id\":23,\"depth_source\":\"velocity\",\"rate_source\":\"mod_wheel\"}]}",
+        &bank));
+    TEST(bank.graph_layout_count == 1 && bank.graph_layout[0].depth_source == 4 &&
+         bank.graph_layout[0].rate_source == 2);
+    Synth::take_ignored_fields(ignored, 64);
+    TEST(portability_decode_bank("\"parameters\":[{\"id\":1,\"kind\":\"external\"}]", "{}", &bank));
+    TEST(Synth::take_ignored_fields(ignored, 64) == 0); // id is understood
+    TEST(portability_decode_bank("\"parameters\":[{\"id\":1,\"kind\":\"lfo\",\"lfo\":{\"period_ms\":300}}]",
+                                 "{}",
+                                 &bank));
+    TEST(bank.bank.parameters.entries[0].lfo.depth_param_id == 0 &&
+         bank.bank.parameters.entries[0].lfo.rate_param_id == 0);
+    TEST(portability_decode_bank("\"parameters\":[{\"id\":1,\"kind\":\"plain\",\"sources\":[{\"scale\":2}]}]",
+                                 "{}",
+                                 &bank));
+    TEST(bank.bank.parameters.entries[0].plain.sources[0].param_id == 0);
+    for (const char* literal : { "0", "65536", "\"old\"", "null", "-1" }) {
+        snprintf(
+            text,
+            sizeof(text),
+            "\"parameters\":[{\"id\":1,\"kind\":\"lfo\",\"lfo\":{\"period_ms\":300},\"depth_param_id\":%s,\"rate_param_id\":%s}]",
+            literal,
+            literal);
+        TEST(portability_decode_bank(text, "{}", &bank));
+        TEST(bank.bank.parameters.entries[0].lfo.depth_param_id == 0);
+    }
+    const char* legacy =
+        "{\"instrument_editor_bank\":{\"instruments\":[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\"}]}],\"lfos\":[{\"period_ms\":100}],\"channels\":[{\"enabled\":true,\"zones\":[{\"start\":0,\"instrument\":0}]}],\"master_chain\":{\"effects\":[{\"type\":\"delay\",\"params\":{\"time\":{\"lfo_desc_id\":1}}}]},\"editor\":{\"layouts\":[{\"kind\":\"lfo\",\"channel\":0,\"zone\":0,\"lfo_id\":1,\"uid\":1}]}}}";
+    TEST(Synth::decode_editor_bank_json(legacy, static_cast<uint32_t>(strlen(legacy)), &bank));
+    TEST(bank.bank.instruments.num_allocated == 0 && bank.bank.channel_zones[0][0].start_note == 0 &&
+         bank.bank.channel_enabled[0] == 0);
+    TEST(bank.graph_layout_count == 0 && bank.bank.master_chain.effects[0].bindings[0].lfo_desc_id == 0);
+    const char* legacy_fx =
+        "{\"format\":\"synth-effects-v3\",\"lfos\":[{\"period_ms\":100}],\"effects\":[{\"type\":\"fir\",\"fir_bands\":2,\"fir_band1\":{\"gain\":{\"lfo_desc_id\":1}}}],\"graph_layout\":[{\"kind\":\"lfo\",\"lfo_desc_id\":1,\"x\":0,\"y\":0}]}";
+    TEST(Synth::decode_effects_json(legacy_fx, static_cast<uint32_t>(strlen(legacy_fx)), &effects));
+    TEST(effects.lfo_count == 0 && effects.graph_layout_count == 0 &&
+         effects.chain.effects[0].fir_bands.bands[3].lfo_desc_id == 0);
+    const char* missing_zone_ref =
+        "{\"instrument_editor_bank\":{\"instruments\":[{\"id\":1,\"layers\":[{\"wave_a\":\"sine\"}]}],\"channels\":[{\"enabled\":true,\"zones\":[{\"start\":0}]}]}}";
+    TEST(Synth::decode_editor_bank_json(missing_zone_ref, static_cast<uint32_t>(strlen(missing_zone_ref)), &bank));
+    TEST(bank.bank.channel_zones[0][0].instrument == 0);
+    TEST(! portability_decode_bank("\"parameters\":[{\"id\":1,\"kind\":\"plain\",\"sources\":[{\"param_id\":999}]}]",
+                                   "{}",
+                                   &bank));
+}
+
 int main()
 {
     test_silence_stdout();
+    portability_bank_omission_cleanup();
+    portability_review_regressions();
+    portability_migration_and_examples();
+    portability_bank_sources_and_ccs();
+    portability_bank_graph_locators();
+    portability_bank_parameter_ids_and_reordering();
+    portability_bank_tags_and_effect_types();
     plan_batch_canvas_remap_regressions();
     plan_batch_oscillator_append_regressions();
     plan_batch_detached_lfo_width_regressions();

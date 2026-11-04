@@ -33,11 +33,12 @@ const char clipboard_alias_head[] =
 // (canonical numbering is input 0, sum 1, oscillator layer n = 2 + n, so this
 // one-layer zone owns no canonical index above 2), the volume envelope, the
 // volume LFO with its bound source pair.
-const char clipboard_doc_records[] = "{\"kind\":0,\"canonical_index\":1,\"x\":64,\"y\":32,\"width\":0,\"height\":0},"
-                                     "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":120.5,\"y\":44.25,\"width\":220,"
-                                     "\"height\":120},"
-                                     "{\"kind\":2,\"layer\":0,\"target\":0,\"depth_source\":4,\"rate_source\":2,"
-                                     "\"x\":12.5,\"y\":-8.5,\"width\":0,\"height\":0}";
+const char clipboard_doc_records[] =
+    "{\"kind\":\"sum\",\"x\":64,\"y\":32,\"width\":0,\"height\":0},"
+    "{\"kind\":\"envelope\",\"layer\":0,\"target\":\"volume\",\"x\":120.5,\"y\":44.25,\"width\":220,"
+    "\"height\":120},"
+    "{\"kind\":\"lfo\",\"layer\":0,\"target\":\"volume\",\"depth_source\":\"velocity\",\"rate_source\":\"mod_wheel\","
+    "\"x\":12.5,\"y\":-8.5,\"width\":0,\"height\":0}";
 
 static void sweep_tooltips(const Sculptor::Graph& graph,
                            TooltipExempt          exempt_slot,
@@ -1433,9 +1434,9 @@ static void check_clipboard_inline_0()
                         TEST(snprintf(good_doc,
                                       sizeof(good_doc),
                                       "{\"instrument_editor_bank\":{\"instruments\":"
-                                      "[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\","
+                                      "[{\"id\":1,\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\","
                                       "\"routing\":{\"fir_slope\":{\"base_value\":37}}}]}],"
-                                      "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}") > 0);
+                                      "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":1}]}]}}") > 0);
                         memset(static_cast<void*>(&good_bank), 0, sizeof(good_bank));
                         TEST(Synth::decode_editor_bank_json(good_doc,
                                                             static_cast<uint32_t>(strlen(good_doc)),
@@ -1448,9 +1449,9 @@ static void check_clipboard_inline_0()
                     TEST(snprintf(bad_doc,
                                   sizeof(bad_doc),
                                   "{\"instrument_editor_bank\":{\"instruments\":"
-                                  "[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\","
+                                  "[{\"id\":1,\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\","
                                   "\"routing\":{\"fir_slope\":{\"base_value\":%s}}}]}],"
-                                  "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}",
+                                  "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":1}]}]}}",
                                   bad) > 0);
                     memset(static_cast<void*>(&bad_bank), 0, sizeof(bad_bank));
                     TEST(! Synth::decode_editor_bank_json(bad_doc, static_cast<uint32_t>(strlen(bad_doc)), &bad_bank));
@@ -1523,9 +1524,9 @@ static void check_clipboard_inline_0()
                 // The same stored shape through the saved-bank codec.
                 const char* const stored_bank_doc =
                     "{\"instrument_editor_bank\":{\"instruments\":"
-                    "[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\",\"fir_slope\":37,"
+                    "[{\"id\":1,\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\",\"fir_slope\":37,"
                     "\"routing\":{}}]}],"
-                    "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}";
+                    "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":1}]}]}}";
                 const std::unique_ptr<Synth::InstrumentEditorBank> stored_bank_storage =
                     std::make_unique<Synth::InstrumentEditorBank>();
                 Synth::InstrumentEditorBank& stored_bank = *stored_bank_storage;
@@ -1600,8 +1601,8 @@ static void check_clipboard_inline_0()
             {
                 const char* const slope_layout_doc =
                     "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\"}],"
-                    "\"graph_layout\":[{\"kind\":1,\"x\":0,\"y\":0,\"width\":0,\"height\":0,"
-                    "\"layer\":0,\"target\":11}]}";
+                    "\"graph_layout\":[{\"kind\":\"envelope\",\"x\":0,\"y\":0,\"width\":0,\"height\":0,"
+                    "\"layer\":0,\"target\":\"fir_slope\"}]}";
                 for (const Synth::InstrumentJsonDomain domain : both_domains) {
                     fill_clipboard_sentinels(&slope_decoded);
                     fill_clipboard_sentinels(&slope_sentinel);
@@ -2914,7 +2915,7 @@ static void check_clipboard_inline_0()
                 std::make_unique<FixedArray<char, clipboard_capacity>>();
             char (&it_text)[clipboard_capacity] = it_text_storage->elements;
             const char* const it_records =
-                "{\"kind\":1,\"layer\":0,\"target\":1,\"x\":33.5,\"y\":4.5,\"width\":0,\"height\":0}";
+                "{\"kind\":\"envelope\",\"layer\":0,\"target\":\"pitch\",\"x\":33.5,\"y\":4.5,\"width\":0,\"height\":0}";
             build_layout_doc(it_text, sizeof(it_text), clipboard_alias_head, it_records);
             const std::unique_ptr<ClipboardDecode> it_dec_storage = std::make_unique<ClipboardDecode>();
             ClipboardDecode&                       it_dec         = *it_dec_storage;
@@ -2950,10 +2951,11 @@ static void check_clipboard_inline_0()
             const std::unique_ptr<FixedArray<char, clipboard_capacity>> dm_text_storage =
                 std::make_unique<FixedArray<char, clipboard_capacity>>();
             char (&dm_text)[clipboard_capacity] = dm_text_storage->elements;
-            build_layout_doc(dm_text,
-                             sizeof(dm_text),
-                             dm_head,
-                             "{\"kind\":1,\"layer\":0,\"target\":3,\"x\":10,\"y\":10,\"width\":0,\"height\":0}");
+            build_layout_doc(
+                dm_text,
+                sizeof(dm_text),
+                dm_head,
+                "{\"kind\":\"envelope\",\"layer\":0,\"target\":\"duty_a\",\"x\":10,\"y\":10,\"width\":0,\"height\":0}");
             const std::unique_ptr<ClipboardDecode> dm_attempt_storage = std::make_unique<ClipboardDecode>();
             ClipboardDecode&                       dm_attempt         = *dm_attempt_storage;
             fill_clipboard_sentinels(&dm_attempt);
@@ -3303,22 +3305,21 @@ static void check_clipboard_inline_0()
             };
 
             const LayoutRejection rejections[] = {
-                { "{\"kind\":0,\"canonical_index\":1,\"x\":0,\"y\":0,\"width\":0,\"height\":0,\"z\":1}",
-                  "unknown key" },
-                { "{\"kind\":0,\"canonical_index\":1,\"x\":0,\"y\":0,\"width\":0}", "missing required field" },
-                { "{\"kind\":0,\"x\":0,\"y\":0,\"width\":0,\"height\":0}", "locator key omitted at value zero" },
-                { "{\"kind\":0,\"canonical_index\":\"1\",\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
+
+                { "{\"kind\":\"sum\",\"x\":0,\"y\":0,\"width\":0}", "missing required field" },
+                { "{\"kind\":\"oscillator\",\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
+                  "locator key omitted at value zero" },
+                { "{\"kind\":\"oscillator\",\"layer\":\"bad\",\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
                   "wrong token type" },
-                { "{\"kind\":1,\"layer\":0,\"target\":0,\"canonical_index\":0,\"x\":0,\"y\":0,\"width\":0,"
-                  "\"height\":0}",
-                  "unrelated locator key" },
-                { "{\"kind\":1,\"layer\":0,\"x\":0,\"y\":0,\"width\":0,\"height\":0}", "missing locator field" },
-                { "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":1e400,\"y\":0,\"width\":0,\"height\":0}",
+
+                { "{\"kind\":\"envelope\",\"layer\":0,\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
+                  "missing locator field" },
+                { "{\"kind\":\"envelope\",\"layer\":0,\"target\":\"volume\",\"x\":1e400,\"y\":0,\"width\":0,\"height\":0}",
                   "overflowed number" },
-                { "{\"kind\":0,\"canonical_index\":9,\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
+                { "{\"kind\":\"oscillator\",\"layer\":7,\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
                   "canonical index beyond the bound" },
-                { "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":1,\"y\":1,\"width\":0,\"height\":0},"
-                  "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":2,\"y\":2,\"width\":0,\"height\":0}",
+                { "{\"kind\":\"envelope\",\"layer\":0,\"target\":\"volume\",\"x\":1,\"y\":1,\"width\":0,\"height\":0},"
+                  "{\"kind\":\"envelope\",\"layer\":0,\"target\":\"volume\",\"x\":2,\"y\":2,\"width\":0,\"height\":0}",
                   "duplicate portable locator" },
             };
             for (uint32_t i = 0; i < sizeof(rejections) / sizeof(rejections[0]); i++) {
@@ -3337,11 +3338,11 @@ static void check_clipboard_inline_0()
             // refusing the document: these are stale modulator positions
             // arriving from older banks and clips.
             const LayoutRejection drops[] = {
-                { "{\"kind\":1,\"layer\":7,\"target\":0,\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
+                { "{\"kind\":\"envelope\",\"layer\":7,\"target\":\"volume\",\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
                   "dropped layer out of range" },
-                { "{\"kind\":1,\"layer\":0,\"target\":99,\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
+                { "{\"kind\":\"envelope\",\"layer\":0,\"target\":\"unknown\",\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
                   "dropped unknown target" },
-                { "{\"kind\":2,\"layer\":0,\"target\":0,\"depth_source\":7,\"rate_source\":0,\"x\":0,\"y\":0,"
+                { "{\"kind\":\"lfo\",\"layer\":0,\"target\":\"volume\",\"depth_source\":\"cc\",\"rate_source\":\"none\",\"x\":0,\"y\":0,"
                   "\"width\":0,\"height\":0}",
                   "dropped source out of range" },
             };
@@ -3352,8 +3353,10 @@ static void check_clipboard_inline_0()
                 build_layout_doc(ml_bad, sizeof(ml_bad), clipboard_doc_head, drops[i].records);
                 fill_clipboard_sentinels(&ml_attempt);
                 TEST(decode_clipboard(&ml_attempt, ml_bad, max_portable_records));
-                TEST(ml_attempt.layout_count == 1); // the raw record survives the drop
-                TEST(ml_attempt.layout[0].x == 0.0f && ml_attempt.layout[0].y == 0.0f);
+                // Stale numeric layers retain raw locators; unknown names skip at decode.
+                TEST(ml_attempt.layout_count == (i == 0 ? 1u : 0u));
+                if (i == 0)
+                    TEST(ml_attempt.layout[0].x == 0.0f && ml_attempt.layout[0].y == 0.0f);
             }
 
             // An unregistered record kind is skipped by the generic decode path:
@@ -3377,20 +3380,22 @@ static void check_clipboard_inline_0()
             const std::unique_ptr<FixedArray<char, clipboard_capacity>> ml_alias_storage =
                 std::make_unique<FixedArray<char, clipboard_capacity>>();
             char (&ml_alias)[clipboard_capacity] = ml_alias_storage->elements;
-            build_layout_doc(ml_alias,
-                             sizeof(ml_alias),
-                             clipboard_alias_head,
-                             "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":1,\"y\":1,\"width\":0,\"height\":0}");
+            build_layout_doc(
+                ml_alias,
+                sizeof(ml_alias),
+                clipboard_alias_head,
+                "{\"kind\":\"envelope\",\"layer\":0,\"target\":\"volume\",\"x\":1,\"y\":1,\"width\":0,\"height\":0}");
             const std::unique_ptr<ClipboardDecode> ml_alias_baseline_storage = std::make_unique<ClipboardDecode>();
             ClipboardDecode&                       ml_alias_baseline         = *ml_alias_baseline_storage;
             fill_clipboard_sentinels(&ml_alias_baseline);
             TEST(decode_clipboard(&ml_alias_baseline, ml_alias, max_portable_records));
             TEST(ml_alias_baseline.env_count == 1);
-            build_layout_doc(ml_alias,
-                             sizeof(ml_alias),
-                             clipboard_alias_head,
-                             "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":1,\"y\":1,\"width\":0,\"height\":0},"
-                             "{\"kind\":1,\"layer\":0,\"target\":1,\"x\":2,\"y\":2,\"width\":0,\"height\":0}");
+            build_layout_doc(
+                ml_alias,
+                sizeof(ml_alias),
+                clipboard_alias_head,
+                "{\"kind\":\"envelope\",\"layer\":0,\"target\":\"volume\",\"x\":1,\"y\":1,\"width\":0,\"height\":0},"
+                "{\"kind\":\"envelope\",\"layer\":0,\"target\":\"pitch\",\"x\":2,\"y\":2,\"width\":0,\"height\":0}");
             fill_clipboard_sentinels(&ml_attempt);
             TEST(decode_clipboard(&ml_attempt, ml_alias, max_portable_records) == false);
             TEST(clipboard_sentinels_intact(&ml_attempt, &ml_sentinel));
@@ -3408,12 +3413,13 @@ static void check_clipboard_inline_0()
                                                               "%s\"graph_layout\":[",
                                                               clipboard_doc_head));
                 for (uint32_t r = 0; r <= max_portable_records; r++) {
-                    ml_over_pos += static_cast<uint32_t>(snprintf(ml_over + ml_over_pos,
-                                                                  sizeof(ml_over) - ml_over_pos,
-                                                                  "{\"kind\":0,\"canonical_index\":%u,\"x\":0,\"y\":0,"
-                                                                  "\"width\":0,\"height\":0}%s",
-                                                                  r % Synth::graph_canonical_node_count,
-                                                                  r == max_portable_records ? "" : ","));
+                    ml_over_pos +=
+                        static_cast<uint32_t>(snprintf(ml_over + ml_over_pos,
+                                                       sizeof(ml_over) - ml_over_pos,
+                                                       "{\"kind\":\"oscillator\",\"layer\":%u,\"x\":0,\"y\":0,"
+                                                       "\"width\":0,\"height\":0}%s",
+                                                       r % Synth::max_layers,
+                                                       r == max_portable_records ? "" : ","));
                 }
                 // Built by hand rather than through build_layout_doc, so it closes the
                 // record array and the document object itself.
@@ -3704,8 +3710,8 @@ static void check_clipboard_inline_0()
             build_layout_doc(nw_text,
                              sizeof(nw_text),
                              nw_head,
-                             "{\"kind\":0,\"canonical_index\":0,\"x\":1,\"y\":2,\"width\":0,\"height\":0},"
-                             "{\"kind\":0,\"canonical_index\":1,\"x\":3,\"y\":4,\"width\":5,\"height\":6}");
+                             "{\"kind\":\"input\",\"x\":1,\"y\":2,\"width\":0,\"height\":0},"
+                             "{\"kind\":\"sum\",\"x\":3,\"y\":4,\"width\":5,\"height\":6}");
             TEST(decode_clipboard(&nw_dec, nw_text, max_portable_records));
             TEST(nw_dec.layout_count == 2);
             TEST(nw_dec.env_count == 0);
@@ -3728,8 +3734,8 @@ static void check_clipboard_inline_0()
             TEST(nw_mapped[0].name[0] == 0);
 
             const char* const surplus[] = {
-                "{\"kind\":0,\"canonical_index\":3,\"x\":1,\"y\":2,\"width\":0,\"height\":0}",  // oscillator layer 1
-                "{\"kind\":0,\"canonical_index\":99,\"x\":1,\"y\":2,\"width\":0,\"height\":0}", // past the bound
+                "{\"kind\":\"oscillator\",\"layer\":1,\"x\":1,\"y\":2,\"width\":0,\"height\":0}",  // oscillator layer 1
+                "{\"kind\":\"oscillator\",\"layer\":97,\"x\":1,\"y\":2,\"width\":0,\"height\":0}", // past the bound
             };
             for (uint32_t i = 0; i < sizeof(surplus) / sizeof(surplus[0]); i++) {
                 const std::unique_ptr<FixedArray<char, clipboard_capacity>> nw_bad_storage =
@@ -3753,10 +3759,11 @@ static void check_clipboard_inline_0()
             char (&nw_drop)[clipboard_capacity]                            = nw_drop_storage->elements;
             const std::unique_ptr<ClipboardDecode> nw_drop_attempt_storage = std::make_unique<ClipboardDecode>();
             ClipboardDecode&                       nw_drop_attempt         = *nw_drop_attempt_storage;
-            build_layout_doc(nw_drop,
-                             sizeof(nw_drop),
-                             nw_head,
-                             "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":1,\"y\":2,\"width\":0,\"height\":0}");
+            build_layout_doc(
+                nw_drop,
+                sizeof(nw_drop),
+                nw_head,
+                "{\"kind\":\"envelope\",\"layer\":0,\"target\":\"volume\",\"x\":1,\"y\":2,\"width\":0,\"height\":0}");
             fill_clipboard_sentinels(&nw_drop_attempt);
             TEST(decode_clipboard(&nw_drop_attempt, nw_drop, max_portable_records));
             TEST(nw_drop_attempt.layout_count == 1);
@@ -3771,20 +3778,19 @@ static void check_clipboard_inline_0()
             const std::unique_ptr<FixedArray<char, clipboard_capacity>> old_doc_storage =
                 std::make_unique<FixedArray<char, clipboard_capacity>>();
             char (&old_doc)[clipboard_capacity] = old_doc_storage->elements;
-            const int old_written =
-                snprintf(old_doc,
-                         sizeof(old_doc),
-                         "{\"format\":\"synth-instrument-v1\",\"note_skew_semitones\":0,\"layer_skew_semitones\":0,"
-                         "\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"base\":0.8,"
-                         "\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0.5},"
-                         "{\"time_seconds\":0.5,\"level\":0.25}]}},"
-                         "\"lowpass_cutoff\":{\"base\":2000},\"highpass_cutoff\":{\"base\":500}}],"
-                         "\"graph_layout\":["
-                         "{\"kind\":1,\"layer\":0,\"target\":7,\"x\":10,\"y\":11,\"width\":0,\"height\":0},"
-                         "{\"kind\":2,\"layer\":0,\"target\":8,\"depth_source\":%u,\"rate_source\":0,"
-                         "\"x\":12,\"y\":13,\"width\":0,\"height\":0},"
-                         "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":14,\"y\":15,\"width\":0,\"height\":0}]}",
-                         static_cast<unsigned>(Synth::ModSource::velocity));
+            const int old_written               = snprintf(
+                old_doc,
+                sizeof(old_doc),
+                "{\"format\":\"synth-instrument-v1\",\"note_skew_semitones\":0,\"layer_skew_semitones\":0,"
+                "\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"base\":0.8,"
+                "\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0.5},"
+                "{\"time_seconds\":0.5,\"level\":0.25}]}},"
+                "\"lowpass_cutoff\":{\"base\":2000},\"highpass_cutoff\":{\"base\":500}}],"
+                "\"graph_layout\":["
+                "{\"kind\":\"envelope\",\"layer\":0,\"target\":\"fir_pitch_spread\",\"x\":10,\"y\":11,\"width\":0,\"height\":0},"
+                "{\"kind\":\"lfo\",\"layer\":0,\"target\":\"lowpass_cutoff\",\"depth_source\":\"velocity\",\"rate_source\":\"none\","
+                "\"x\":12,\"y\":13,\"width\":0,\"height\":0},"
+                "{\"kind\":\"envelope\",\"layer\":0,\"target\":\"volume\",\"x\":14,\"y\":15,\"width\":0,\"height\":0}]}");
             TEST(old_written > 0 && static_cast<uint32_t>(old_written) < sizeof(old_doc));
             Synth::Instrument            old_instr                                 = {};
             Synth::EnvelopeDescriptor    old_envs[Synth::instrument_max_envelopes] = {};
@@ -3804,7 +3810,7 @@ static void check_clipboard_inline_0()
                                                           max_portable_records,
                                                           &old_layout_count,
                                                           Synth::InstrumentJsonDomain::validated_bank));
-            TEST(old_layout_count == 3); // the raw records survive the decode
+            TEST(old_layout_count == 2); // unknown target name skips; known stale locators stay raw
             Synth::GraphNodeLayout old_mapped[4]    = {};
             uint32_t               old_mapped_count = 4;
             TEST(Sculptor::map_instrument_graph_layout(old_instr,
@@ -3845,15 +3851,15 @@ static void check_clipboard_inline_0()
             const std::unique_ptr<FixedArray<char, clipboard_capacity>> new_doc_storage =
                 std::make_unique<FixedArray<char, clipboard_capacity>>();
             char (&new_doc)[clipboard_capacity] = new_doc_storage->elements;
-            const int new_written =
-                snprintf(new_doc,
-                         sizeof(new_doc),
-                         "{\"format\":\"synth-instrument-v1\",\"note_skew_semitones\":0,\"layer_skew_semitones\":0,"
-                         "\"layers\":[{\"wave_a\":\"sine\",\"fir_pitch_spread\":{\"base\":3,"
-                         "\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0.5},"
-                         "{\"time_seconds\":0.5,\"level\":0.25}]}}}],"
-                         "\"graph_layout\":["
-                         "{\"kind\":1,\"layer\":0,\"target\":7,\"x\":21,\"y\":22,\"width\":0,\"height\":0}]}");
+            const int new_written               = snprintf(
+                new_doc,
+                sizeof(new_doc),
+                "{\"format\":\"synth-instrument-v1\",\"note_skew_semitones\":0,\"layer_skew_semitones\":0,"
+                "\"layers\":[{\"wave_a\":\"sine\",\"fir_pitch_spread\":{\"base\":3,"
+                "\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0.5},"
+                "{\"time_seconds\":0.5,\"level\":0.25}]}}}],"
+                "\"graph_layout\":["
+                "{\"kind\":\"envelope\",\"layer\":0,\"target\":\"fir_pitch_spread\",\"x\":21,\"y\":22,\"width\":0,\"height\":0}]}");
             TEST(new_written > 0 && static_cast<uint32_t>(new_written) < sizeof(new_doc));
             Synth::Instrument            new_instr                                 = {};
             Synth::EnvelopeDescriptor    new_envs[Synth::instrument_max_envelopes] = {};
@@ -4730,11 +4736,13 @@ static void check_clipboard_inline_0()
                 fclose(example_file);
             }
             TEST(got > 0 && got < sizeof(example) - 1);
-            Synth::Instrument         example_instr                                 = {};
-            Synth::EnvelopeDescriptor example_envs[Synth::instrument_max_envelopes] = {};
-            Synth::LFODescriptor      example_lfos[Synth::instrument_max_lfos]      = {};
-            uint32_t                  example_env_count                             = 0;
-            uint32_t                  example_lfo_count                             = 0;
+            Synth::Instrument            example_instr                                           = {};
+            Synth::EnvelopeDescriptor    example_envs[Synth::instrument_max_envelopes]           = {};
+            Synth::LFODescriptor         example_lfos[Synth::instrument_max_lfos]                = {};
+            Synth::InstrumentGraphLayout example_layout[Synth::instrument_graph_layout_capacity] = {};
+            uint32_t                     example_layout_count                                    = 0;
+            uint32_t                     example_env_count                                       = 0;
+            uint32_t                     example_lfo_count                                       = 0;
             if (got > 0) {
                 TEST(Synth::decode_instrument_json(example,
                                                    static_cast<uint32_t>(got),
@@ -4742,7 +4750,10 @@ static void check_clipboard_inline_0()
                                                    example_envs,
                                                    &example_env_count,
                                                    example_lfos,
-                                                   &example_lfo_count));
+                                                   &example_lfo_count,
+                                                   example_layout,
+                                                   Synth::instrument_graph_layout_capacity,
+                                                   &example_layout_count));
                 TEST(example_instr.layer_count == 2);
                 TEST(example_instr.layers[0].osc_mode == Synth::osc_mode_fm);
                 TEST(example_env_count == 2);
@@ -4850,9 +4861,221 @@ static void check_clipboard_inline_0()
     }
 }
 
+static void portability_clipboard_sources_and_locators()
+{
+    static ClipboardDecode             decoded;
+    static Synth::InstrumentEditorBank bank;
+    static char                        text[65536], encoded[256 * 1024], again[256 * 1024];
+    uint8_t                            sources[Synth::max_layers];
+    char                               ignored[64][48];
+    const auto decode = [&](const char* source_field, const char* records, Synth::InstrumentJsonDomain domain) {
+        snprintf(
+            text,
+            sizeof(text),
+            "{\"format\":\"synth-instrument-v2\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"base\":1}}],%s\"graph_layout\":[%s]}",
+            source_field,
+            records);
+        memset(sources, 0xAA, sizeof(sources));
+        return Synth::decode_instrument_json_for_domain(text,
+                                                        static_cast<uint32_t>(strlen(text)),
+                                                        &decoded.instr,
+                                                        decoded.envs,
+                                                        &decoded.env_count,
+                                                        decoded.lfos,
+                                                        &decoded.lfo_count,
+                                                        decoded.layout,
+                                                        max_portable_records,
+                                                        &decoded.layout_count,
+                                                        domain,
+                                                        sources);
+    };
+    TEST(decode("", "", Synth::InstrumentJsonDomain::clipboard));
+    TEST(sources[0] == 1);
+    for (uint32_t s = 1; s < Synth::max_layers; ++s)
+        TEST(sources[s] == 0);
+    TEST(decode("\"osc_sources\":[],", "", Synth::InstrumentJsonDomain::clipboard));
+    const uint8_t zero[Synth::max_layers] = {};
+    TEST(memcmp(sources, zero, sizeof(zero)) == 0);
+    bank = {};
+    Synth::init_default_bank(&bank.bank);
+    bank.bank.instruments.entries[bank.bank.channel_zones[0][0].instrument] = decoded.instr;
+    uint32_t n = Sculptor::encode_editor_instrument_json(bank,
+                                                         0,
+                                                         0,
+                                                         encoded,
+                                                         sizeof(encoded),
+                                                         Synth::InstrumentJsonDomain::clipboard);
+    TEST(n > 0);
+    if (n) {
+        encoded[n] = 0;
+        TEST(strstr(encoded, "\"osc_sources\":[]") != nullptr);
+        TEST(strstr(encoded, "synth-instrument-v2") != nullptr);
+        TEST(Synth::decode_instrument_json_for_domain(encoded,
+                                                      n,
+                                                      &decoded.instr,
+                                                      decoded.envs,
+                                                      &decoded.env_count,
+                                                      decoded.lfos,
+                                                      &decoded.lfo_count,
+                                                      decoded.layout,
+                                                      max_portable_records,
+                                                      &decoded.layout_count,
+                                                      Synth::InstrumentJsonDomain::clipboard,
+                                                      sources));
+        TEST(memcmp(sources, zero, sizeof(zero)) == 0);
+        bank.bank.instruments.entries[bank.bank.channel_zones[0][0].instrument] = decoded.instr;
+        memcpy(bank.graph_osc_source[0][0], sources, sizeof(sources));
+        const uint32_t m = Sculptor::encode_editor_instrument_json(bank,
+                                                                   0,
+                                                                   0,
+                                                                   again,
+                                                                   sizeof(again),
+                                                                   Synth::InstrumentJsonDomain::clipboard);
+        TEST(m == n && memcmp(encoded, again, n) == 0);
+    }
+    Synth::take_ignored_fields(ignored, 64);
+    TEST(decode("\"osc_sources\":[0,0,0,0,0,0,0],", "", Synth::InstrumentJsonDomain::clipboard));
+    TEST(sources[0] == 1); // legacy whole key skipped, absent-key identity
+    TEST(Synth::take_ignored_fields(ignored, 64) > 0);
+    TEST(decode("\"osc_sources\":[{\"slot\":6,\"layer\":1}],", "", Synth::InstrumentJsonDomain::clipboard));
+    TEST(sources[0] == 0 && sources[6] == 1);
+    TEST(! decode("\"osc_sources\":[{\"slot\":0,\"layer\":2}],", "", Synth::InstrumentJsonDomain::clipboard));
+    Synth::take_ignored_fields(ignored, 64);
+    TEST(decode("\"osc_sources\":[{\"slot\":7,\"layer\":1}],", "", Synth::InstrumentJsonDomain::clipboard));
+    TEST(Synth::take_ignored_fields(ignored, 64) > 0);
+    Synth::take_ignored_fields(ignored, 64);
+    TEST(decode("\"osc_sources\":[{\"slot\":0,\"layer\":1}],", "", Synth::InstrumentJsonDomain::validated_bank));
+    TEST(Synth::take_ignored_fields(ignored, 64) > 0);
+
+    const char* records[] = { "{\"kind\":\"input\",\"x\":10,\"y\":0,\"width\":0,\"height\":0}",
+                              "{\"kind\":\"sum\",\"x\":11,\"y\":0,\"width\":0,\"height\":0}",
+                              "{\"kind\":\"oscillator\",\"layer\":0,\"x\":12,\"y\":0,\"width\":0,\"height\":0}" };
+    for (uint32_t i = 0; i < 3; ++i) {
+        TEST(decode("\"osc_sources\":[],", records[i], Synth::InstrumentJsonDomain::clipboard));
+        TEST(decoded.layout_count == 1);
+        TEST(decoded.layout[0].kind == Synth::instrument_graph_layout_canonical &&
+             decoded.layout[0].canonical_index == i);
+        n = Synth::encode_instrument_json(encoded,
+                                          sizeof(encoded),
+                                          &decoded.instr,
+                                          &bank.bank,
+                                          decoded.layout,
+                                          decoded.layout_count);
+        TEST(n > 0);
+        if (! n)
+            continue;
+        TEST(Synth::decode_instrument_json(encoded,
+                                           n,
+                                           &decoded.instr,
+                                           decoded.envs,
+                                           &decoded.env_count,
+                                           decoded.lfos,
+                                           &decoded.lfo_count,
+                                           decoded.layout,
+                                           max_portable_records,
+                                           &decoded.layout_count));
+        const uint32_t m = Synth::encode_instrument_json(again,
+                                                         sizeof(again),
+                                                         &decoded.instr,
+                                                         &bank.bank,
+                                                         decoded.layout,
+                                                         decoded.layout_count);
+        TEST(m == n && memcmp(encoded, again, n) == 0);
+    }
+    for (const char* kind : { "0", "1", "2", "3", "\"future\"" }) {
+        char record[256];
+        snprintf(record, sizeof(record), "{\"kind\":%s,\"layer\":255,\"target\":255}", kind);
+        Synth::take_ignored_fields(ignored, 64);
+        TEST(decode("", record, Synth::InstrumentJsonDomain::clipboard));
+        TEST(decoded.layout_count == 0 && Synth::take_ignored_fields(ignored, 64) > 0);
+    }
+    TEST(! decode("",
+                  "{\"kind\":\"oscillator\",\"layer\":255,\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
+                  Synth::InstrumentJsonDomain::clipboard));
+    for (const char* tag : { "synth-instrument-v1", "wrong", "" }) {
+        snprintf(text,
+                 sizeof(text),
+                 "{%s%s%s\"layers\":[{\"wave_a\":\"sine\"}]}",
+                 *tag ? "\"format\":\"" : "",
+                 tag,
+                 *tag ? "\"," : "");
+        Synth::take_ignored_fields(ignored, 64);
+        TEST(decode_clipboard(&decoded, text, max_portable_records));
+        TEST(Synth::take_ignored_fields(ignored, 64) > 0);
+    }
+}
+
+static void portability_clipboard_generator_locators_and_roles()
+{
+    static ClipboardDecode             decoded;
+    static Synth::InstrumentEditorBank bank;
+    static Synth::Instrument           instrument;
+    static Sculptor::Graph             graph;
+    static Sculptor::OscGraphMapping   mapping;
+    static char                        text[8192], encoded[256 * 1024];
+    const char*                        roles[] = { "none",     "pitch_bend", "mod_wheel",       "channel_pressure",
+                                                   "velocity", "aftertouch", "pressure_combine" };
+    static_assert(Synth::graph_canonical_input_count == 6);
+    build_zone_fixture(&bank, &instrument);
+    TEST(Sculptor::project_instrument_to_graph(instrument, bank.bank, &graph, &mapping));
+    const char* labels[] = { "Pitch bend", "Mod wheel", "Channel press.", "Velocity", "Aftertouch", "Pressure (max)" };
+    // UI display order is deliberately not enum order. Pin semantic lookup,
+    // not absolute slot index: projection stores each dot at [ModSource-1].
+    for (uint32_t r = 1; r <= 6; ++r) {
+        const auto slot = mapping.input_source_slots[r - 1];
+        TEST(slot != Sculptor::pool_no_slot);
+        TEST(graph.node(mapping.input_node).slots.entries[slot].kind == Sculptor::SlotKind::output);
+        TEST(strcmp(graph.node(mapping.input_node).slots.entries[slot].name, labels[r - 1]) == 0);
+    }
+    for (uint32_t r = 0; r <= 6; ++r) {
+        snprintf(
+            text,
+            sizeof(text),
+            "{\"format\":\"synth-instrument-v2\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"base\":1,"
+            "\"envelope\":{\"envelope_id\":19,\"points\":[{\"time_seconds\":0,\"level\":0},{\"time_seconds\":0.1,\"level\":1}],\"sustain_start\":0,\"sustain_end\":1},"
+            "\"lfo\":{\"lfo_id\":23,\"wave\":\"sine\",\"frequency_hz\":4,\"depth\":0.5,\"depth_source\":\"%s\",\"rate_source\":\"%s\"}}}],"
+            "\"osc_sources\":[],\"graph_layout\":[{\"kind\":\"envelope\",\"layer\":0,\"target\":\"volume\",\"name\":\"Envelope title\",\"x\":10,\"y\":0,\"width\":0,\"height\":0},"
+            "{\"kind\":\"lfo\",\"layer\":0,\"target\":\"volume\",\"depth_source\":\"%s\",\"rate_source\":\"%s\",\"name\":\"LFO title\",\"x\":20,\"y\":0,\"width\":0,\"height\":0}]}",
+            roles[r],
+            roles[6 - r],
+            roles[r],
+            roles[6 - r]);
+        TEST(decode_clipboard(&decoded, text, max_portable_records));
+        TEST(decoded.layout_count == 2 && decoded.env_count == 1 && decoded.lfo_count == 1);
+        TEST(decoded.instr.layers[0].targets[Synth::mod_volume].envelope_desc_id == 1);
+        TEST(decoded.instr.layers[0].targets[Synth::mod_volume].lfo_desc_id == 1);
+        TEST(decoded.layout[0].kind == 1 && decoded.layout[0].target == Synth::mod_volume);
+        TEST(decoded.layout[1].kind == 2 && decoded.layout[1].depth_source == r &&
+             decoded.layout[1].rate_source == 6 - r);
+        TEST(strcmp(decoded.layout[1].name, "LFO title") == 0);
+        bank                                              = {};
+        uint16_t env_ids[Synth::instrument_max_envelopes] = {}, lfo_ids[Synth::instrument_max_lfos] = {};
+        TEST(Synth::remap_envelopes(&bank.bank, decoded.envs, decoded.env_count, env_ids));
+        TEST(Synth::remap_lfos(&bank.bank, decoded.lfos, decoded.lfo_count, lfo_ids));
+        Synth::remap_instrument(decoded.instr, env_ids, lfo_ids, &instrument);
+        const uint32_t n = Synth::encode_instrument_json(encoded,
+                                                         sizeof(encoded),
+                                                         &instrument,
+                                                         &bank.bank,
+                                                         decoded.layout,
+                                                         decoded.layout_count);
+        TEST(n > 0);
+        if (n) {
+            encoded[n] = 0;
+            TEST(strstr(encoded, "\"kind\":\"envelope\"") != nullptr);
+            TEST(strstr(encoded, "\"kind\":\"lfo\"") != nullptr);
+            TEST(strstr(encoded, "\"target\":\"volume\"") != nullptr);
+            TEST(decode_clipboard(&decoded, encoded, max_portable_records));
+            TEST(decoded.layout[1].depth_source == r && decoded.layout[1].rate_source == 6 - r);
+        }
+    }
+}
+
 int main()
 {
     test_silence_stdout();
+    portability_clipboard_sources_and_locators();
+    portability_clipboard_generator_locators_and_roles();
     check_shared_instrument_json_domains();
     check_clipboard_inline_0();
     return test_exit_code();

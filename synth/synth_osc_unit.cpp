@@ -4386,13 +4386,14 @@ static void osc_instrument_node_layout_regressions()
         const std::unique_ptr<Synth::InstrumentEditorBank> refused_storage =
             std::make_unique<Synth::InstrumentEditorBank>();
         Synth::InstrumentEditorBank& refused = *refused_storage;
-        TEST(! decode_bank_with_editor_section(source, overkind, &refused));
+        TEST(decode_bank_with_editor_section(source, overkind, &refused));
+        TEST(refused.graph_layout_count == 0); // Numeric unknown kinds skip before validation.
 
         // A kind-5 record with a nonzero uid refuses in the decode too.
         char      baduid[256];
         const int uid_printed = snprintf(baduid,
                                          sizeof(baduid),
-                                         "{\"layouts\":[{\"channel\":0,\"zone\":0,\"kind\":5,\"uid\":2,"
+                                         "{\"layouts\":[{\"channel\":0,\"zone\":0,\"kind\":\"parameters\",\"uid\":2,"
                                          "\"x\":1.0,\"y\":2.0,\"width\":0.0,\"height\":0.0}]}");
         TEST(uid_printed > 0);
         TEST(! decode_bank_with_editor_section(source, baduid, &refused));
@@ -4404,13 +4405,14 @@ static void osc_instrument_node_layout_regressions()
                                            "{\"layouts\":[{\"channel\":0,\"zone\":0,\"kind\":5,\"index\":3,"
                                            "\"x\":1.0,\"y\":2.0,\"width\":0.0,\"height\":0.0}]}");
         TEST(index_printed > 0);
-        TEST(! decode_bank_with_editor_section(source, badindex, &refused));
+        TEST(decode_bank_with_editor_section(source, badindex, &refused));
+        TEST(refused.graph_layout_count == 0); // Legacy numeric record is skipped, even with an invalid index.
 
         // A plain kind-5 record decodes and applies through the editor JSON.
         char      good[256];
         const int good_printed = snprintf(good,
                                           sizeof(good),
-                                          "{\"layouts\":[{\"channel\":0,\"zone\":0,\"kind\":5,"
+                                          "{\"layouts\":[{\"channel\":0,\"zone\":0,\"kind\":\"parameters\","
                                           "\"x\":304.0,\"y\":192.0,\"width\":0.0,\"height\":0.0}]}");
         TEST(good_printed > 0);
         const std::unique_ptr<Synth::InstrumentEditorBank> applied_storage =

@@ -1,69 +1,122 @@
 {
-	"format": "synth-instrument-v1",
-	"note_skew_semitones": 0.02,
-	"layer_skew_semitones": 0.05,
-	"layers": [
-		{
-			"wave_a": "sine",
-			"wave_b": "sawtooth",
-			"mode": "fm",
-			"mod_ratio": 2.0,
-			"volume": {
-				"base": 0.8,
-				"envelope": {
-					"points": [
-						{ "time_seconds": 0.0, "level": 0.0 },
-						{ "time_seconds": 0.01, "level": 1.0 },
-						{ "time_seconds": 0.25, "level": 0.7 },
-						{ "time_seconds": 0.6, "level": 0.5 }
-					],
-					"sustain_start": 3,
-					"sustain_end": 3
-				},
-				"lfo": {
-					"wave": "sine",
-					"frequency_hz": 5.5,
-					"min_level": 0.0,
-					"max_level": 0.1,
-					"op": "add",
-					"depth": 1.0
-				},
-				"sources": [
-					{ "source": "velocity", "op": "add", "scale": 0.4 }
-				]
-			},
-			"pitch": {
-				"base": 0.0,
-				"lfo": {
-					"wave": "sine",
-					"frequency_hz": 5.5,
-					"min_level": -0.15,
-					"max_level": 0.15,
-					"depth": 0.5,
-					"depth_source": "mod_wheel"
-				}
-			},
-			"panning": { "base": 0.5 },
-			"fm_index": { "base": 0.75 }
-		},
-		{
-			"wave_a": "pulse",
-			"wave_b": "none",
-			"mode": "blend",
-			"volume": {
-				"envelope": {
-					"points": [
-						{ "time_seconds": 0.0, "level": 0.0 },
-						{ "time_seconds": 0.02, "level": 0.4 }
-					]
-				}
-			},
-			"fir_type": "bandpass", "fir_bands": 2,
-			"fir_band0_offset": { "base": -3.0 }, "fir_band0_gain": { "base": 0.8 },
-			"fir_band1_offset": { "base": 4.0 }, "fir_band1_spread": { "base": 5.0 },
-			"fir_band1_gain": { "base": 0.6 }, "fir_band1_slope": { "base": 80 },
-			"duty_a": { "base": 0.25 }
-		}
-	],
-  "graph_layout": []
+  "format": "synth-instrument-v2",
+  "note_skew_semitones": 0.02,
+  "layer_skew_semitones": 0.05,
+  "layers": [
+    {
+      "wave_a": "sine",
+      "wave_b": "sawtooth",
+      "mode": "fm",
+      "mod_ratio": 2.0,
+      "volume": {
+        "base": 0.8,
+        "envelope": {
+          "points": [
+            {
+              "time_seconds": 0.0,
+              "level": 0.0
+            },
+            {
+              "time_seconds": 0.01,
+              "level": 1.0
+            },
+            {
+              "time_seconds": 0.25,
+              "level": 0.7
+            },
+            {
+              "time_seconds": 0.6,
+              "level": 0.5
+            }
+          ],
+          "sustain_start": 3,
+          "sustain_end": 3
+        },
+        "lfo": {
+          "wave": "sine",
+          "frequency_hz": 5.5,
+          "min_level": 0.0,
+          "max_level": 0.1,
+          "op": "add",
+          "depth": 1.0
+        },
+        "sources": [
+          {
+            "source": "velocity",
+            "op": "add",
+            "scale": 0.4
+          }
+        ]
+      },
+      "pitch": {
+        "base": 0.0,
+        "lfo": {
+          "wave": "sine",
+          "frequency_hz": 5.5,
+          "min_level": -0.15,
+          "max_level": 0.15,
+          "depth": 0.5,
+          "depth_source": "mod_wheel"
+        }
+      },
+      "panning": {
+        "base": 0.5
+      },
+      "fm_index": {
+        "base": 0.75
+      }
+    },
+    {
+      "wave_a": "pulse",
+      "wave_b": "none",
+      "mode": "blend",
+      "volume": {
+        "envelope": {
+          "points": [
+            {
+              "time_seconds": 0.0,
+              "level": 0.0
+            },
+            {
+              "time_seconds": 0.02,
+              "level": 0.4
+            }
+          ]
+        }
+      },
+      "fir_type": "bandpass",
+      "fir_bands": 2,
+      "fir_band0_offset": {
+        "base": -3.0
+      },
+      "fir_band0_gain": {
+        "base": 0.8
+      },
+      "fir_band1_offset": {
+        "base": 4.0
+      },
+      "fir_band1_spread": {
+        "base": 5.0
+      },
+      "fir_band1_gain": {
+        "base": 0.6
+      },
+      "fir_band1_slope": {
+        "base": 80
+      },
+      "duty_a": {
+        "base": 0.25
+      }
+    }
+  ],
+  "graph_layout": [
+    {
+      "kind": "input",
+      "x": 1,
+      "y": 2,
+      "width": 0,
+      "height": 0
+    }
+  ],
+  "osc_sources": []
 }

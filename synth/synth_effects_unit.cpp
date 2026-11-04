@@ -3,6 +3,40 @@
 
 #include "synth_test_common.h"
 
+// PROVISIONAL spellings for named-param fixtures; realign here after user review.
+#define PORTABILITY_DRIVE       "drive"
+#define PORTABILITY_MIX         "mix"
+#define PORTABILITY_OUTPUT_GAIN "output_gain"
+#define PORTABILITY_TIME        "time"
+#define PORTABILITY_FEEDBACK    "feedback"
+#define PORTABILITY_RATE        "rate"
+#define PORTABILITY_DEPTH       "depth"
+#define PORTABILITY_CENTER      "center"
+#define PORTABILITY_ROOM        "room"
+#define PORTABILITY_DAMPING     "damping"
+#define PORTABILITY_WET         "wet"
+#define PORTABILITY_THRESHOLD   "threshold"
+#define PORTABILITY_RATIO       "ratio"
+#define PORTABILITY_ATTACK      "attack"
+#define PORTABILITY_RELEASE     "release"
+#define PORTABILITY_LOWPASS     "lowpass"
+#define PORTABILITY_HIGHPASS    "highpass"
+#define PORTABILITY_SLOPE       "slope"
+
+// PROVISIONAL parameter keys: single-point realignment after the user reviews
+// the explicit codec key table at the start of IMPLEMENT. Enum order, not menu order.
+static const char* const portability_param_keys[Synth::num_effect_types][Synth::max_effect_param_floats] = {
+    {},
+    { PORTABILITY_DRIVE, PORTABILITY_MIX, PORTABILITY_OUTPUT_GAIN },
+    { PORTABILITY_TIME, PORTABILITY_FEEDBACK, PORTABILITY_MIX },
+    { PORTABILITY_RATE, PORTABILITY_DEPTH, PORTABILITY_MIX, PORTABILITY_CENTER },
+    { PORTABILITY_ROOM, PORTABILITY_DAMPING, PORTABILITY_WET },
+    { PORTABILITY_THRESHOLD, PORTABILITY_RATIO, PORTABILITY_ATTACK, PORTABILITY_RELEASE, PORTABILITY_OUTPUT_GAIN },
+    { PORTABILITY_LOWPASS, PORTABILITY_HIGHPASS, PORTABILITY_SLOPE },
+    { PORTABILITY_RATE, PORTABILITY_MIX },
+    { PORTABILITY_LOWPASS, PORTABILITY_HIGHPASS, PORTABILITY_SLOPE }
+};
+
 static void effects_input_gesture_regressions(Synth::InstrumentEditorBank*  source,
                                               Synth::InstrumentEditorBank*  candidate,
                                               Synth::InstrumentEditorBank*  snapshot,
@@ -1471,7 +1505,7 @@ static void effects_clipboard_regressions()
             char (&encoded)[65536] = encoded_storage->elements;
             const uint32_t len     = Synth::encode_effects_json(&two_param, encoded, sizeof(encoded));
             TEST(len > 0);
-            const char* const                              first_binding = "{\"base_value\":8000},";
+            const char* const first_binding = "\"" PORTABILITY_LOWPASS "\":{\"base_value\":8000},";
             const std::unique_ptr<FixedArray<char, 65536>> spliced_storage =
                 std::make_unique<FixedArray<char, 65536>>();
             char (&spliced)[65536] = spliced_storage->elements;
@@ -1552,7 +1586,7 @@ static void effects_clipboard_regressions()
                 char (&bank_payload)[Synth::library_payload_max] = bank_payload_storage->elements;
                 const uint32_t bank_len = Synth::encode_editor_bank_json(&bank, bank_payload, sizeof(bank_payload));
                 TEST(bank_len > 0);
-                const char* const first_binding = "{\"base_value\":8000},";
+                const char* const first_binding = "\"" PORTABILITY_LOWPASS "\":{\"base_value\":8000},";
                 const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> spliced_storage =
                     std::make_unique<FixedArray<char, Synth::library_payload_max>>();
                 char (&spliced)[Synth::library_payload_max] = spliced_storage->elements;
@@ -1727,11 +1761,12 @@ static void effects_clipboard_regressions()
                 // Hand-written stored payloads state no fm_ratio routing at all, so
                 // the decode genuinely takes the backfill branch (the encoder always
                 // emits the entry, which would mask the branch).
-                const char* const stored_doc = "{\"instrument_editor_bank\":{\"instruments\":"
-                                               "[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\",\"mod_ratio\":2,"
-                                               "\"routing\":{}}]}],"
-                                               "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}";
-                const uint32_t    stored_len = static_cast<uint32_t>(strlen(stored_doc));
+                const char* const stored_doc =
+                    "{\"instrument_editor_bank\":{\"instruments\":"
+                    "[{\"id\":1,\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\",\"mod_ratio\":2,"
+                    "\"routing\":{}}]}],"
+                    "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":1}]}]}}";
+                const uint32_t stored_len = static_cast<uint32_t>(strlen(stored_doc));
                 const std::unique_ptr<Synth::InstrumentEditorBank> stored_decoded_storage =
                     std::make_unique<Synth::InstrumentEditorBank>();
                 Synth::InstrumentEditorBank& stored_decoded = *stored_decoded_storage;
@@ -1807,7 +1842,8 @@ static void effects_clipboard_regressions()
         }
     }
 
-    // The authored example uses the production codec, including aliases and a layout-only LFO.
+    // The authored example uses the production codec, including shared LFO
+    // descriptor aliases (not parameter-key synonyms) and a layout-only LFO.
     FILE* example_file = fopen("doc/synth_effects_example.json", "rb");
     TEST(example_file != nullptr);
     if (example_file) {
@@ -1982,17 +2018,19 @@ static void effects_clipboard_regressions()
         "[]",
         "null",
         "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[],\"eff\\u0065cts\":[],\"graph_layout\":[]}",
-        "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"distortion\",\"params\":[{\"lfo_desc_id\":1},{}]}],\"graph_layout\":[]}",
+        "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"distortion\",\"params\":{\"" PORTABILITY_DRIVE
+        "\":{\"lfo_desc_id\":1}}}],\"graph_layout\":[]}",
         "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"none\"},{\"type\":\"none\"},{\"type\":\"none\"},{\"type\":\"none\"},{\"type\":\"none\"}],\"graph_layout\":[]}",
         "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[],\"graph_layout\":[{\"kind\":\"effect\",\"slot\":0,\"x\":0,\"y\":0}]}",
         "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[],\"graph_layout\":[{\"kind\":\"lfo\",\"lfo_desc_id\":1,\"x\":0,\"y\":0}]}",
         "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[],\"graph_layout\":[{\"kind\":\"input\",\"x\":0,\"y\":0},{\"kind\":\"input\",\"x\":1,\"y\":1}]}",
-        "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[],\"graph_layout\":[{\"kind\":\"input\",\"x\":0,\"y\":0,\"name\":\"Renamed\"}]}",
-        "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[],\"graph_layout\":[{\"kind\":\"oscillator\",\"x\":0,\"y\":0}]}"
+
+        "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[],\"graph_layout\":[{\"kind\":\"input\",\"x\":0,\"y\":0,\"width_override\":-1}]}"
     };
     const char* nested_invalid[] = {
-        "{\"format\":\"synth-effects-v1\",\"lfos\":[{\"period_ms\":300,\"period_ms\":400}],\"effects\":[],\"graph_layout\":[]}",
-        "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"distortion\",\"params\":[{\"base_value\":1e999},{}]}],\"graph_layout\":[]}"
+        "{\"format\":\"synth-effects-v1\",\"lfos\":[{\"id\":1,\"period_ms\":300,\"period_ms\":400}],\"effects\":[],\"graph_layout\":[]}",
+        "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"distortion\",\"params\":{\"" PORTABILITY_DRIVE
+        "\":{\"base_value\":1e999}}}],\"graph_layout\":[]}"
     };
     for (const char* bad : nested_invalid) {
         memset(static_cast<void*>(&decoded), 0xA5, sizeof(decoded));
@@ -2370,7 +2408,7 @@ static void effects_add_cc_regressions()
     const uint32_t v2_length = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
     TEST(v2_length > 0);
     TEST(strncmp(payload, "{\"instrument_editor_bank\":{", strlen("{\"instrument_editor_bank\":")) == 0);
-    TEST(strstr(payload, "\"effect_routing\"") != nullptr);
+    TEST(strstr(payload, "\"effect_routing\"") == nullptr);
     TEST(strstr(payload, "\"added_ccs\"") != nullptr);
     memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
     TEST(Synth::decode_editor_bank_json(payload, v2_length, &loaded));
@@ -2409,8 +2447,7 @@ static void effects_add_cc_regressions()
     const uint32_t stored_length                    = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
     TEST(stored_length > 0);
     TEST(strncmp(payload, "{\"instrument_editor_bank\":{", strlen("{\"instrument_editor_bank\":")) == 0);
-    TEST(strstr(payload, "\"effect_routing\":[{\"in\":0,\"out\":[0]") !=
-         nullptr); // unwired chain round-trips its flags
+    TEST(strstr(payload, "\"effect_routing\"") == nullptr); // unwired chain round-trips its flags
     TEST(strstr(payload, "\"added_ccs\"") != nullptr);
     memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
     TEST(Synth::decode_editor_bank_json(payload, stored_length, &loaded));
@@ -5734,11 +5771,12 @@ static void check_effect_missing_params_compat()
 
     // Strict documents keep the exact count: short arrays are refused.
     const char two_entry[] = "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"distortion\","
-                             "\"params\":[{\"base_value\":4},{\"base_value\":0.75}]}],\"graph_layout\":[]}";
+                             "\"params\":{\"" PORTABILITY_DRIVE "\":{\"base_value\":4},\"" PORTABILITY_MIX
+                             "\":{\"base_value\":0.75}}}],\"graph_layout\":[]}";
     TEST(Synth::decode_effects_json(two_entry, static_cast<uint32_t>(sizeof(two_entry) - 1), &decoded));
 
     const char one_entry[] = "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"distortion\","
-                             "\"params\":[{\"base_value\":4}]}],\"graph_layout\":[]}";
+                             "\"params\":{\"" PORTABILITY_DRIVE "\":{\"base_value\":4}}}],\"graph_layout\":[]}";
     TEST(Synth::decode_effects_json(one_entry, static_cast<uint32_t>(sizeof(one_entry) - 1), &decoded));
 
     // Three entries round-trip through the strict effects document.
@@ -5786,12 +5824,12 @@ static void check_effect_missing_params_compat()
     const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> cut_storage =
         std::make_unique<FixedArray<char, Synth::library_payload_max>>();
     char (&cut)[Synth::library_payload_max] = cut_storage->elements;
-    const uint32_t cut_length               = splice_single_occurrence(payload,
-                                                                       payload_length,
-                                                                       "{\"base_value\":0.75},{\"base_value\":0.25}]",
-                                                                       "{\"base_value\":0.75}]",
-                                                                       cut,
-                                                                       sizeof(cut));
+    const uint32_t cut_length = splice_single_occurrence(payload,
+                                                         payload_length,
+                                                         ",\"" PORTABILITY_OUTPUT_GAIN "\":{\"base_value\":0.25}",
+                                                         "",
+                                                         cut,
+                                                         sizeof(cut));
     TEST(cut_length > 0);
     if (cut_length > 0) {
         memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
@@ -5808,7 +5846,8 @@ static void check_effect_missing_params_compat()
     const uint32_t bare_length =
         splice_single_occurrence(payload,
                                  payload_length,
-                                 ",\"params\":[{\"base_value\":4.5},{\"base_value\":0.75},{\"base_value\":0.25}]",
+                                 ",\"params\":{\"" PORTABILITY_DRIVE "\":{\"base_value\":4.5},\"" PORTABILITY_MIX
+                                 "\":{\"base_value\":0.75},\"" PORTABILITY_OUTPUT_GAIN "\":{\"base_value\":0.25}}",
                                  "",
                                  bare,
                                  sizeof(bare));
@@ -5821,17 +5860,20 @@ static void check_effect_missing_params_compat()
         TEST(Synth::validate_instrument_bank(&loaded.bank));
     }
 
-    // Four entries are refused.
-    const uint32_t four_length = splice_single_occurrence(payload,
-                                                          payload_length,
-                                                          "{\"base_value\":0.25}]",
-                                                          "{\"base_value\":0.25},{\"base_value\":0.5}]",
-                                                          cut,
-                                                          sizeof(cut));
+    // Unknown named entries are reported and skipped.
+    const uint32_t four_length = splice_single_occurrence(
+        payload,
+        payload_length,
+        "\"" PORTABILITY_OUTPUT_GAIN "\":{\"base_value\":0.25}",
+        "\"" PORTABILITY_OUTPUT_GAIN "\":{\"base_value\":0.25},\"future_param\":{\"base_value\":0.5}",
+        cut,
+        sizeof(cut));
     TEST(four_length > 0);
     if (four_length > 0) {
         memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
-        TEST(! Synth::decode_editor_bank_json(cut, four_length, &loaded));
+        TEST(Synth::decode_editor_bank_json(cut, four_length, &loaded));
+        char ignored[16][48];
+        TEST(Synth::take_ignored_fields(ignored, 16) > 0);
     }
     // Another type follows the same rule: a delay slot cut to one entry takes
     // the delay defaults for the rest.
@@ -5843,12 +5885,13 @@ static void check_effect_missing_params_compat()
     delay->bindings[2].base_value         = 0.25f;
     const uint32_t delay_length           = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
     TEST(delay_length > 0);
-    const uint32_t delay_cut_length = splice_single_occurrence(payload,
-                                                               delay_length,
-                                                               ",{\"base_value\":0.5},{\"base_value\":0.25}]",
-                                                               "]",
-                                                               cut,
-                                                               sizeof(cut));
+    const uint32_t delay_cut_length = splice_single_occurrence(
+        payload,
+        delay_length,
+        ",\"" PORTABILITY_FEEDBACK "\":{\"base_value\":0.5},\"" PORTABILITY_MIX "\":{\"base_value\":0.25}",
+        "",
+        cut,
+        sizeof(cut));
     TEST(delay_cut_length > 0);
     if (delay_cut_length > 0) {
         memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
@@ -5867,7 +5910,7 @@ static void check_effect_missing_params_compat()
         "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"distortion\"}],\"graph_layout\":[]}";
     TEST(Synth::decode_effects_json(strict_missing, static_cast<uint32_t>(sizeof(strict_missing) - 1), &decoded));
     const char strict_short[] = "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"delay\","
-                                "\"params\":[{\"base_value\":3000}]}],\"graph_layout\":[]}";
+                                "\"params\":{\"" PORTABILITY_TIME "\":{\"base_value_ms\":3000}}}],\"graph_layout\":[]}";
     TEST(Synth::decode_effects_json(strict_short, static_cast<uint32_t>(sizeof(strict_short) - 1), &decoded));
 }
 
@@ -6506,7 +6549,7 @@ static void check_effects_inline_0()
         char (&text)[65536]                                         = text_storage->elements;
         const uint32_t length = Synth::encode_effects_json(&document, text, sizeof(text));
         TEST(length != 0);
-        TEST(strstr(text, "synth-effects-v3") != nullptr);
+        TEST(strstr(text, "synth-effects-v4") != nullptr);
         Synth::EffectsDocument decoded = {};
         TEST(Synth::decode_effects_json(text, length, &decoded));
         TEST(memcmp(&decoded.routing, &document.routing, sizeof(document.routing)) == 0);
@@ -6521,7 +6564,7 @@ static void check_effects_inline_0()
         const uint32_t bank_length     = Synth::encode_editor_bank_json(&authored, bank_text, sizeof(bank_text));
         TEST(bank_length != 0);
         TEST(strncmp(bank_text, "{\"instrument_editor_bank\":{", strlen("{\"instrument_editor_bank\":{")) == 0);
-        TEST(strstr(bank_text, "\"effect_routing\"") != nullptr);
+        TEST(strstr(bank_text, "\"effect_routing\"") == nullptr);
         TEST(Synth::decode_editor_bank_json(bank_text, bank_length, &restored));
         TEST(memcmp(restored.effect_routing, authored.effect_routing, sizeof(authored.effect_routing)) == 0);
         // Detached authoring topology rides the bank codec, effects transfer and reduced library owner.
@@ -6548,7 +6591,7 @@ static void check_effects_inline_0()
             "{\"format\":\"synth-effects-v2\",\"effects\":[]}",
             "{\"format\":\"synth-effects-v2\",\"effects\":[],\"audio_next\":[0,0,0,0,6]}",
 
-            "{\"format\":\"synth-effects-v3\",\"effects\":[]}",
+            "{\"format\":\"synth-effects-v4\",\"effects\":[]}",
         };
         for (const char* invalid_document : invalid_documents) {
             memset(static_cast<void*>(&decoded), 0xA5, sizeof(decoded));
@@ -7555,7 +7598,8 @@ static void plan_batch_time_units_regressions()
     char                          names[8][48];
     Synth::take_ignored_fields(names, 8);
     const char* doc =
-        "{\"format\":\"older\",\"future\":1,\"effects\":[{\"type\":\"delay\",\"params\":[{\"base_value_ms\":1200,\"lfo_depth_ms\":-10,\"inputs\":[{\"source\":\"mod_wheel\",\"scale_ms\":20}]}]}]}";
+        "{\"format\":\"older\",\"future\":1,\"effects\":[{\"type\":\"delay\",\"params\":{\"" PORTABILITY_TIME
+        "\":{\"base_value_ms\":1200,\"lfo_depth_ms\":-10,\"inputs\":[{\"source\":\"mod_wheel\",\"scale_ms\":20}]}}}]}";
     TEST(Synth::decode_effects_json(doc, static_cast<uint32_t>(strlen(doc)), &decoded));
     TEST(decoded.chain.effects[0].bindings[0].base_value == 1000.0f);
     TEST(decoded.chain.effects[0].bindings[0].lfo_depth == -10.0f);
@@ -7566,11 +7610,12 @@ static void plan_batch_time_units_regressions()
     TEST(len > 0 && strstr(encoded, "base_value_ms") && strstr(encoded, "lfo_depth_ms") && strstr(encoded, "scale_ms"));
     TEST(Synth::decode_effects_json(encoded, len, &decoded));
     TEST(decoded.chain.effects[0].bindings[0].base_value == 1000.0f);
-    doc = "{\"effects\":[{\"type\":\"chorus\",\"params\":[{},{\"base_value\":6},{},{}]}]}";
+    doc = "{\"effects\":[{\"type\":\"chorus\",\"params\":{\"" PORTABILITY_DEPTH "\":{\"base_value\":6}}}]}";
     TEST(Synth::decode_effects_json(doc, static_cast<uint32_t>(strlen(doc)), &decoded));
     TEST(decoded.chain.effects[0].bindings[1].base_value == 0.136f);
     TEST(decoded.chain.effects[0].bindings[3].base_value == 11.0f);
-    doc = "{\"effects\":[{\"type\":\"chorus\",\"params\":[{},{\"base_value_ms\":-1},{},{\"base_value_ms\":1e999}]}]}";
+    doc = "{\"effects\":[{\"type\":\"chorus\",\"params\":{\"" PORTABILITY_DEPTH
+          "\":{\"base_value_ms\":-1},\"" PORTABILITY_CENTER "\":{\"base_value_ms\":1e999}}}]}";
     TEST(Synth::decode_effects_json(doc, static_cast<uint32_t>(strlen(doc)), &decoded));
     TEST(decoded.chain.effects[0].bindings[1].base_value == 0.0f);
     TEST(decoded.chain.effects[0].bindings[3].base_value == 11.0f);
@@ -7582,7 +7627,10 @@ static void plan_batch_ignored_json_regressions()
     char                          ignored[16][48];
     for (const char* value : { "true", "null" }) {
         char text[256];
-        snprintf(text, sizeof(text), "{\"effects\":[{\"type\":\"delay\",\"params\":[{\"base_value_ms\":%s}]}]}", value);
+        snprintf(text,
+                 sizeof(text),
+                 "{\"effects\":[{\"type\":\"delay\",\"params\":{\"" PORTABILITY_TIME "\":{\"base_value_ms\":%s}}}]}",
+                 value);
         Synth::take_ignored_fields(ignored, 16);
         TEST(Synth::decode_effects_json(text, static_cast<uint32_t>(strlen(text)), &decoded));
         TEST(decoded.chain.effects[0].bindings[0].base_value == 100.0f);
@@ -7590,16 +7638,19 @@ static void plan_batch_ignored_json_regressions()
     }
     for (const char* value : { "null", "true", "\"bad\"", "{}", "[]", "1e999" }) {
         char text[512];
-        snprintf(text, sizeof(text), "{\"effects\":[{\"type\":\"delay\",\"params\":[{\"lfo_depth_ms\":%s}]}]}", value);
+        snprintf(text,
+                 sizeof(text),
+                 "{\"effects\":[{\"type\":\"delay\",\"params\":{\"" PORTABILITY_TIME "\":{\"lfo_depth_ms\":%s}}}]}",
+                 value);
         Synth::take_ignored_fields(ignored, 16);
         TEST(Synth::decode_effects_json(text, static_cast<uint32_t>(strlen(text)), &decoded));
         TEST(decoded.chain.effects[0].bindings[0].lfo_depth == 0.0f);
         TEST(Synth::take_ignored_fields(ignored, 16) > 0);
-        snprintf(
-            text,
-            sizeof(text),
-            "{\"effects\":[{\"type\":\"delay\",\"params\":[{\"inputs\":[{\"source\":\"mod_wheel\",\"scale_ms\":%s}]}]}]}",
-            value);
+        snprintf(text,
+                 sizeof(text),
+                 "{\"effects\":[{\"type\":\"delay\",\"params\":{\"" PORTABILITY_TIME
+                 "\":{\"inputs\":[{\"source\":\"mod_wheel\",\"scale_ms\":%s}]}}}]}",
+                 value);
         Synth::take_ignored_fields(ignored, 16);
         TEST(Synth::decode_effects_json(text, static_cast<uint32_t>(strlen(text)), &decoded));
         const auto& binding = decoded.chain.effects[0].bindings[0];
@@ -7607,20 +7658,233 @@ static void plan_batch_ignored_json_regressions()
         TEST(binding.inputs[0].scale == 0.0f);
         TEST(Synth::take_ignored_fields(ignored, 16) > 0);
     }
-    const char* text = "{\"effects\":[],\"routing\":{\"in\":2,\"out\":[],\"future\":true}}";
+    const char* text = "{\"effects\":[],\"input\":\"output\",\"future\":true}";
     Synth::take_ignored_fields(ignored, 16);
     TEST(Synth::decode_effects_json(text, static_cast<uint32_t>(strlen(text)), &decoded));
     TEST(decoded.routing.in == Sculptor::effect_in_output);
     TEST(Synth::take_ignored_fields(ignored, 16) > 0);
-    text = "{\"effects\":[],\"routing\":{\"out\":[],\"future\":true}}";
+    for (const char* legacy : { "{\"effects\":[],\"routing\":{\"out\":[],\"future\":true}}",
+                                "{\"effects\":[],\"routing\":{\"in\":3,\"out\":[]}}" }) {
+        Synth::take_ignored_fields(ignored, 16);
+        TEST(Synth::decode_effects_json(legacy, static_cast<uint32_t>(strlen(legacy)), &decoded));
+        TEST(decoded.routing.in == Sculptor::effect_in_disconnected);
+        TEST(Synth::take_ignored_fields(ignored, 16) > 0);
+    }
+}
+
+static void portability_effects_named_parameters()
+{
+    static Synth::EffectsDocument source, decoded;
+    static char                   text[65536], again[65536], fixture[8192], keys[5][48];
+    char                          ignored[32][48];
+    const char* const             types[] = { "none",       "distortion", "delay",    "chorus",       "reverb",
+                                              "compressor", "fir",        "ring_mod", "fir_multiband" };
+    for (uint32_t t = 1; t < Synth::num_effect_types; ++t) {
+        source                   = {};
+        const auto type          = static_cast<Synth::EffectType>(t);
+        source.chain.num_effects = 1;
+        Sculptor::fx_init_slot(&source.chain, 0, type);
+        source.chain.effects[0].enabled = true;
+        source.routing.in               = Sculptor::effect_in_first_slot;
+        source.routing.out[0]           = Sculptor::effect_out_output;
+        const uint32_t count            = Synth::get_effect_param_floats(type);
+        // Multi-band FIR deliberately has no projected scalar UI rows, but
+        // stores three scalar bindings. Its key count must NOT use UI count 0.
+        TEST(Sculptor::effect_type_info(type).num_params == (type == Synth::EffectType::fir_multiband ? 0 : count));
+        const uint32_t n = Synth::encode_effects_json(&source, text, sizeof(text));
+        TEST(n > 0 && n < 65536);
+        if (! n)
+            continue;
+        text[n] = 0;
+        TEST(strstr(text, "synth-effects-v4") != nullptr);
+        TEST(strstr(text, "\"input\":\"first_slot\"") != nullptr);
+        TEST(strstr(text, "\"feeds\":\"output\"") != nullptr);
+        TEST(strstr(text, "\"routing\"") == nullptr);
+        // Black-box key-table integrity: inspect emitted params, never expose
+        // codec-private tables or include/pin production source text.
+        const char* params = strstr(text, "\"params\":");
+        TEST(params && params[9] == '{'); // intentional red: current writer emits '['
+        if (params && params[9] == '{') {
+            uint32_t    found = 0;
+            const char* p     = params + 10;
+            while (*p && *p != '}') {
+                if (*p == ',')
+                    ++p;
+                TEST(*p == '"');
+                if (*p != '"' || found >= count)
+                    break;
+                ++p;
+                uint32_t length = 0;
+                while (*p && *p != '"' && length + 1 < sizeof(keys[0])) {
+                    TEST((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '_');
+                    keys[found][length++] = *p++;
+                }
+                keys[found][length] = 0;
+                TEST(length > 0 && *p == '"');
+                for (uint32_t i = 0; i < found; ++i)
+                    TEST(strcmp(keys[i], keys[found]) != 0);
+                ++found;
+                if (*p)
+                    ++p;
+                TEST(*p == ':' && p[1] == '{');
+                if (*p != ':' || p[1] != '{')
+                    break;
+                ++p;
+                uint32_t depth  = 0;
+                bool     quoted = false, escaped = false;
+                do {
+                    const char c = *p++;
+                    if (escaped) {
+                        escaped = false;
+                        continue;
+                    }
+                    if (quoted && c == '\\') {
+                        escaped = true;
+                        continue;
+                    }
+                    if (c == '"')
+                        quoted = ! quoted;
+                    if (! quoted && c == '{')
+                        ++depth;
+                    if (! quoted && c == '}')
+                        --depth;
+                } while (*p && depth);
+            }
+            TEST(found == count && *p == '}'); // also rejects an extra key
+        }
+        TEST(Synth::decode_effects_json(text, n, &decoded));
+        const uint32_t m = Synth::encode_effects_json(&decoded, again, sizeof(again));
+        TEST(m == n && memcmp(text, again, n) == 0);
+        TEST(Synth::encode_effects_json(&source, again, n) == 0);
+        TEST(Synth::encode_effects_json(&source, again, n + 1) == n);
+        source.chain.num_effects = static_cast<uint8_t>(Synth::max_chain_effects + 1);
+        TEST(Synth::encode_effects_json(&source, again, sizeof(again)) == 0);
+
+        // PROVISIONAL keys come only from portability_param_keys. Reverse
+        // insertion order and put type last to exercise type prescan and ms rules.
+        uint32_t pos = static_cast<uint32_t>(snprintf(
+            fixture,
+            sizeof(fixture),
+            "{\"format\":\"synth-effects-v4\",\"input\":\"first_slot\",\"effects\":[{\"feeds\":\"output\",\"params\":{"));
+        for (uint32_t p = count; p-- > 0;) {
+            const float value = Sculptor::effect_param_default(type, p);
+            pos += static_cast<uint32_t>(snprintf(fixture + pos,
+                                                  sizeof(fixture) - pos,
+                                                  "%s\"%s\":{\"base_value%s\":%.9g}",
+                                                  p == count - 1 ? "" : ",",
+                                                  portability_param_keys[t][p],
+                                                  Synth::effect_param_is_ms(type, p) ? "_ms" : "",
+                                                  static_cast<double>(value)));
+        }
+        pos += static_cast<uint32_t>(
+            snprintf(fixture + pos, sizeof(fixture) - pos, "},\"enabled\":true,\"type\":\"%s\"}]}", types[t]));
+        TEST(Synth::decode_effects_json(fixture, pos, &decoded));
+        for (uint32_t p = 0; p < count; ++p)
+            TEST(decoded.chain.effects[0].bindings[p].base_value == Sculptor::effect_param_default(type, p));
+        TEST(decoded.routing.in == Sculptor::effect_in_first_slot &&
+             decoded.routing.out[0] == Sculptor::effect_out_output);
+    }
+    // Chain routing is explicit and independent of slot count. Exercise all
+    // understood input/feed values and malformed legacy routing lengths.
+    for (const char* input : { "first_slot", "output", "disconnected" }) {
+        snprintf(
+            fixture,
+            sizeof(fixture),
+            "{\"format\":\"synth-effects-v4\",\"input\":\"%s\",\"effects\":[{\"type\":\"delay\"},{\"type\":\"delay\"}]}",
+            input);
+        TEST(Synth::decode_effects_json(fixture, static_cast<uint32_t>(strlen(fixture)), &decoded));
+        const uint8_t expected = strcmp(input, "first_slot") == 0 ? Sculptor::effect_in_first_slot
+                                 : strcmp(input, "output") == 0   ? Sculptor::effect_in_output
+                                                                  : Sculptor::effect_in_disconnected;
+        TEST(decoded.routing.in == expected);
+    }
+    const char* serial =
+        "{\"format\":\"synth-effects-v4\",\"input\":\"first_slot\",\"effects\":[{\"type\":\"delay\",\"feeds\":\"next\"},{\"type\":\"delay\",\"feeds\":\"output\"}]}";
+    TEST(Synth::decode_effects_json(serial, static_cast<uint32_t>(strlen(serial)), &decoded));
+    TEST(decoded.routing.out[0] == Sculptor::effect_out_next && decoded.routing.out[1] == Sculptor::effect_out_output);
+    // Named binding carries non-default values and reports only the unknown key.
+    snprintf(
+        fixture,
+        sizeof(fixture),
+        "{\"format\":\"synth-effects-v4\",\"effects\":[{\"type\":\"delay\",\"params\":{\"%s\":{\"base_value_ms\":240},\"future_param\":{}}}]}",
+        portability_param_keys[2][0]);
+    Synth::take_ignored_fields(ignored, 32);
+    TEST(Synth::decode_effects_json(fixture, static_cast<uint32_t>(strlen(fixture)), &decoded));
+    TEST(decoded.chain.effects[0].bindings[0].base_value == 240);
+    TEST(decoded.chain.effects[0].bindings[1].base_value == 0.35f);
+    TEST(Synth::take_ignored_fields(ignored, 32) > 0);
+    for (const char* tag : { "synth-effects-v3", "wrong", "" }) {
+        snprintf(fixture,
+                 sizeof(fixture),
+                 "{%s%s%s\"effects\":[]}",
+                 *tag ? "\"format\":\"" : "",
+                 tag,
+                 *tag ? "\"," : "");
+        Synth::take_ignored_fields(ignored, 32);
+        TEST(Synth::decode_effects_json(fixture, static_cast<uint32_t>(strlen(fixture)), &decoded));
+        TEST(Synth::take_ignored_fields(ignored, 32) > 0);
+    }
+    const char* legacy =
+        "{\"format\":\"synth-effects-v3\",\"routing\":{\"in\":1,\"out\":[2]},\"effects\":[{\"type\":\"delay\",\"params\":[{\"base_value_ms\":240}]}]}";
+    Synth::take_ignored_fields(ignored, 32);
+    TEST(Synth::decode_effects_json(legacy, static_cast<uint32_t>(strlen(legacy)), &decoded));
+    TEST(decoded.chain.effects[0].bindings[0].base_value == 100);
+    TEST(decoded.routing.in == Sculptor::effect_in_disconnected);
+    TEST(Synth::take_ignored_fields(ignored, 32) > 0);
+}
+
+static void portability_effects_pool_ids()
+{
+    static Synth::EffectsDocument decoded;
+    static char                   text[4096], again[65536];
+    char                          ignored[32][48];
+    // Effects lfo_desc_id is already ONE-based in memory. Pool id 41
+    // resolves to descriptor id 2 (not zero-based 1).
+    snprintf(
+        text,
+        sizeof(text),
+        "{\"format\":\"synth-effects-v4\",\"lfos\":[{\"id\":72,\"wave\":\"sine\",\"period_ms\":900},{\"id\":41,\"wave\":\"sine\",\"period_ms\":300}],"
+        "\"effects\":[{\"type\":\"delay\",\"params\":{\"%s\":{\"lfo_desc_id\":41},\"%s\":{\"lfo_desc_id\":41}}}],"
+        "\"graph_layout\":[{\"kind\":\"lfo\",\"lfo_desc_id\":72,\"x\":27,\"y\":0}]}",
+        portability_param_keys[2][0],
+        portability_param_keys[2][1]);
+    TEST(Synth::decode_effects_json(text, static_cast<uint32_t>(strlen(text)), &decoded));
+    TEST(decoded.lfo_count == 2);
+    TEST(decoded.chain.effects[0].bindings[0].lfo_desc_id == 2);
+    TEST(decoded.chain.effects[0].bindings[1].lfo_desc_id == 2); // aliases = shared descriptor
+    TEST(decoded.graph_layout_count == 1 && decoded.graph_layout[0].index == 1);
+    const uint32_t n = Synth::encode_effects_json(&decoded, again, sizeof(again));
+    TEST(n > 0);
+    if (n)
+        TEST(strstr(again, "\"id\":1") != nullptr);
+    for (const char* pool : { "[{\"id\":1,\"period_ms\":300},{\"id\":1,\"period_ms\":300}]",
+                              "[{\"id\":0,\"period_ms\":300}]",
+                              "[{\"id\":65536,\"period_ms\":300}]" }) {
+        snprintf(text, sizeof(text), "{\"format\":\"synth-effects-v4\",\"lfos\":%s,\"effects\":[]}", pool);
+        TEST(! Synth::decode_effects_json(text, static_cast<uint32_t>(strlen(text)), &decoded));
+    }
+    snprintf(
+        text,
+        sizeof(text),
+        "{\"format\":\"synth-effects-v4\",\"effects\":[{\"type\":\"delay\",\"params\":{\"%s\":{\"lfo_desc_id\":17}}}]}",
+        portability_param_keys[2][0]);
     TEST(! Synth::decode_effects_json(text, static_cast<uint32_t>(strlen(text)), &decoded));
-    text = "{\"effects\":[],\"routing\":{\"in\":3,\"out\":[]}}";
-    TEST(! Synth::decode_effects_json(text, static_cast<uint32_t>(strlen(text)), &decoded));
+    Synth::take_ignored_fields(ignored, 32);
+    const char* unknown_kind =
+        "{\"format\":\"synth-effects-v4\",\"effects\":[],\"graph_layout\":[{\"kind\":\"oscillator\",\"slot\":999}]}";
+    Synth::take_ignored_fields(ignored, 32);
+    TEST(Synth::decode_effects_json(unknown_kind, static_cast<uint32_t>(strlen(unknown_kind)), &decoded));
+    TEST(decoded.graph_layout_count == 0 && Synth::take_ignored_fields(ignored, 32) > 0);
+    const char* malformed[] = { "{", "{\"effects\":[],\"effects\":[]}", "{} trailing" };
+    for (const char* value : malformed)
+        TEST(! Synth::decode_effects_json(value, static_cast<uint32_t>(strlen(value)), &decoded));
 }
 
 int main()
 {
     test_silence_stdout();
+    portability_effects_named_parameters();
+    portability_effects_pool_ids();
     plan_batch_time_units_regressions();
     plan_batch_ignored_json_regressions();
     effects_paste_pin_regressions();

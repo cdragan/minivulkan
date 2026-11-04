@@ -8,6 +8,12 @@
 
 #include <stdint.h>
 
+// Private codec file-id tables, raw zone/layout references and one staged
+// layout id, beyond the parser staging in the namespace below. The tables
+// live in the codec's translation unit; the editor's resident accounting
+// adds this size to its total.
+static constexpr size_t bank_json_id_scratch_bytes = (4u * 65536u + Synth::max_channels * Synth::max_instr_per_channel + Synth::max_graph_records + 1u) * sizeof(uint16_t);
+
 namespace Synth {
 uint32_t take_ignored_fields(char (*names)[48], uint32_t capacity);
 
@@ -73,14 +79,14 @@ struct EffectsGraphLayout {
 // Local LFO ids preserve aliases, including descriptors represented only by layout.
 struct EffectsDocument {
     EffectChainBinding           chain;
-    Sculptor::EffectChainRouting routing; // v3 routing flags
+    Sculptor::EffectChainRouting routing; // v4 named input/feeds routing
     LFODescriptor                lfos[max_lfos];
     uint32_t                     lfo_count;
     EffectsGraphLayout           graph_layout[effects_graph_layout_capacity];
     uint32_t                     graph_layout_count;
 };
 
-// Effects documents: the writer emits synth-effects-v3 with flag routing;
+// Effects documents: the writer emits synth-effects-v4 with named input/feeds routing;
 // Other format tags warn without blocking loading. Failure leaves
 // destination bytes untouched.  GUI-thread-only shared staging is
 // non-reentrant, like the bank codec.

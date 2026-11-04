@@ -488,6 +488,7 @@ constexpr size_t editor_resident_state_bytes =
     sizeof(effect_publish_failure) + 2 * sizeof(Synth::InstrumentEditorBank) + 3 * sizeof(Synth::EffectsDocument) +
     (undo_depth + 8) * sizeof(Synth::InstrumentEditorBank) + 3 * sizeof(Synth::InstrumentBank) + sizeof(bank_queue) +
     Synth::bank_json_parser_bytes +                            // JSON text, tokens and keys
+    bank_json_id_scratch_bytes +                               // private codec file-id tables and raw locators
     sizeof(Sculptor::SynthEditor) +                            // includes the browser's entry/category arrays
     Synth::library_max_records * sizeof(Synth::LibraryEntry) + // library rewrite index
     64 * 1024 +                                                // library record-copy chunk

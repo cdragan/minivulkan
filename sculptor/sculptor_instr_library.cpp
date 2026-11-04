@@ -376,6 +376,11 @@ bool Synth::load_library_instrument(const char* const            path,
     if (! load_ok)
         return false;
 
+    // The record form carries no per-channel enabled state; the format has
+    // no enabled flag and record channels are disabled by definition.
+    for (uint32_t record_channel = 0; record_channel < Synth::max_channels; ++record_channel)
+        record_bank.bank.channel_enabled[record_channel] = 0;
+
     if (! validate_record(&record_bank))
         return false;
 

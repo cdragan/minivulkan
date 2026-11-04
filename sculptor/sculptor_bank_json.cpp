@@ -327,7 +327,20 @@ constexpr const char* effect_type_names[Synth::num_effect_types] = { "none",   "
                                                                      "chorus", "reverb",     "compressor",
                                                                      "fir",    "ring_mod",   "fir_multiband" };
 
-constexpr uint32_t    num_param_kinds                   = 4;
+constexpr uint32_t num_param_kinds = 4;
+// Stable JSON keys, enum-indexed rather than canvas menu order.
+static constexpr const char* effect_param_keys[Synth::num_effect_types][Synth::max_effect_param_floats] = {
+    {},
+    { "drive", "mix", "output_gain" },
+    { "time", "feedback", "mix" },
+    { "rate", "depth", "mix", "center" },
+    { "room", "damping", "wet" },
+    { "threshold", "ratio", "attack", "release", "output_gain" },
+    { "lowpass", "highpass", "slope" },
+    { "rate", "mix" },
+    { "lowpass", "highpass", "slope" }
+};
+
 constexpr const char* param_kind_names[num_param_kinds] = { "external", "envelope", "lfo", "plain" };
 
 constexpr const char* mod_target_names[Synth::num_mod_targets] = { "volume",
@@ -414,7 +427,7 @@ static Synth::InstrumentEditorBank decode_scratch;
 // the editor copies out always pastes back.
 // ---------------------------------------------------------------------------
 
-constexpr const char instrument_format_tag[] = "synth-instrument-v1";
+constexpr const char instrument_format_tag[] = "synth-instrument-v2";
 
 static InstrumentDocState           instrument_doc;
 static Synth::InstrumentGraphLayout instrument_layout_staging[Synth::instrument_graph_layout_capacity];
@@ -428,12 +441,11 @@ static Synth::InstrumentGraphLayout editor_export_source_layout[Synth::instrumen
 static Synth::InstrumentGraphLayout editor_export_normalized[Synth::instrument_graph_layout_capacity];
 static uint8_t                      editor_export_osc_source[Synth::max_layers];
 
-// Marker for an explicitly supplied routing null: no out-array length was
-// decoded to compare against the decoded effect count.
-constexpr uint32_t routing_len_null = 0xFFFFFFFFu;
+static constexpr const char* graph_kind_names[] = { "input", "sum",    "oscillator", "envelope",
+                                                    "lfo",   "effect", "parameters" };
 
-// Decoded routing out-array lengths are checked against each chain.
-static uint32_t decode_routing_out_len[Synth::max_channels + 1];
+static constexpr const char* effect_input_names[] = { "disconnected", "first_slot", "output" };
+static constexpr const char* effect_feed_names[]  = { "disconnected", "next", "output" };
 
 // FIR band-object decoder keys: the plain FIR's dormant band objects name
 // their edge bindings lowpass/highpass; the multiband type's name the same
@@ -697,7 +709,7 @@ static void enc_oscillator(Out& o, const Synth::Oscillator& osc)
     o.ch('}');
 }
 
-static void enc_instrument(Out& o, const Synth::Instrument& instr)
+static void enc_instrument(Out& o, const Synth::Instrument& instr, uint32_t id = 0, const char* name = nullptr)
 {
     if (instr.layer_count > Synth::max_layers) {
         o.overflow = true;
@@ -705,7 +717,11 @@ static void enc_instrument(Out& o, const Synth::Instrument& instr)
     }
 
     o.ch('{');
-    key_uint(o, "layer_count", instr.layer_count);
+    key_uint_nonzero(o, "id", id);
+    if (name) {
+        o.key("name");
+        o.text_value(name, Synth::max_name_len);
+    }
 
     o.key("layers");
     o.ch('[');
@@ -752,16 +768,26 @@ static void enc_envelope_members(Out& o, const Synth::EnvelopeDescriptor& env)
     o.ch(']');
 }
 
-static void enc_envelope(Out& o, const Synth::EnvelopeDescriptor& env)
+static void enc_envelope(Out& o, const Synth::EnvelopeDescriptor& env, uint32_t id = 0, const char* name = nullptr)
 {
     o.ch('{');
+    key_uint_nonzero(o, "id", id);
+    if (name) {
+        o.key("name");
+        o.text_value(name, Synth::max_name_len);
+    }
     enc_envelope_members(o, env);
     o.ch('}');
 }
 
-static void enc_lfo(Out& o, const Synth::LFODescriptor& lfo)
+static void enc_lfo(Out& o, const Synth::LFODescriptor& lfo, uint32_t id = 0, const char* name = nullptr)
 {
     o.ch('{');
+    key_uint_nonzero(o, "id", id);
+    if (name) {
+        o.key("name");
+        o.text_value(name, Synth::max_name_len);
+    }
     key_enum(o, "wave", wave_names, num_waves, static_cast<uint32_t>(lfo.wave));
     key_uint_nonzero(o, "duty", lfo.duty);
     key_uint_nonzero(o, "period_ms", lfo.period_ms);
@@ -773,7 +799,7 @@ static void enc_lfo(Out& o, const Synth::LFODescriptor& lfo)
     o.ch('}');
 }
 
-static void enc_param(Out& o, const Synth::ParamDescriptor& param)
+static void enc_param(Out& o, const Synth::ParamDescriptor& param, uint32_t id = 0, const char* name = nullptr)
 {
     const uint32_t kind = static_cast<uint32_t>(param.kind);
     if (kind >= num_param_kinds) {
@@ -782,6 +808,11 @@ static void enc_param(Out& o, const Synth::ParamDescriptor& param)
     }
 
     o.ch('{');
+    key_uint_nonzero(o, "id", id);
+    if (name) {
+        o.key("name");
+        o.text_value(name, Synth::max_name_len);
+    }
     o.key("kind");
     o.ch('"');
     o.str(param_kind_names[kind]);
@@ -798,8 +829,8 @@ static void enc_param(Out& o, const Synth::ParamDescriptor& param)
             enc_lfo(o, param.lfo.lfo);
             key_enum(o, "op", source_op_names, num_source_ops, static_cast<uint32_t>(param.lfo.op));
             key_float_nonzero(o, "depth", param.lfo.depth);
-            key_uint_nonzero(o, "depth_param_id", param.lfo.depth_param_id);
-            key_uint_nonzero(o, "rate_param_id", param.lfo.rate_param_id);
+            key_uint(o, "depth_param_id", static_cast<uint32_t>(param.lfo.depth_param_id) + 1);
+            key_uint(o, "rate_param_id", static_cast<uint32_t>(param.lfo.rate_param_id) + 1);
             key_float_nonzero(o, "rate_scale_ms", param.lfo.rate_scale_ms);
             break;
         case Synth::ParamKind::plain:
@@ -815,7 +846,7 @@ static void enc_param(Out& o, const Synth::ParamDescriptor& param)
                     const Synth::SourceParam& src = param.plain.sources[s];
                     o.sep();
                     o.ch('{');
-                    key_uint_nonzero(o, "param_id", src.param_id);
+                    key_uint(o, "param_id", static_cast<uint32_t>(src.param_id) + 1);
                     key_enum(o, "op", source_op_names, num_source_ops, static_cast<uint32_t>(src.op));
                     key_float_nonzero(o, "scale", src.scale);
                     o.ch('}');
@@ -912,7 +943,7 @@ static void enc_fir_effect_band(Out& o, const Synth::EffectParamBinding* band, u
     enc_fir_band_object(o, fir_band_keys[band_index], band, fir_edge_keys);
 }
 
-static void enc_effect(Out& o, const Synth::EffectSlotBinding& slot, bool strict = false)
+static void enc_effect(Out& o, const Synth::EffectSlotBinding& slot, bool strict = false, uint8_t feed = 0)
 {
     const uint32_t type = static_cast<uint32_t>(slot.type);
     if (type >= Synth::num_effect_types) {
@@ -921,6 +952,7 @@ static void enc_effect(Out& o, const Synth::EffectSlotBinding& slot, bool strict
     }
 
     o.ch('{');
+    key_enum(o, "feeds", effect_feed_names, 3, feed);
     if (strict) {
         o.key("type");
         o.text_value(effect_type_names[type], 32);
@@ -940,13 +972,13 @@ static void enc_effect(Out& o, const Synth::EffectSlotBinding& slot, bool strict
 
     if (slot.type != Synth::EffectType::none) {
         o.key("params");
-        o.ch('[');
+        o.ch('{');
         const uint32_t num_params = Synth::get_effect_param_floats(slot.type);
         for (uint32_t p = 0; p < num_params; p++) {
-            o.sep();
+            o.key(effect_param_keys[type][p]);
             enc_binding(o, slot.bindings[p], Synth::effect_param_is_ms(slot.type, p));
         }
-        o.ch(']');
+        o.ch('}');
     }
     // FIR bands: the count key appears only above the stored single band.
     // Band 0's gain key encodes whenever its binding is non-default, so an
@@ -1001,74 +1033,95 @@ static void enc_effect(Out& o, const Synth::EffectSlotBinding& slot, bool strict
     o.ch('}');
 }
 
-static void enc_chain_content(Out& o, const Synth::EffectChainBinding& chain, bool strict = false)
+static bool chain_is_empty(const Synth::EffectChainBinding& chain, const Sculptor::EffectChainRouting& routing)
+{
+    // Effects keep editor intent even when the chain input is disconnected.
+    // Only a chain with no effects and no routing can be omitted.
+    if (chain.num_effects || routing.in != Sculptor::effect_in_disconnected)
+        return false;
+    for (uint32_t s = 0; s < Synth::max_chain_effects; ++s)
+        if (routing.out[s] != Sculptor::effect_out_disconnected)
+            return false;
+    return true;
+}
+
+static void enc_chain_content(Out&                                o,
+                              const Synth::EffectChainBinding&    chain,
+                              const Sculptor::EffectChainRouting& routing,
+                              bool                                strict = false)
 {
     if (chain.num_effects > Synth::max_chain_effects) {
         o.overflow = true;
         return;
     }
-
-    o.key("effects");
-    o.ch('[');
-    for (uint32_t s = 0; s < chain.num_effects; s++) {
-        o.sep();
-        enc_effect(o, chain.effects[s], strict);
+    key_enum(o, "input", effect_input_names, 3, routing.in);
+    if (strict || chain.num_effects) {
+        o.key("effects");
+        o.ch('[');
+        for (uint32_t s = 0; s < chain.num_effects; s++) {
+            o.sep();
+            enc_effect(o, chain.effects[s], strict, routing.out[s]);
+        }
+        o.ch(']');
     }
-    o.ch(']');
 }
 
-static void enc_chain(Out& output, const Synth::EffectChainBinding& chain)
+static void enc_chain(Out& output, const Synth::EffectChainBinding& chain, const Sculptor::EffectChainRouting& routing)
 {
     output.ch('{');
-    enc_chain_content(output, chain);
+    enc_chain_content(output, chain, routing);
     output.ch('}');
+}
+
+static bool channel_has_custom_name(const Synth::InstrumentEditorBank& bank, uint32_t channel)
+{
+    if (! bank.channel_names[channel][0])
+        return false;
+    char default_name[Synth::max_name_len];
+    Synth::get_default_channel_name(channel, default_name, sizeof(default_name));
+    return strncmp(bank.channel_names[channel], default_name, Synth::max_name_len) != 0;
+}
+
+static bool channel_is_default(const Synth::InstrumentEditorBank& bank, uint32_t channel)
+{
+    return ! bank.bank.channel_zones[channel][0].start_note &&
+           chain_is_empty(bank.bank.channel_chains[channel], bank.effect_routing[channel]) &&
+           ! channel_has_custom_name(bank, channel);
 }
 
 static void enc_channel(Out& o, const Synth::InstrumentEditorBank& bank, uint32_t channel)
 {
-    o.ch('{');
-    key_bool(o, "enabled", bank.bank.channel_enabled[channel] != 0);
-
-    o.key("zones");
-    o.ch('[');
     const Synth::Zone* const zones = bank.bank.channel_zones[channel];
-    for (uint32_t z = 0; z < Synth::max_instr_per_channel && zones[z].start_note != 0; z++) {
-        o.sep();
-        o.ch('{');
-        // start is the zone's first note; the stored byte keeps the +1 encoding
-        key_uint(o, "start", static_cast<uint32_t>(zones[z].start_note) - 1);
-        key_uint(o, "instrument", zones[z].instrument);
+    const bool empty_chain         = chain_is_empty(bank.bank.channel_chains[channel], bank.effect_routing[channel]);
+    o.ch('{');
+    // Interior defaults keep their channel position.  Decode restores the
+    // disabled state and factory name; empty names have the same display name.
+    if (channel_is_default(bank, channel)) {
         o.ch('}');
-    }
-    o.ch(']');
-
-    o.key("chain");
-    enc_chain(o, bank.bank.channel_chains[channel]);
-    o.ch('}');
-}
-
-// One chain's routing flags: null for an empty chain (which encodes
-// in = Sculptor::effect_in_disconnected), otherwise the input value plus one out
-// flag per occupied slot.
-static void enc_effect_routing(Out&                                output,
-                               const Synth::EffectChainBinding&    chain,
-                               const Sculptor::EffectChainRouting& routing)
-{
-    if (! chain.num_effects) {
-        output.str("null");
         return;
     }
-    output.ch('{');
-    output.key("in");
-    output.uint_value(routing.in);
-    output.key("out");
-    output.ch('[');
-    for (uint32_t slot = 0; slot < chain.num_effects && slot < Synth::max_chain_effects; ++slot) {
-        output.sep();
-        output.uint_value(routing.out[slot]);
+    if (channel_has_custom_name(bank, channel)) {
+        o.key("name");
+        o.text_value(bank.channel_names[channel], Synth::max_name_len);
     }
-    output.ch(']');
-    output.ch('}');
+    if (zones[0].start_note) {
+        o.key("zones");
+        o.ch('[');
+        for (uint32_t z = 0; z < Synth::max_instr_per_channel && zones[z].start_note != 0; z++) {
+            o.sep();
+            o.ch('{');
+            // start is the zone's first note; the stored byte keeps the +1 encoding
+            key_uint(o, "start", static_cast<uint32_t>(zones[z].start_note) - 1);
+            key_uint(o, "instrument", static_cast<uint32_t>(zones[z].instrument) + 1);
+            o.ch('}');
+        }
+        o.ch(']');
+    }
+    if (! empty_chain) {
+        o.key("chain");
+        enc_chain(o, bank.bank.channel_chains[channel], bank.effect_routing[channel]);
+    }
+    o.ch('}');
 }
 
 uint32_t Synth::encode_editor_bank_json(const InstrumentEditorBank* bank, char* dest, uint32_t dest_size)
@@ -1090,28 +1143,14 @@ uint32_t Synth::encode_editor_bank_json(const InstrumentEditorBank* bank, char* 
     }
     Out o = { dest, dest_size, 0, false, false };
     o.str("{\"instrument_editor_bank\":{");
-
-    o.key("instrument_names");
-    o.ch('[');
-    for (uint32_t i = 0; i < bank->bank.instruments.num_allocated; i++) {
-        o.sep();
-        o.text_value(bank->instrument_names[i], Synth::max_name_len);
-    }
-    o.ch(']');
-
-    o.key("channel_names");
-    o.ch('[');
-    for (uint32_t c = 0; c < Synth::max_channels; c++) {
-        o.sep();
-        o.text_value(bank->channel_names[c], Synth::max_name_len);
-    }
-    o.ch(']');
+    o.key("format");
+    o.text_value("synth-bank-v2", sizeof("synth-bank-v2"));
 
     o.key("instruments");
     o.ch('[');
     for (uint32_t i = 0; i < bank->bank.instruments.num_allocated; i++) {
         o.sep();
-        enc_instrument(o, bank->bank.instruments.entries[i]);
+        enc_instrument(o, bank->bank.instruments.entries[i], i + 1, bank->instrument_names[i]);
     }
     o.ch(']');
 
@@ -1119,7 +1158,7 @@ uint32_t Synth::encode_editor_bank_json(const InstrumentEditorBank* bank, char* 
     o.ch('[');
     for (uint32_t i = 0; i < bank->bank.envelopes.num_allocated; i++) {
         o.sep();
-        enc_envelope(o, bank->bank.envelopes.entries[i]);
+        enc_envelope(o, bank->bank.envelopes.entries[i], i + 1);
     }
     o.ch(']');
 
@@ -1127,7 +1166,7 @@ uint32_t Synth::encode_editor_bank_json(const InstrumentEditorBank* bank, char* 
     o.ch('[');
     for (uint32_t i = 0; i < bank->bank.lfos.num_allocated; i++) {
         o.sep();
-        enc_lfo(o, bank->bank.lfos.entries[i]);
+        enc_lfo(o, bank->bank.lfos.entries[i], i + 1);
     }
     o.ch(']');
 
@@ -1135,80 +1174,121 @@ uint32_t Synth::encode_editor_bank_json(const InstrumentEditorBank* bank, char* 
     o.ch('[');
     for (uint32_t i = 0; i < bank->bank.parameters.num_allocated; i++) {
         o.sep();
-        enc_param(o, bank->bank.parameters.entries[i]);
+        enc_param(o, bank->bank.parameters.entries[i], i + 1);
     }
     o.ch(']');
 
-    o.key("channels");
-    o.ch('[');
-    for (uint32_t c = 0; c < Synth::max_channels; c++) {
-        o.sep();
-        enc_channel(o, *bank, c);
+    uint32_t channel_count = Synth::max_channels;
+    while (channel_count && channel_is_default(*bank, channel_count - 1))
+        --channel_count;
+    // Missing trailing entries use decode defaults and need no position markers.
+    if (channel_count) {
+        o.key("channels");
+        o.ch('[');
+        for (uint32_t c = 0; c < channel_count; c++) {
+            o.sep();
+            enc_channel(o, *bank, c);
+        }
+        o.ch(']');
     }
-    o.ch(']');
-
-    o.key("master_chain");
-    enc_chain(o, bank->bank.master_chain);
+    if (! chain_is_empty(bank->bank.master_chain, bank->effect_routing[Synth::max_channels])) {
+        o.key("master_chain");
+        enc_chain(o, bank->bank.master_chain, bank->effect_routing[Synth::max_channels]);
+    }
     // Editor-side state (sparse per-zone node layout records and the missing
     // oscillator-sum masks).
     o.key("editor");
     o.ch('{');
-    o.key("effect_routing");
-    o.ch('[');
-    for (uint32_t owner = 0; owner <= max_channels; ++owner) {
-        o.sep();
-        const EffectChainBinding& chain =
-            owner < max_channels ? bank->bank.channel_chains[owner] : bank->bank.master_chain;
-        enc_effect_routing(o, chain, bank->effect_routing[owner]);
-    }
-    o.ch(']');
     o.key("layouts");
     o.ch('[');
     for (uint32_t i = 0; i < bank->graph_layout_count; i++) {
         const Synth::GraphNodeLayout& record = bank->graph_layout[i];
         o.sep();
         o.ch('{');
-        key_uint(o, "channel", record.channel);
-        key_uint(o, "zone", record.zone);
-        key_uint(o, "kind", record.kind);
-        key_uint(o, "index", record.index);
+        uint32_t kind = record.kind == 0   ? (record.index < 2 ? record.index : 2u)
+                        : record.kind == 1 ? 3u
+                        : record.kind == 2 ? 4u
+                        : record.kind == 4 ? 5u
+                                           : 6u;
+        o.key("kind");
+        o.text_value(graph_kind_names[kind], 16);
+        if (record.kind == 4) {
+            o.key("chain");
+            if (record.channel == Synth::max_channels)
+                o.text_value("master", sizeof("master"));
+            else
+                o.uint_value(record.channel);
+        }
+        else {
+            key_uint(o, "channel", record.channel);
+            key_uint(o, "zone", record.zone);
+        }
+        if (kind == 2)
+            key_uint(o, "layer", record.index - 2u);
+        if (kind == 3)
+            key_uint(o, "envelope_id", record.index);
+        if (kind == 4)
+            key_uint(o, "lfo_id", record.index);
         key_float(o, "x", record.x);
         key_float(o, "y", record.y);
         key_float(o, "width", record.width_override);
         key_float(o, "height", record.height_override);
-        key_uint(o, "depth_source", record.depth_source);
-        key_uint(o, "rate_source", record.rate_source);
+        if (record.kind == 2) {
+            if (record.depth_source >= 7 || record.rate_source >= 7) {
+                o.overflow = true;
+                return 0;
+            }
+            o.key("depth_source");
+            o.text_value(mod_source_names[record.depth_source], 32);
+            o.key("rate_source");
+            o.text_value(mod_source_names[record.rate_source], 32);
+        }
         key_uint(o, "uid", record.uid);
-        o.key("name");
-        // text_value requires an in-buffer terminator, so a full 32-byte
-        // counted name stages through a zeroed 33-byte buffer first.
-        char staged_name[sizeof(record.name) + 1] = {};
-        Sculptor::copy_name_bounded(staged_name, sizeof(staged_name), record.name, sizeof(record.name));
-        o.text_value(staged_name, sizeof(staged_name));
+        uint16_t lfo_id = 0;
+        if (record.kind == 4 && Sculptor::parse_effect_lfo_title(record.name, &lfo_id) && lfo_id) {
+            o.key("node");
+            o.text_value("lfo", sizeof("lfo"));
+            key_uint(o, "lfo_id", lfo_id);
+        }
+        else {
+            o.key("name");
+            char staged_name[sizeof(record.name) + 1] = {};
+            Sculptor::copy_name_bounded(staged_name, sizeof(staged_name), record.name, sizeof(record.name));
+            o.text_value(staged_name, sizeof(staged_name));
+        }
         o.ch('}');
     }
     o.ch(']');
-    // The per-zone source rows ride the editor section: one 7-entry array
-    // per (channel, zone), each entry naming the slot's wired oscillator
-    // (1-based editor ordinal) or 0 for an unwired slot.
     o.key("osc_sources");
     o.ch('[');
-    for (uint32_t c = 0; c < Synth::max_channels; c++) {
-        o.sep();
-        o.ch('[');
-        for (uint32_t z = 0; z < Synth::max_instr_per_channel; z++) {
+    for (uint32_t c = 0; c < Synth::max_channels; ++c) {
+        for (uint32_t z = 0; z < Synth::max_instr_per_channel; ++z) {
+            bool wired = false;
+            for (uint32_t slot = 0; slot < Synth::max_layers; ++slot)
+                wired = wired || bank->graph_osc_source[c][z][slot] != 0;
+            if (! wired)
+                continue;
             o.sep();
+            o.ch('{');
+            key_uint(o, "channel", c);
+            key_uint(o, "zone", z);
+            o.key("wiring");
             o.ch('[');
-            for (uint32_t s = 0; s < Synth::max_layers; s++) {
+            for (uint32_t slot = 0; slot < Synth::max_layers; ++slot) {
+                const uint8_t layer = bank->graph_osc_source[c][z][slot];
+                if (! layer)
+                    continue;
                 o.sep();
-                o.uint_value(bank->graph_osc_source[c][z][s]);
+                o.ch('{');
+                key_uint(o, "slot", slot);
+                key_uint(o, "layer", layer);
+                o.ch('}');
             }
             o.ch(']');
+            o.ch('}');
         }
-        o.ch(']');
     }
     o.ch(']');
-
     // The added-CC registry rides the editor section only when any chain
     // added a CC; absence decodes to all-zero masks.
     bool any_added_cc = false;
@@ -1223,8 +1303,26 @@ uint32_t Synth::encode_editor_bank_json(const InstrumentEditorBank* bank, char* 
         o.key("added_ccs");
         o.ch('[');
         for (uint32_t c = 0; c <= Synth::max_channels; ++c) {
+            const uint16_t mask = bank->added_cc_mask[c];
+            if (! mask)
+                continue;
             o.sep();
-            o.uint_value(bank->added_cc_mask[c]);
+            o.ch('{');
+            o.key("chain");
+            if (c == Synth::max_channels)
+                o.text_value("master", sizeof("master"));
+            else
+                o.uint_value(c);
+            o.key("ccs");
+            o.ch('[');
+            for (uint32_t bit = 0; bit < 16; ++bit) {
+                if (! (mask & (1u << bit)))
+                    continue;
+                o.sep();
+                o.uint_value(16 + bit);
+            }
+            o.ch(']');
+            o.ch('}');
         }
         o.ch(']');
     }
@@ -2123,6 +2221,60 @@ static void want_enum(Walker& w, uint32_t i, const char* const* names, uint32_t 
     w.failed = true;
 }
 
+// Forward extensions of named routing leave the default, unlike understood
+// numeric values whose range checks remain strict.
+static void want_routing_name(Walker&            w,
+                              uint32_t           key,
+                              uint32_t           token,
+                              const char* const* names,
+                              uint32_t           count,
+                              uint32_t*          out)
+{
+    for (uint32_t i = 0; i < count; ++i)
+        if (tok_text_eq(w, token, names[i]) && w.toks[token].type == JSMN_STRING) {
+            *out = i;
+            return;
+        }
+    unknown_field(w, key);
+}
+
+static bool unsigned_literal(Walker& w, uint32_t token, uint32_t maximum, uint32_t* out)
+{
+    const auto& t = w.toks[token];
+    if (t.type != JSMN_PRIMITIVE || t.start == t.end)
+        return false;
+    uint32_t value = 0;
+    for (int i = t.start; i < t.end; ++i) {
+        const char ch = w.doc[i];
+        if (ch < '0' || ch > '9')
+            return false;
+        const uint32_t digit = static_cast<uint32_t>(ch - '0');
+        if (value > maximum / 10 || (value == maximum / 10 && digit > maximum % 10))
+            return false;
+        value = value * 10 + digit;
+    }
+    *out = value;
+    return true;
+}
+
+static uint16_t reference_id(Walker& w, uint32_t key, uint32_t token)
+{
+    uint32_t value = 0;
+    if (! unsigned_literal(w, token, 0xFFFF, &value) || ! value) {
+        unknown_field(w, key);
+        return 0;
+    }
+    return static_cast<uint16_t>(value);
+}
+
+static void normalize_bypass_routing(Sculptor::EffectChainRouting& routing)
+{
+    if (routing.in == Sculptor::effect_in_output)
+        for (auto& feed : routing.out)
+            if (feed == Sculptor::effect_out_output)
+                feed = Sculptor::effect_out_disconnected;
+}
+
 // Reads the instrument voice mode.  Only the three spelled names are valid.
 static void want_voice_mode(Walker& w, uint32_t i, uint8_t* out)
 {
@@ -2240,14 +2392,12 @@ static void decode_gen(Walker& w, uint32_t obj, Synth::TargetBinding& gen, bool*
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
         if (key_eq(w, key_idx, "envelope_desc_id")) {
-            want_uint(w, val_idx, Synth::max_envelopes, &value);
-            gen.envelope_desc_id = static_cast<uint16_t>(value);
+            gen.envelope_desc_id = reference_id(w, key_idx, val_idx);
         }
         else if (key_eq(w, key_idx, "envelope_depth"))
             want_float(w, val_idx, &gen.envelope_depth);
         else if (key_eq(w, key_idx, "lfo_desc_id")) {
-            want_uint(w, val_idx, Synth::max_lfos, &value);
-            gen.lfo_desc_id = static_cast<uint16_t>(value);
+            gen.lfo_desc_id = reference_id(w, key_idx, val_idx);
         }
         else if (key_eq(w, key_idx, "lfo_op")) {
             want_enum(w, val_idx, source_op_names, num_source_ops, &value);
@@ -2597,15 +2747,15 @@ static void decode_instrument(Walker& w, uint32_t obj, Synth::Instrument& instr)
     uint32_t layer_count = 0;
     uint32_t num_layers  = 0;
     bool     have_count  = false;
-    bool     have_layers = false;
 
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
+        if (key_eq(w, key_idx, "id") || key_eq(w, key_idx, "name"))
+            return;
         if (key_eq(w, key_idx, "layer_count")) {
             want_uint(w, val_idx, Synth::max_layers, &layer_count);
             have_count = true;
         }
         else if (key_eq(w, key_idx, "layers")) {
-            have_layers = true;
             walk_array(w, val_idx, Synth::max_layers, [&](uint32_t elem, uint32_t pos) {
                 decode_oscillator(w, elem, instr.layers[pos]);
                 num_layers = pos + 1;
@@ -2633,13 +2783,11 @@ static void decode_instrument(Walker& w, uint32_t obj, Synth::Instrument& instr)
     if (w.failed)
         return;
 
-    if (have_count && have_layers && layer_count != num_layers) {
-        w.failed = true;
-        return;
-    }
-
-    // Absent layers and count still form a valid one-oscillator instrument.
-    instr.layer_count = have_count ? layer_count : (have_layers ? num_layers : 1);
+    // The array defines the layers.  An old count can be stale, so warn on a
+    // mismatch and keep loading the layers that are present.
+    if (have_count && layer_count != num_layers)
+        record_ignored("layer_count mismatch");
+    instr.layer_count = num_layers;
 }
 
 // Decodes one envelope flag key (the value must be 0 or 1) and merges its bit
@@ -2740,6 +2888,8 @@ static void decode_envelope(Walker& w, uint32_t obj, Synth::EnvelopeDescriptor& 
 {
     EnvelopeFields fields;
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
+        if (key_eq(w, key_idx, "id"))
+            return;
         if (! envelope_member(w, key_idx, val_idx, env, fields))
             unknown_field(w, key_idx);
     });
@@ -2758,6 +2908,8 @@ static void decode_lfo(Walker& w, uint32_t obj, Synth::LFODescriptor& lfo)
 {
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
+        if (key_eq(w, key_idx, "id"))
+            return;
         if (key_eq(w, key_idx, "wave")) {
             want_enum(w, val_idx, wave_names, num_waves, &value);
             if (value > static_cast<uint32_t>(Synth::WaveType::noise_wave))
@@ -2818,7 +2970,7 @@ static void decode_param(Walker& w, uint32_t obj, Synth::ParamDescriptor& param)
     EnvelopeFields fields;
 
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
-        if (key_eq(w, key_idx, "kind"))
+        if (key_eq(w, key_idx, "kind") || key_eq(w, key_idx, "id"))
             return; // consumed by the first pass
 
         switch (param.kind) {
@@ -2842,12 +2994,10 @@ static void decode_param(Walker& w, uint32_t obj, Synth::ParamDescriptor& param)
                 else if (key_eq(w, key_idx, "depth"))
                     want_float(w, val_idx, &param.lfo.depth);
                 else if (key_eq(w, key_idx, "depth_param_id")) {
-                    want_uint(w, val_idx, 0xFFFF, &value);
-                    param.lfo.depth_param_id = static_cast<uint16_t>(value);
+                    param.lfo.depth_param_id = reference_id(w, key_idx, val_idx);
                 }
                 else if (key_eq(w, key_idx, "rate_param_id")) {
-                    want_uint(w, val_idx, 0xFFFF, &value);
-                    param.lfo.rate_param_id = static_cast<uint16_t>(value);
+                    param.lfo.rate_param_id = reference_id(w, key_idx, val_idx);
                 }
                 else if (key_eq(w, key_idx, "rate_scale_ms"))
                     want_float(w, val_idx, &param.lfo.rate_scale_ms);
@@ -2865,8 +3015,7 @@ static void decode_param(Walker& w, uint32_t obj, Synth::ParamDescriptor& param)
                         Synth::SourceParam& src = param.plain.sources[pos];
                         walk_object(w, elem, [&](uint32_t s_key, uint32_t s_val) {
                             if (key_eq(w, s_key, "param_id")) {
-                                want_uint(w, s_val, 0xFFFF, &value);
-                                src.param_id = static_cast<uint16_t>(value);
+                                src.param_id = reference_id(w, s_key, s_val);
                             }
                             else if (key_eq(w, s_key, "scale"))
                                 want_float(w, s_val, &src.scale);
@@ -2908,8 +3057,7 @@ static void decode_binding(Walker&                    w,
                 want_float(w, val_idx, &binding.base_value);
         }
         else if (key_eq(w, key_idx, "lfo_desc_id")) {
-            want_uint(w, val_idx, Synth::max_lfos, &value);
-            binding.lfo_desc_id = static_cast<uint16_t>(value);
+            binding.lfo_desc_id = reference_id(w, key_idx, val_idx);
         }
         else if (key_eq(w, key_idx, "lfo_op")) {
             want_enum(w, val_idx, source_op_names, num_source_ops, &value);
@@ -2958,33 +3106,22 @@ static void decode_binding(Walker&                    w,
 // the multiband keeps the decoded value: its zeroed stored block is the
 // fresh slot's normal state, so injecting the default would break the
 // byte-identical save/load round trip.
-static void decode_fir_slope(Walker& w, uint32_t params_token, Synth::EffectSlotBinding& slot)
+static void decode_fir_slope(Walker& w, uint32_t binding_token, Synth::EffectSlotBinding& slot)
 {
-    walk_array(w, params_token, Synth::max_effect_param_floats, [&](uint32_t elem, uint32_t pos) {
-        if (pos != 2) {
+    bool have_base = false;
+    walk_object(w, binding_token, [&](uint32_t key_idx, uint32_t val_idx) {
+        if (! key_eq(w, key_idx, "base_value"))
             return;
-        }
-        bool have_base = false;
-        walk_object(w, elem, [&](uint32_t key_idx, uint32_t val_idx) {
-            if (key_eq(w, key_idx, "base_value")) {
-                have_base     = true;
-                int32_t slope = 0;
-                want_int(w, val_idx, 1, 100, &slope);
-                // want_int rejects negative spellings and out-of-range
-                // magnitudes outright; this explicit range check stays as
-                // defense in depth.
-                if (! w.failed && (slope < 1 || slope > 100)) {
-                    w.failed = true;
-                }
-                if (! w.failed) {
-                    slot.bindings[2].base_value = static_cast<float>(slope);
-                }
-            }
-        });
-        if (! w.failed && ! have_base && slot.type == Synth::EffectType::fir) {
-            slot.bindings[2].base_value = 100.0f;
-        }
+        have_base     = true;
+        int32_t slope = 0;
+        want_int(w, val_idx, 1, 100, &slope);
+        if (! w.failed && (slope < 1 || slope > 100))
+            w.failed = true;
+        if (! w.failed)
+            slot.bindings[2].base_value = static_cast<float>(slope);
     });
+    if (! w.failed && ! have_base && slot.type == Synth::EffectType::fir)
+        slot.bindings[2].base_value = 100.0f;
 }
 
 // Prescans the effect's type so the FIR band keys decode in any key order, mirroring
@@ -3078,12 +3215,11 @@ static void report_out_of_count_bands(Walker&         w,
     }
 }
 
-static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slot)
+static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slot, uint8_t* feed = nullptr)
 {
-    uint32_t num_params     = 0;
-    uint32_t params_token   = 0;
-    bool     have_params    = false;
-    bool     have_fir_bands = false;
+    bool     params_seen[Synth::max_effect_param_floats] = {};
+    uint32_t slope_token                                 = 0;
+    bool     have_fir_bands                              = false;
     uint32_t fir_band_count =
         1; // absent fir_bands decodes as the single band (the plain FIR's stored form, the multiband's normal shape)
     uint32_t fir_band0_gain_token = 0;
@@ -3109,15 +3245,38 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
             want_bool(w, val_idx, &enabled);
             slot.enabled = enabled;
         }
+        else if (key_eq(w, key_idx, "feeds")) {
+            if (feed) {
+                want_routing_name(w, key_idx, val_idx, effect_feed_names, 3, &value);
+                *feed = static_cast<uint8_t>(value);
+            }
+            else
+                unknown_field(w, key_idx);
+        }
         else if (key_eq(w, key_idx, "enable_input")) {
             decode_mod_input(w, val_idx, slot.enable_input);
         }
         else if (key_eq(w, key_idx, "params")) {
-            have_params  = true;
-            params_token = val_idx;
-            walk_array(w, val_idx, Synth::max_effect_param_floats, [&](uint32_t elem, uint32_t pos) {
-                decode_binding(w, elem, slot.bindings[pos], prescanned_type, pos);
-                num_params = pos + 1;
+            if (w.toks[val_idx].type != JSMN_OBJECT) {
+                unknown_field(w, key_idx);
+                return;
+            }
+            walk_object(w, val_idx, [&](uint32_t param_key, uint32_t binding_token) {
+                const uint32_t count = Synth::get_effect_param_floats(prescanned_type);
+                for (uint32_t param = 0; param < count; ++param) {
+                    if (! key_eq(w, param_key, effect_param_keys[static_cast<uint32_t>(prescanned_type)][param]))
+                        continue;
+                    if (w.toks[binding_token].type != JSMN_OBJECT) {
+                        unknown_field(w, param_key);
+                        return;
+                    }
+                    params_seen[param] = true;
+                    decode_binding(w, binding_token, slot.bindings[param], prescanned_type, param);
+                    if (param == 2)
+                        slope_token = binding_token;
+                    return;
+                }
+                unknown_field(w, param_key);
             });
         }
         else if (key_eq(w, key_idx, "fir_bands")) {
@@ -3173,17 +3332,17 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
     if (w.failed)
         return;
 
-    // Missing trailing parameters use defaults. Positional time bindings use
-    // ms-suffixed keys; old unsuffixed time keys are ignored, not converted.
+    // Missing named parameters retain the type's audible defaults. Unknown
+    // shapes and keys are skipped rather than reinterpreted positionally.
     const uint32_t expected_count = Synth::get_effect_param_floats(slot.type);
-    if (num_params > expected_count)
-        w.failed = true;
-    for (uint32_t param = num_params; ! w.failed && param < expected_count; ++param) {
+    for (uint32_t param = 0; ! w.failed && param < expected_count; ++param) {
+        if (params_seen[param])
+            continue;
         slot.bindings[param]            = Synth::EffectParamBinding{};
         slot.bindings[param].base_value = Sculptor::effect_param_default(slot.type, param);
     }
-    if (! w.failed && have_params && Synth::is_fir_effect_type(slot.type))
-        decode_fir_slope(w, params_token, slot);
+    if (! w.failed && slope_token && Synth::is_fir_effect_type(slot.type))
+        decode_fir_slope(w, slope_token, slot);
     if (w.failed)
         return;
     if (have_fir_bands)
@@ -3258,20 +3417,102 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
     }
 }
 
-static void decode_chain(Walker& w, uint32_t obj, Synth::EffectChainBinding& chain)
+static void decode_chain(Walker&                       w,
+                         uint32_t                      obj,
+                         Synth::EffectChainBinding&    chain,
+                         Sculptor::EffectChainRouting& routing)
 {
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "effects"))
             walk_array(w, val_idx, Synth::max_chain_effects, [&](uint32_t elem, uint32_t pos) {
-                decode_effect(w, elem, chain.effects[pos]);
+                decode_effect(w, elem, chain.effects[pos], &routing.out[pos]);
                 chain.num_effects = static_cast<uint8_t>(pos + 1);
             });
+        else if (key_eq(w, key_idx, "input")) {
+            uint32_t value = 0;
+            want_routing_name(w, key_idx, val_idx, effect_input_names, 3, &value);
+            routing.in = static_cast<uint8_t>(value);
+        }
         else
             unknown_field(w, key_idx);
     });
 }
 
-static void decode_zone(Walker& w, uint32_t obj, Synth::Zone& zone)
+// File identities exist only during the bounded document walk. Zero means absent;
+// table values are dense slot+1, so descriptor references resolve directly.
+static uint16_t file_pool_slots[4][65536];
+static uint16_t file_zone_ids[Synth::max_channels][Synth::max_instr_per_channel];
+static uint16_t file_layout_ids[Synth::max_graph_records];
+static uint16_t staged_layout_id;
+static_assert(sizeof(file_pool_slots) + sizeof(file_zone_ids) + sizeof(file_layout_ids) + sizeof(staged_layout_id) ==
+              bank_json_id_scratch_bytes);
+
+static bool decode_pool_id(Walker& w, uint32_t obj, uint16_t* table, uint32_t slot)
+{
+    if (w.toks[obj].type != JSMN_OBJECT) {
+        record_ignored("unknown pool entry, skipped");
+        if (! table[0])
+            table[0] = 1;
+        return false;
+    }
+    uint32_t id   = 0;
+    bool     seen = false;
+    walk_object(w, obj, [&](uint32_t key, uint32_t val) {
+        if (key_eq(w, key, "id")) {
+            seen = true;
+            want_uint(w, val, 0xFFFF, &id);
+        }
+    });
+    if (! seen) {
+        record_ignored("pool entry without id, skipped");
+        if (! table[0])
+            table[0] = 1;
+        return false;
+    }
+    if (! id || table[id]) {
+        w.failed = true;
+        return false;
+    }
+    if (w.failed)
+        return false;
+    table[0]  = 2; // at least one understood entry: missing references are genuinely dangling
+    table[id] = static_cast<uint16_t>(slot + 1);
+    return true;
+}
+
+static bool resolve_file_id(uint16_t& id, const uint16_t* table, bool zero_based = false)
+{
+    if (! id) {
+        if (zero_based)
+            record_ignored("absent parameter/instrument reference, using default");
+        return true;
+    }
+    if (! table[id]) {
+        if (table[0] != 1)
+            return false;
+        record_ignored("reference into legacy id-less pool, skipped");
+        id = 0;
+        return true;
+    }
+    id = static_cast<uint16_t>(table[id] - (zero_based ? 1 : 0));
+    return true;
+}
+
+static bool resolve_chain_ids(Synth::EffectChainBinding& chain, const uint16_t* lfos)
+{
+    for (uint32_t e = 0; e < chain.num_effects; ++e) {
+        Synth::EffectSlotBinding& effect = chain.effects[e];
+        for (auto& binding : effect.bindings)
+            if (! resolve_file_id(binding.lfo_desc_id, lfos))
+                return false;
+        for (auto& binding : effect.fir_bands.bands)
+            if (! resolve_file_id(binding.lfo_desc_id, lfos))
+                return false;
+    }
+    return true;
+}
+
+static void decode_zone(Walker& w, uint32_t obj, Synth::Zone& zone, uint16_t& instrument_id)
 {
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "start")) {
@@ -3280,7 +3521,7 @@ static void decode_zone(Walker& w, uint32_t obj, Synth::Zone& zone)
             zone.start_note = static_cast<uint8_t>(start + 1);
         }
         else if (key_eq(w, key_idx, "instrument")) {
-            want_u8(w, val_idx, Synth::max_instruments - 1, &zone.instrument);
+            instrument_id = reference_id(w, key_idx, val_idx);
         }
         else
             unknown_field(w, key_idx);
@@ -3289,26 +3530,23 @@ static void decode_zone(Walker& w, uint32_t obj, Synth::Zone& zone)
 
 static void decode_channel(Walker& w, uint32_t obj, Synth::InstrumentEditorBank* out, uint32_t channel)
 {
+    // Present content defaults to enabled.  Empty objects keep decode defaults.
+    if (w.toks[obj].type == JSMN_OBJECT && w.toks[obj].size > 0)
+        out->bank.channel_enabled[channel] = 1;
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
-        if (key_eq(w, key_idx, "enabled")) {
-            bool enabled = false;
-            want_bool(w, val_idx, &enabled);
-            out->bank.channel_enabled[channel] = enabled ? 1 : 0;
-        }
+        // An explicit empty name is stored as-is but is not custom.  The next
+        // encode omits it, so the factory name returns on the next decode.
+        if (key_eq(w, key_idx, "name"))
+            want_text(w, val_idx, out->channel_names[channel], Synth::max_name_len);
         else if (key_eq(w, key_idx, "zones"))
             walk_array(w, val_idx, Synth::max_instr_per_channel, [&](uint32_t elem, uint32_t pos) {
-                decode_zone(w, elem, out->bank.channel_zones[channel][pos]);
+                decode_zone(w, elem, out->bank.channel_zones[channel][pos], file_zone_ids[channel][pos]);
             });
         else if (key_eq(w, key_idx, "chain"))
-            decode_chain(w, val_idx, out->bank.channel_chains[channel]);
+            decode_chain(w, val_idx, out->bank.channel_chains[channel], out->effect_routing[channel]);
         else
             unknown_field(w, key_idx);
     });
-}
-
-static void decode_names(Walker& w, uint32_t arr, uint32_t cap, char (*names)[Synth::max_name_len])
-{
-    walk_array(w, arr, cap, [&](uint32_t elem, uint32_t pos) { want_text(w, elem, names[pos], Synth::max_name_len); });
 }
 
 // Pool entries decode into zeroed locals (absent entry fields take their zero
@@ -3319,6 +3557,8 @@ static void decode_names(Walker& w, uint32_t arr, uint32_t cap, char (*names)[Sy
 static void decode_instruments(Walker& w, uint32_t arr, Synth::InstrumentEditorBank* out)
 {
     walk_array(w, arr, Synth::max_instruments, [&](uint32_t elem, uint32_t pos) {
+        if (! decode_pool_id(w, elem, file_pool_slots[0], out->bank.instruments.num_allocated))
+            return;
         Synth::Instrument instr = {};
         decode_instrument(w, elem, instr);
         if (w.failed)
@@ -3329,12 +3569,18 @@ static void decode_instruments(Walker& w, uint32_t arr, Synth::InstrumentEditorB
             return;
         }
         out->bank.instruments.entries[slot] = instr;
+        walk_object(w, elem, [&](uint32_t key, uint32_t val) {
+            if (key_eq(w, key, "name"))
+                want_text(w, val, out->instrument_names[slot], Synth::max_name_len);
+        });
     });
 }
 
 static void decode_envelopes(Walker& w, uint32_t arr, Synth::InstrumentEditorBank* out)
 {
     walk_array(w, arr, Synth::max_envelopes, [&](uint32_t elem, uint32_t pos) {
+        if (! decode_pool_id(w, elem, file_pool_slots[1], out->bank.envelopes.num_allocated))
+            return;
         Synth::EnvelopeDescriptor env = {};
         decode_envelope(w, elem, env);
         if (w.failed)
@@ -3351,6 +3597,8 @@ static void decode_envelopes(Walker& w, uint32_t arr, Synth::InstrumentEditorBan
 static void decode_lfos(Walker& w, uint32_t arr, Synth::InstrumentEditorBank* out)
 {
     walk_array(w, arr, Synth::max_lfos, [&](uint32_t elem, uint32_t pos) {
+        if (! decode_pool_id(w, elem, file_pool_slots[2], out->bank.lfos.num_allocated))
+            return;
         Synth::LFODescriptor lfo = {};
         decode_lfo(w, elem, lfo);
         if (w.failed)
@@ -3367,6 +3615,8 @@ static void decode_lfos(Walker& w, uint32_t arr, Synth::InstrumentEditorBank* ou
 static void decode_parameters(Walker& w, uint32_t arr, Synth::InstrumentEditorBank* out)
 {
     walk_array(w, arr, Synth::max_parameters, [&](uint32_t elem, uint32_t pos) {
+        if (! decode_pool_id(w, elem, file_pool_slots[3], out->bank.parameters.num_allocated))
+            return;
         Synth::ParamDescriptor param = {};
         decode_param(w, elem, param);
         if (w.failed)
@@ -3383,8 +3633,81 @@ static void decode_parameters(Walker& w, uint32_t arr, Synth::InstrumentEditorBa
 // One sparse layout record.  Field-level checks that do not depend on the
 // descriptor pools reject here; the descriptor-range and implied-node-count
 // checks run after the whole document decoded (decode order is free).
-static void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout* record)
+// Recognize kind before walking locators so unknown/numeric records cannot
+// reach invariant validation through default kind zero.
+static uint32_t graph_record_kind(Walker& w, uint32_t object, const char* const* names, uint32_t count)
 {
+    uint32_t kind      = count;
+    bool     kind_seen = false;
+    walk_object(w, object, [&](uint32_t key, uint32_t value) {
+        if (! key_eq(w, key, "kind"))
+            return;
+        kind_seen = true;
+        if (w.toks[value].type == JSMN_STRING) {
+            for (uint32_t i = 0; i < count; ++i)
+                if (tok_text_eq(w, value, names[i])) {
+                    kind = i;
+                    return;
+                }
+        }
+        unknown_field(w, key);
+    });
+    if (! kind_seen)
+        record_ignored("layout missing kind, skipped");
+    return kind;
+}
+
+static bool decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout* record)
+{
+    staged_layout_id    = 0;
+    const uint32_t kind = graph_record_kind(w, obj, graph_kind_names, 7);
+    if (kind >= 7 || w.failed)
+        return false;
+    uint32_t locators    = 0;
+    bool     lfo_node    = false;
+    bool     names_known = true;
+    walk_object(w, obj, [&](uint32_t key, uint32_t value) {
+        if (kind == 4 && (key_eq(w, key, "depth_source") || key_eq(w, key, "rate_source"))) {
+            bool recognized = false;
+            if (w.toks[value].type == JSMN_STRING)
+                for (uint32_t i = 0; i < 7; ++i)
+                    recognized = recognized || tok_text_eq(w, value, mod_source_names[i]);
+            if (! recognized) {
+                unknown_field(w, key);
+                names_known = false;
+            }
+        }
+        if (key_eq(w, key, "channel"))
+            locators |= 1;
+        if (key_eq(w, key, "zone"))
+            locators |= 2;
+        if (key_eq(w, key, "layer"))
+            locators |= 4;
+        if (key_eq(w, key, "envelope_id") || key_eq(w, key, "lfo_id"))
+            locators |= 8;
+        if (key_eq(w, key, "uid"))
+            locators |= 16;
+        if (key_eq(w, key, "chain"))
+            locators |= 32;
+        if (key_eq(w, key, "name"))
+            locators |= 64;
+        if (key_eq(w, key, "node") && tok_text_eq(w, value, "lfo"))
+            lfo_node = true;
+    });
+    if (! names_known)
+        return false; // unknown roles skip the detached LFO
+    const uint32_t required = kind == 5 ? (32u | (lfo_node ? 8u : 64u))
+                                        : (3u | (kind == 2                ? 4u
+                                                 : kind == 3 || kind == 4 ? 24u
+                                                                          : 0u));
+    if ((locators & required) != required) {
+        record_ignored("layout missing locator, skipped");
+        return false;
+    }
+    const uint8_t stored_kinds[] = { 0, 0, 0, 1, 2, 4, 5 };
+    record->kind                 = stored_kinds[kind];
+    if (kind == 1)
+        record->index = 1;
     // unescape_string needs one spare terminator byte, so the name stages
     // into a 33-byte buffer; the kind-gated copy back runs after the object
     // walk, when record->kind is known.
@@ -3397,10 +3720,28 @@ static void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout
             want_u8(w, val_idx, 0xFF, &record->zone);
         }
         else if (key_eq(w, key_idx, "kind")) {
-            want_u8(w, val_idx, 0xFF, &record->kind);
         }
-        else if (key_eq(w, key_idx, "index")) {
-            want_u8(w, val_idx, 0xFF, &record->index);
+        else if (key_eq(w, key_idx, "layer") && kind == 2) {
+            uint8_t layer = 0;
+            want_u8(w, val_idx, Synth::max_layers - 1, &layer);
+            record->index = static_cast<uint8_t>(layer + 2);
+        }
+        else if ((key_eq(w, key_idx, "envelope_id") && kind == 3) || (key_eq(w, key_idx, "lfo_id") && kind == 4)) {
+            staged_layout_id = reference_id(w, key_idx, val_idx);
+        }
+        else if (key_eq(w, key_idx, "chain") && kind == 5) {
+            if (tok_text_eq(w, val_idx, "master"))
+                record->channel = Synth::max_channels;
+            else
+                want_u8(w, val_idx, Synth::max_channels - 1, &record->channel);
+        }
+        else if (key_eq(w, key_idx, "node") && kind == 5) {
+            if (! tok_text_eq(w, val_idx, "lfo"))
+                unknown_field(w, key_idx);
+        }
+        else if (key_eq(w, key_idx, "lfo_id") && kind == 5) {
+            staged_layout_id = reference_id(w, key_idx, val_idx);
+            snprintf(staged_name, sizeof(staged_name), "LFO %u", staged_layout_id);
         }
         else if (key_eq(w, key_idx, "x"))
             want_float(w, val_idx, &record->x);
@@ -3411,10 +3752,14 @@ static void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout
         else if (key_eq(w, key_idx, "height"))
             want_float(w, val_idx, &record->height_override);
         else if (key_eq(w, key_idx, "depth_source")) {
-            want_u8(w, val_idx, 0xFF, &record->depth_source);
+            uint32_t value = 0;
+            want_routing_name(w, key_idx, val_idx, mod_source_names, 7, &value);
+            record->depth_source = static_cast<uint8_t>(value);
         }
         else if (key_eq(w, key_idx, "rate_source")) {
-            want_u8(w, val_idx, 0xFF, &record->rate_source);
+            uint32_t value = 0;
+            want_routing_name(w, key_idx, val_idx, mod_source_names, 7, &value);
+            record->rate_source = static_cast<uint8_t>(value);
         }
         else if (key_eq(w, key_idx, "uid")) {
             want_u8(w, val_idx, 0xFF, &record->uid);
@@ -3425,18 +3770,22 @@ static void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout
         else
             unknown_field(w, key_idx);
     });
+    if ((kind == 3 || kind == 4 || (kind == 5 && lfo_node)) && ! staged_layout_id) {
+        record_ignored("layout without valid descriptor reference, skipped");
+        return false;
+    }
     if (w.failed)
-        return;
+        return false;
 
     if (! stage_record_name(record->name, sizeof(record->name), staged_name, sizeof(staged_name), record->kind)) {
         w.failed = true;
-        return;
+        return false;
     }
 
     if ((record->channel >= Synth::max_channels && ! (record->kind == 4 && record->channel == Synth::max_channels)) ||
         record->zone >= Synth::max_instr_per_channel || ! Synth::editor_record_kind_valid(record->kind)) {
         w.failed = true;
-        return;
+        return false;
     }
 
     // Kind 0 keys a bound node in the fixed canonical numbering (inputs, sum
@@ -3445,12 +3794,12 @@ static void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout
     // Parameters node alone, so its index and uid are unused and must be 0.
     if (record->kind == 0 && (record->index >= Synth::graph_canonical_node_count || record->uid != 0)) {
         w.failed = true;
-        return;
+        return false;
     }
 
     if (record->kind == 5 && (record->index != 0 || record->uid != 0)) {
         w.failed = true;
-        return;
+        return false;
     }
 
     // Kind 2 reads the source bytes as ModSource values; none (0) is
@@ -3458,59 +3807,63 @@ static void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout
     if (record->kind == 2 && (record->depth_source > static_cast<uint8_t>(Synth::ModSource::pressure_combine) ||
                               record->rate_source > static_cast<uint8_t>(Synth::ModSource::pressure_combine))) {
         w.failed = true;
-        return;
+        return false;
     }
+    return true;
 }
 
-static void decode_effect_routing(Walker& walker, uint32_t token, Sculptor::EffectChainRouting* out, uint32_t* out_len)
+// Reject legacy positional rows before interpreting any element.
+static bool object_array(Walker& w, uint32_t token)
 {
-    *out     = Sculptor::EffectChainRouting{};
-    *out_len = routing_len_null;
-    if (walker.toks[token].type == JSMN_PRIMITIVE && tok_text_eq(walker, token, "null")) {
-        return;
+    if (w.toks[token].type != JSMN_ARRAY)
+        return false;
+    uint32_t element = token + 1;
+    for (int i = 0; i < w.toks[token].size; ++i) {
+        if (w.toks[element].type != JSMN_OBJECT)
+            return false;
+        element = skip_value(w, element);
+        if (element == invalid_index)
+            return false;
     }
-    if (walker.toks[token].type != JSMN_OBJECT) {
-        walker.failed = true;
-        return;
-    }
-    uint32_t present = 0;
-    walk_object(walker, token, [&](uint32_t key_idx, uint32_t val_idx) {
-        if (key_eq(walker, key_idx, "in")) {
-            present |= 1;
-            want_u8(walker, val_idx, 2, &out->in);
-        }
-        else if (key_eq(walker, key_idx, "out")) {
-            present |= 2;
-            // The array may precede the effects key in document order, so
-            // only the capacity bound is checked here; the retained length
-            // is compared with the decoded effect count after the walk.
-            if (walker.toks[val_idx].type != JSMN_ARRAY ||
-                static_cast<uint32_t>(walker.toks[val_idx].size) > Synth::max_chain_effects) {
-                walker.failed = true;
-                return;
-            }
-            *out_len = static_cast<uint32_t>(walker.toks[val_idx].size);
-            walk_array(walker, val_idx, Synth::max_chain_effects, [&](uint32_t element, uint32_t slot) {
-                want_u8(walker, element, Sculptor::effect_out_output, &out->out[slot]);
-            });
-        }
+    return true;
+}
+
+static bool decode_source_wiring(Walker& w, uint32_t token, uint8_t* row)
+{
+    if (! object_array(w, token))
+        return false;
+    bool valid = true;
+    walk_array(w, token, Synth::max_layers, [&](uint32_t element, uint32_t) {
+        uint32_t slot = Synth::max_layers, layer = 0;
+        walk_object(w, element, [&](uint32_t key, uint32_t value) {
+            if (key_eq(w, key, "slot"))
+                want_uint(w, value, 0xFFFF, &slot);
+            else if (key_eq(w, key, "layer"))
+                want_uint(w, value, 0xFFFF, &layer);
+            else
+                unknown_field(w, key);
+        });
+        if (slot >= Synth::max_layers || layer == 0)
+            valid = false;
+        else if (layer > 0xFF)
+            w.failed = true;
         else
-            unknown_field(walker, key_idx);
+            row[slot] = static_cast<uint8_t>(layer); // layer-count validation runs after the walk
     });
-    if (present != 3) {
-        walker.failed = true;
+    return valid && ! w.failed;
+}
+
+static bool decode_chain_owner(Walker& w, uint32_t value, uint32_t* owner)
+{
+    if (w.toks[value].type == JSMN_STRING) {
+        if (! tok_text_eq(w, value, "master"))
+            return false;
+        *owner = Synth::max_channels;
+        return true;
     }
-    // Banks saved before the one-output-feed invariant may carry a bypass
-    // wire and an output holder together. The bypass overrode the run
-    // audibly at save time, so the normalization keeps the bypass and
-    // unwires the holder slot instead of refusing the whole bank.
-    if (out->in == Sculptor::effect_in_output) {
-        for (uint32_t slot = 0; slot < Synth::max_chain_effects; ++slot) {
-            if (out->out[slot] == Sculptor::effect_out_output) {
-                out->out[slot] = Sculptor::effect_out_disconnected;
-            }
-        }
-    }
+    if (w.toks[value].type != JSMN_PRIMITIVE)
+        return false;
+    return unsigned_literal(w, value, Synth::max_channels - 1, owner);
 }
 
 static void decode_editor_state(Walker&                      w,
@@ -3524,24 +3877,11 @@ static void decode_editor_state(Walker&                      w,
         if (editor_seen) {
             *editor_seen = true;
         }
-        if (key_eq(w, key_idx, "effect_routing")) {
-            if (routing_present) {
-                *routing_present = true;
-            }
-            if (w.toks[inner_idx].type != JSMN_ARRAY || w.toks[inner_idx].size != Synth::max_channels + 1) {
-                w.failed = true;
-                return;
-            }
-            walk_array(w, inner_idx, Synth::max_channels + 1, [&](uint32_t element, uint32_t owner) {
-                decode_effect_routing(w, element, &out->effect_routing[owner], &decode_routing_out_len[owner]);
-            });
-        }
-        else if (key_eq(w, key_idx, "layouts")) {
+        if (key_eq(w, key_idx, "layouts")) {
             uint16_t detached_per_zone[Synth::max_channels][Synth::max_instr_per_channel] = {};
             walk_array(w, inner_idx, Synth::max_graph_records, [&](uint32_t elem, uint32_t) {
                 Synth::GraphNodeLayout record = {};
-                decode_editor_record(w, elem, &record);
-                if (w.failed)
+                if (! decode_editor_record(w, elem, &record))
                     return;
                 if (record.kind != 0 && record.kind != 4 && record.kind != 5) {
                     if (record.channel >= Synth::max_channels || record.zone >= Synth::max_instr_per_channel ||
@@ -3554,7 +3894,8 @@ static void decode_editor_state(Walker&                      w,
                 // strict metadata decoding refuses duplicates before any deduplication.
                 for (uint32_t i = 0; i < out->graph_layout_count; ++i) {
                     const Synth::GraphNodeLayout& other = out->graph_layout[i];
-                    if (Sculptor::graph_layout_record_identity_equal(other, record)) {
+                    if (file_layout_ids[i] == staged_layout_id &&
+                        Sculptor::graph_layout_record_identity_equal(other, record)) {
                         // One key addresses one node: compatibility decoding
                         // drops later records; strict metadata decoding refuses
                         // duplicates before any deduplication.
@@ -3567,46 +3908,161 @@ static void decode_editor_state(Walker&                      w,
                     w.failed = true;
                     return;
                 }
+                file_layout_ids[out->graph_layout_count]     = staged_layout_id;
                 out->graph_layout[out->graph_layout_count++] = record;
             });
         }
         else if (key_eq(w, key_idx, "osc_sources")) {
-            // One 7-entry row per (channel, zone); each entry names the
-            // slot's wired oscillator (1-based editor ordinal) or 0 for an
-            // unwired slot.  The row lands in the bank verbatim.
-            walk_array(w, inner_idx, Synth::max_channels, [&](uint32_t row_elem, uint32_t channel) {
-                walk_array(w, row_elem, Synth::max_instr_per_channel, [&](uint32_t elem, uint32_t zone) {
-                    if (w.toks[elem].type == JSMN_ARRAY && w.toks[elem].size == 0) {
-                        return;
-                    }
-                    walk_array(w, elem, Synth::max_layers, [&](uint32_t slot_elem, uint32_t slot) {
-                        want_u8(w, slot_elem, Synth::max_layers, &out->graph_osc_source[channel][zone][slot]);
-                        if (w.failed) {
-                            return;
-                        }
-                    });
+            if (! object_array(w, inner_idx)) {
+                unknown_field(w, key_idx);
+                return;
+            }
+            bool seen[Synth::max_channels][Synth::max_instr_per_channel] = {};
+            walk_array(w, inner_idx, Synth::max_channels * Synth::max_instr_per_channel, [&](uint32_t elem, uint32_t) {
+                uint32_t channel = Synth::max_channels, zone = Synth::max_instr_per_channel, wiring = 0;
+                walk_object(w, elem, [&](uint32_t key, uint32_t value) {
+                    if (key_eq(w, key, "channel"))
+                        want_uint(w, value, 0xFFFF, &channel);
+                    else if (key_eq(w, key, "zone"))
+                        want_uint(w, value, 0xFFFF, &zone);
+                    else if (key_eq(w, key, "wiring"))
+                        wiring = value;
+                    else
+                        unknown_field(w, key);
                 });
+                uint8_t row[Synth::max_layers] = {};
+                if (w.failed)
+                    return;
+                if (channel >= Synth::max_channels || zone >= Synth::max_instr_per_channel || seen[channel][zone] ||
+                    ! wiring || w.toks[wiring].size == 0 || ! decode_source_wiring(w, wiring, row)) {
+                    unknown_field(w, key_idx);
+                    return;
+                }
+                seen[channel][zone] = true;
+                memcpy(out->graph_osc_source[channel][zone], row, sizeof(row));
             });
         }
         else if (key_eq(w, key_idx, "added_ccs")) {
-            // The registry contains one mask per channel and master chain.
-            if (w.toks[inner_idx].type != JSMN_ARRAY || w.toks[inner_idx].size != Synth::max_channels + 1) {
-                w.failed = true;
+            if (! object_array(w, inner_idx)) {
+                unknown_field(w, key_idx);
                 return;
             }
-
-            walk_array(w, inner_idx, Synth::max_channels + 1, [&](uint32_t elem, uint32_t chain) {
-                uint32_t value = 0;
-                want_uint(w, elem, 0xFFFF, &value);
-                if (w.failed) {
+            bool seen[Synth::max_channels + 1] = {};
+            walk_array(w, inner_idx, Synth::max_channels + 1, [&](uint32_t elem, uint32_t) {
+                uint32_t owner = Synth::max_channels + 1, ccs = 0;
+                bool     valid = true;
+                walk_object(w, elem, [&](uint32_t key, uint32_t value) {
+                    if (key_eq(w, key, "chain"))
+                        valid = decode_chain_owner(w, value, &owner);
+                    else if (key_eq(w, key, "ccs"))
+                        ccs = value;
+                    else
+                        unknown_field(w, key);
+                });
+                if (w.failed)
+                    return;
+                if (! valid || owner > Synth::max_channels || seen[owner] || ! ccs || w.toks[ccs].type != JSMN_ARRAY) {
+                    unknown_field(w, key_idx);
                     return;
                 }
-                out->added_cc_mask[chain] = static_cast<uint16_t>(value);
+                uint16_t mask = 0;
+                walk_array(w, ccs, 16, [&](uint32_t value, uint32_t) {
+                    uint32_t cc = 0;
+                    if (! unsigned_literal(w, value, 31, &cc) || cc < 16) {
+                        unknown_field(w, key_idx);
+                        valid = false;
+                        return;
+                    }
+                    mask |= static_cast<uint16_t>(1u << (cc - 16));
+                });
+                if (w.failed)
+                    return;
+                if (! valid)
+                    return;
+                seen[owner]               = true;
+                out->added_cc_mask[owner] = mask;
             });
         }
         else
             unknown_field(w, key_idx);
     });
+}
+
+static bool resolve_bank_ids(Synth::InstrumentEditorBank& out)
+{
+    auto& bank = out.bank;
+    for (uint32_t i = 0; i < bank.instruments.num_allocated; ++i) {
+        auto& instrument = bank.instruments.entries[i];
+        for (uint32_t layer = 0; layer < instrument.layer_count; ++layer)
+            for (auto& target : instrument.layers[layer].targets)
+                if (! resolve_file_id(target.envelope_desc_id, file_pool_slots[1]) ||
+                    ! resolve_file_id(target.lfo_desc_id, file_pool_slots[2]))
+                    return false;
+    }
+    for (uint32_t i = 0; i < bank.parameters.num_allocated; ++i) {
+        auto& param = bank.parameters.entries[i];
+        if (param.kind == Synth::ParamKind::lfo) {
+            if (! resolve_file_id(param.lfo.depth_param_id, file_pool_slots[3], true) ||
+                ! resolve_file_id(param.lfo.rate_param_id, file_pool_slots[3], true))
+                return false;
+        }
+        else if (param.kind == Synth::ParamKind::plain)
+            for (uint32_t j = 0; j < param.plain.num_sources; ++j)
+                if (! resolve_file_id(param.plain.sources[j].param_id, file_pool_slots[3], true))
+                    return false;
+    }
+    for (uint32_t c = 0; c < Synth::max_channels; ++c) {
+        uint32_t kept_zones = 0;
+        for (uint32_t z = 0; z < Synth::max_instr_per_channel; ++z) {
+            auto& zone = bank.channel_zones[c][z];
+            if (! zone.start_note)
+                continue;
+            uint16_t id = file_zone_ids[c][z];
+            if (! resolve_file_id(id, file_pool_slots[0], true))
+                return false;
+            if (! bank.instruments.num_allocated) {
+                record_ignored("zone without decoded instrument, skipped");
+                continue;
+            }
+            zone.instrument                     = static_cast<uint8_t>(id);
+            bank.channel_zones[c][kept_zones++] = zone;
+        }
+        for (uint32_t z = kept_zones; z < Synth::max_instr_per_channel; ++z)
+            bank.channel_zones[c][z] = {};
+        if (! bank.instruments.num_allocated && ! kept_zones && bank.channel_enabled[c]) {
+            record_ignored("channel without decoded zones, disabled");
+            bank.channel_enabled[c] = 0;
+        }
+        if (! resolve_chain_ids(bank.channel_chains[c], file_pool_slots[2]))
+            return false;
+    }
+    if (! resolve_chain_ids(bank.master_chain, file_pool_slots[2]))
+        return false;
+    uint32_t kept_layouts = 0;
+    for (uint32_t i = 0; i < out.graph_layout_count; ++i) {
+        auto&    record = out.graph_layout[i];
+        uint16_t id     = file_layout_ids[i];
+        if (record.kind == 1 || record.kind == 2 || (record.kind == 4 && id)) {
+            if (! resolve_file_id(id, file_pool_slots[record.kind == 1 ? 1 : 2]))
+                return false;
+            if (! id) {
+                record_ignored("layout reference defaulted, skipped");
+                continue;
+            }
+            if (record.kind == 4)
+                snprintf(record.name, sizeof(record.name), "LFO %u", id);
+            else
+                record.index = static_cast<uint8_t>(id);
+        }
+        if (file_pool_slots[0][0] == 1 && record.kind != 4 &&
+            ! bank.channel_zones[record.channel][record.zone].start_note) {
+            record_ignored("layout without decoded zone, skipped");
+            continue;
+        }
+        out.graph_layout[kept_layouts++] = record;
+    }
+    out.graph_layout_count = kept_layouts;
+    return true;
 }
 
 static void decode_bank(Walker&                      w,
@@ -3615,8 +4071,15 @@ static void decode_bank(Walker&                      w,
                         bool*                        routing_present = nullptr,
                         bool*                        editor_seen     = nullptr)
 {
+    bool format_seen = false;
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
-        if (key_eq(w, key_idx, "instruments"))
+        if (key_eq(w, key_idx, "format")) {
+            format_seen = true;
+            if (! tok_text_eq(w, val_idx, "synth-bank-v2")) {
+                record_ignored("unrecognized bank format tag, loading anyway");
+            }
+        }
+        else if (key_eq(w, key_idx, "instruments"))
             decode_instruments(w, val_idx, out);
         else if (key_eq(w, key_idx, "envelopes"))
             decode_envelopes(w, val_idx, out);
@@ -3629,17 +4092,16 @@ static void decode_bank(Walker&                      w,
                 decode_channel(w, elem, out, pos);
             });
         else if (key_eq(w, key_idx, "master_chain"))
-            decode_chain(w, val_idx, out->bank.master_chain);
-        else if (key_eq(w, key_idx, "instrument_names"))
-            decode_names(w, val_idx, Synth::max_instruments, out->instrument_names);
-        else if (key_eq(w, key_idx, "channel_names"))
-            decode_names(w, val_idx, Synth::max_channels, out->channel_names);
+            decode_chain(w, val_idx, out->bank.master_chain, out->effect_routing[Synth::max_channels]);
         else if (key_eq(w, key_idx, "editor")) {
             decode_editor_state(w, val_idx, out, routing_present, editor_seen);
         }
         else
             unknown_field(w, key_idx);
     });
+    if (! format_seen) {
+        record_ignored("missing bank format tag, loading anyway");
+    }
 }
 
 // The bank every absent field defaults to: an empty, all-disabled bank with the
@@ -4663,10 +5125,10 @@ static bool decode_document_into_scratch(const char* text, uint32_t len, bool st
     }
 
     w.strict_editor_metadata = strict_editor_metadata;
+    memset(file_pool_slots, 0, sizeof(file_pool_slots));
+    memset(file_zone_ids, 0, sizeof(file_zone_ids));
+    memset(file_layout_ids, 0, sizeof(file_layout_ids));
     fill_default_editor_bank(&decode_scratch);
-    for (uint32_t owner = 0; owner <= Synth::max_channels; ++owner) {
-        decode_routing_out_len[owner] = routing_len_null;
-    }
 
     bool      routing_present = false;
     bool      editor_seen     = false;
@@ -4700,21 +5162,13 @@ static bool decode_document_into_scratch(const char* text, uint32_t len, bool st
         return false;
     }
 
+    if (! resolve_bank_ids(decode_scratch))
+        return false;
     for (uint32_t owner = 0; owner <= Synth::max_channels; ++owner) {
         Synth::EffectChainBinding& chain =
             owner < Synth::max_channels ? decode_scratch.bank.channel_chains[owner] : decode_scratch.bank.master_chain;
         Sculptor::EffectChainRouting& routing = decode_scratch.effect_routing[owner];
-        // An explicitly supplied routing value must match the chain: the
-        // out-array length must equal the decoded effect count, and null is
-        // reserved for an empty chain, so an explicit null with a decoded
-        // chain refuses the document.
-        if (routing_present && decode_routing_out_len[owner] != routing_len_null &&
-            decode_routing_out_len[owner] != chain.num_effects) {
-            return false;
-        }
-        if (routing_present && decode_routing_out_len[owner] == routing_len_null && chain.num_effects != 0) {
-            return false;
-        }
+        normalize_bypass_routing(routing);
         Sculptor::fx_compact_chain(&chain, &routing);
     }
 
@@ -4940,9 +5394,30 @@ bool Synth::decode_instrument_json_for_domain(const char*            text,
 
                     // The staged name outlives the walk lambda: the
                     // kind-gated copy back runs after the object walk.
-                    InstrumentGraphLayout record                               = {};
-                    char                  staged_name[sizeof(record.name) + 1] = {};
-                    uint32_t              present                              = 0;
+                    const uint32_t named_kind = graph_record_kind(w, elem, graph_kind_names, 5);
+                    if (named_kind >= 5)
+                        continue;
+                    bool names_known = true;
+                    walk_object(w, elem, [&](uint32_t key, uint32_t value) {
+                        const bool target = key_eq(w, key, "target");
+                        const bool source = key_eq(w, key, "depth_source") || key_eq(w, key, "rate_source");
+                        if (! target && ! source)
+                            return;
+                        const uint32_t     count = target ? Synth::num_mod_targets : 7;
+                        const char* const* names = target ? mod_target_names : mod_source_names;
+                        for (uint32_t i = 0; i < count; ++i)
+                            if (tok_text_eq(w, value, names[i]))
+                                return;
+                        unknown_field(w, key);
+                        names_known = false;
+                    });
+                    if (! names_known)
+                        continue;
+                    InstrumentGraphLayout record = {};
+                    record.kind                  = named_kind < 3 ? 0 : static_cast<uint8_t>(named_kind - 2);
+                    record.canonical_index       = named_kind < 2 ? static_cast<uint8_t>(named_kind) : 2;
+                    char     staged_name[sizeof(record.name) + 1] = {};
+                    uint32_t present                              = 0;
                     walk_object(w, elem, [&](uint32_t field, uint32_t value) {
                         const char* const keys[] = { "kind",        "x",      "y",
                                                      "width",       "height", "canonical_index",
@@ -4952,8 +5427,8 @@ bool Synth::decode_instrument_json_for_domain(const char*            text,
                         while (key < 11 && ! key_eq(w, field, keys[key])) {
                             ++key;
                         }
-                        if (key == 11) {
-                            w.failed = true;
+                        if (key == 11 || key == 5) {
+                            unknown_field(w, field);
                             return;
                         }
 
@@ -4977,26 +5452,34 @@ bool Synth::decode_instrument_json_for_domain(const char*            text,
                                 record.height_override = number;
                             }
                         }
+                        else if (key == 0) {
+                        }
+                        else if (key == 7 || key == 8 || key == 9) {
+                            uint32_t number = 0;
+                            want_enum(w,
+                                      value,
+                                      key == 7 ? mod_target_names : mod_source_names,
+                                      key == 7 ? Synth::num_mod_targets : 7,
+                                      &number);
+                            if (key == 7)
+                                record.target = static_cast<uint8_t>(number);
+                            if (key == 8)
+                                record.depth_source = static_cast<uint8_t>(number);
+                            if (key == 9)
+                                record.rate_source = static_cast<uint8_t>(number);
+                        }
                         else {
                             uint8_t number = 0;
                             want_u8(w, value, 255, &number);
-                            if (key == 0) {
-                                record.kind = number;
-                            }
-                            if (key == 5) {
-                                record.canonical_index = number;
-                            }
                             if (key == 6) {
                                 record.layer = number;
-                            }
-                            if (key == 7) {
-                                record.target = number;
-                            }
-                            if (key == 8) {
-                                record.depth_source = number;
-                            }
-                            if (key == 9) {
-                                record.rate_source = number;
+                                if (named_kind == 2) {
+                                    if (number >= Synth::max_layers) {
+                                        w.failed = true;
+                                        return;
+                                    }
+                                    record.canonical_index = static_cast<uint8_t>(number + 2);
+                                }
                             }
                         }
                     });
@@ -5018,10 +5501,10 @@ bool Synth::decode_instrument_json_for_domain(const char*            text,
                         continue;
                     }
 
-                    const uint32_t locator_keys[] = { 1u << 5,
+                    const uint32_t locator_keys[] = { named_kind == 2 ? 1u << 6 : 0u,
                                                       (1u << 6) | (1u << 7),
                                                       (1u << 6) | (1u << 7) | (1u << 8) | (1u << 9) };
-                    if (present != (31u | locator_keys[record.kind])) {
+                    if ((present & ~(1u << 10)) != (31u | locator_keys[record.kind])) {
                         w.failed = true;
                         break;
                     }
@@ -5037,18 +5520,17 @@ bool Synth::decode_instrument_json_for_domain(const char*            text,
             }
         }
         else if (key_eq(w, key_idx, "osc_sources")) {
-            // The zone's source row: 1-based editor ordinal per slot, 0 =
-            // unwired.  Validated against the decoded layer count after
-            // the walk; absence means identity wiring (clipboard text
-            // from an older build).
+            if (domain != Synth::InstrumentJsonDomain::clipboard || ! object_array(w, val_idx)) {
+                doc_unknown_field(w, key_idx);
+                return;
+            }
+            uint8_t row[Synth::max_layers] = {};
+            if (! decode_source_wiring(w, val_idx, row)) {
+                doc_unknown_field(w, key_idx);
+                return;
+            }
             sources_seen = true;
-            walk_array(w, val_idx, Synth::max_layers, [&](uint32_t elem, uint32_t slot) {
-                uint32_t value = 0;
-                want_uint(w, elem, Synth::max_layers, &value);
-                if (! w.failed) {
-                    decoded_sources[slot] = static_cast<uint8_t>(value);
-                }
-            });
+            memcpy(decoded_sources, row, sizeof(row));
         }
         else
             doc_unknown_field(w, key_idx);
@@ -5057,9 +5539,8 @@ bool Synth::decode_instrument_json_for_domain(const char*            text,
     if (w.failed) {
         return false;
     }
-    if (! format_ok) {
-        return false;
-    }
+    if (! format_ok)
+        record_ignored("missing instrument format tag, loading anyway");
     if (! layers_seen) {
         return false;
     }
@@ -5460,44 +5941,50 @@ static uint32_t encode_instrument_json_for_domain(char*                         
 
     o.ch(']');
 
-    if (osc_source != nullptr && domain == Synth::InstrumentJsonDomain::clipboard) {
-        // The clipboard carries the zone's source row so unwired
-        // oscillators survive the round trip; the portable domains encode
-        // the playback form, which holds wired layers only.
+    if (domain == Synth::InstrumentJsonDomain::clipboard) {
         o.key("osc_sources");
         o.ch('[');
         for (uint32_t slot = 0; slot < Synth::max_layers; ++slot) {
+            const uint8_t layer = osc_source                  ? osc_source[slot]
+                                  : slot < instr->layer_count ? static_cast<uint8_t>(slot + 1)
+                                                              : 0;
+            if (! layer)
+                continue;
             o.sep();
-            o.uint_value(osc_source[slot]);
+            o.ch('{');
+            key_uint(o, "slot", slot);
+            key_uint(o, "layer", layer);
+            o.ch('}');
         }
         o.ch(']');
     }
-
     o.key("graph_layout");
     o.ch('[');
     for (uint32_t index = 0; index < layout_count; ++index) {
         const Synth::InstrumentGraphLayout& record = layout[index];
         o.sep();
         o.ch('{');
+        const uint32_t kind =
+            record.kind == 0 ? (record.canonical_index < 2 ? record.canonical_index : 2u) : record.kind + 2u;
         o.key("kind");
-        o.uint_value(record.kind);
-        if (record.kind == 0) {
-            o.key("canonical_index");
-            o.uint_value(record.canonical_index);
-        }
-        if (record.kind == 1 || record.kind == 2) {
-            o.key("layer");
-            o.uint_value(record.layer);
-        }
+        o.text_value(graph_kind_names[kind], 16);
+        if (kind == 2)
+            key_uint(o, "layer", record.canonical_index - 2u);
+        if (record.kind == 1 || record.kind == 2)
+            key_uint(o, "layer", record.layer);
         if (record.kind != 0) {
             o.key("target");
-            o.uint_value(record.target);
+            o.text_value(mod_target_names[record.target], 32);
         }
         if (record.kind == 2) {
+            if (record.depth_source >= 7 || record.rate_source >= 7) {
+                o.overflow = true;
+                return 0;
+            }
             o.key("depth_source");
-            o.uint_value(record.depth_source);
+            o.text_value(mod_source_names[record.depth_source], 32);
             o.key("rate_source");
-            o.uint_value(record.rate_source);
+            o.text_value(mod_source_names[record.rate_source], 32);
         }
         o.key("x");
         o.float_value(record.x);
@@ -5742,17 +6229,15 @@ uint32_t Synth::encode_effects_json(const EffectsDocument* document, char* dest,
     Out output = { json_text, 65535, 0, false, false };
     output.ch('{');
     output.key("format");
-    output.text_value("synth-effects-v3", sizeof("synth-effects-v3"));
-    output.key("routing");
-    enc_effect_routing(output, document->chain, document->routing);
+    output.text_value("synth-effects-v4", sizeof("synth-effects-v4"));
     output.key("lfos");
     output.ch('[');
     for (uint32_t index = 0; index < document->lfo_count; ++index) {
         output.sep();
-        enc_lfo(output, document->lfos[index]);
+        enc_lfo(output, document->lfos[index], index + 1);
     }
     output.ch(']');
-    enc_chain_content(output, document->chain, true);
+    enc_chain_content(output, document->chain, document->routing, true);
     output.key("graph_layout");
     output.ch('[');
     for (uint32_t index = 0; index < document->graph_layout_count; ++index) {
@@ -5798,38 +6283,43 @@ bool Synth::decode_effects_json(const char* text, uint32_t len, EffectsDocument*
     EffectsDocument& document = effects_json_scratch;
     memset(&document, 0, sizeof(document));
 
-    uint32_t routing_out_len = routing_len_null;
-    uint32_t fields          = 0;
-    bool     v3              = false;
+    memset(file_pool_slots[2], 0, sizeof(file_pool_slots[2]));
+    uint32_t fields         = 0;
+    bool     current_format = false;
     walk_object(walker, 0, [&](uint32_t key_index, uint32_t value_index) {
         if (key_eq(walker, key_index, "format")) {
             fields |= 1;
-            v3 = tok_text_eq(walker, value_index, "synth-effects-v3");
-            if (! v3)
+            current_format = tok_text_eq(walker, value_index, "synth-effects-v4");
+            if (! current_format)
                 record_ignored("unrecognized format tag, loading anyway");
         }
-        else if (key_eq(walker, key_index, "routing")) {
-            fields |= 32;
-            decode_effect_routing(walker, value_index, &document.routing, &routing_out_len);
+        else if (key_eq(walker, key_index, "input")) {
+            uint32_t value = 0;
+            want_routing_name(walker, key_index, value_index, effect_input_names, 3, &value);
+            document.routing.in = static_cast<uint8_t>(value);
         }
         else if (key_eq(walker, key_index, "lfos")) {
             fields |= 2;
             walk_array(walker, value_index, max_lfos, [&](uint32_t element, uint32_t position) {
-                decode_lfo(walker, element, document.lfos[position]);
-                document.lfo_count = position + 1;
+                if (! decode_pool_id(walker, element, file_pool_slots[2], document.lfo_count))
+                    return;
+                decode_lfo(walker, element, document.lfos[document.lfo_count++]);
             });
         }
         else if (key_eq(walker, key_index, "effects")) {
             fields |= 4;
             walk_array(walker, value_index, max_chain_effects, [&](uint32_t element, uint32_t position) {
-                decode_effect(walker, element, document.chain.effects[position]);
+                decode_effect(walker, element, document.chain.effects[position], &document.routing.out[position]);
                 document.chain.num_effects = static_cast<uint8_t>(position + 1);
             });
         }
         else if (key_eq(walker, key_index, "graph_layout")) {
             fields |= 8;
             walk_array(walker, value_index, effects_graph_layout_capacity, [&](uint32_t element, uint32_t position) {
-                EffectsGraphLayout& record  = document.graph_layout[position];
+                const uint32_t kind = graph_record_kind(walker, element, effects_layout_names, 5);
+                if (kind >= 5)
+                    return;
+                EffectsGraphLayout& record  = document.graph_layout[document.graph_layout_count];
                 uint32_t            present = 0;
                 walk_object(walker, element, [&](uint32_t layout_key, uint32_t layout_value) {
                     uint32_t value = 0;
@@ -5845,8 +6335,7 @@ bool Synth::decode_effects_json(const char* text, uint32_t len, EffectsDocument*
                     }
                     else if (key_eq(walker, layout_key, "lfo_desc_id")) {
                         present |= 4;
-                        want_uint(walker, layout_value, max_lfos, &value);
-                        record.index = static_cast<uint16_t>(value);
+                        record.index = reference_id(walker, layout_key, layout_value);
                     }
                     else if (key_eq(walker, layout_key, "x")) {
                         present |= 8;
@@ -5863,7 +6352,7 @@ bool Synth::decode_effects_json(const char* text, uint32_t len, EffectsDocument*
                         want_float(walker, layout_value, &record.height_override);
                     }
                     else {
-                        walker.failed = true;
+                        unknown_field(walker, layout_key);
                     }
                 });
                 const uint32_t expected = 25u | (record.kind == effects_graph_layout_effect ? 2u
@@ -5872,7 +6361,7 @@ bool Synth::decode_effects_json(const char* text, uint32_t len, EffectsDocument*
                 if (present != expected) {
                     walker.failed = true;
                 }
-                document.graph_layout_count = position + 1;
+                ++document.graph_layout_count;
             });
         }
         else {
@@ -5882,16 +6371,25 @@ bool Synth::decode_effects_json(const char* text, uint32_t len, EffectsDocument*
     if (walker.failed) {
         return false;
     }
-    // An explicitly supplied routing value must match the chain: the
-    // out-array length must equal the decoded effect count, and null is
-    // reserved for an empty chain, so an explicit null with a decoded
-    // chain refuses the document.
-    if (routing_out_len != routing_len_null && routing_out_len != document.chain.num_effects) {
+    if (! (fields & 1))
+        record_ignored("missing effects format tag, loading anyway");
+    if (! resolve_chain_ids(document.chain, file_pool_slots[2]))
         return false;
+    uint32_t kept = 0;
+    for (uint32_t i = 0; i < document.graph_layout_count; ++i) {
+        auto& record = document.graph_layout[i];
+        if (record.kind == effects_graph_layout_lfo) {
+            if (! resolve_file_id(record.index, file_pool_slots[2]))
+                return false;
+            if (! record.index) {
+                record_ignored("LFO layout reference defaulted, skipped");
+                continue;
+            }
+        }
+        document.graph_layout[kept++] = record;
     }
-    if ((fields & 32) && routing_out_len == routing_len_null && document.chain.num_effects != 0) {
-        return false;
-    }
+    document.graph_layout_count = kept;
+    normalize_bypass_routing(document.routing);
     uint32_t old_to_new[max_chain_effects] = {};
     Sculptor::fx_compact_chain(&document.chain, &document.routing, old_to_new);
     // Slot-keyed effect records follow the permuted payloads; a record

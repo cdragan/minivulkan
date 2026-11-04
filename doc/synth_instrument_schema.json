@@ -1,420 +1,925 @@
 {
-	"$schema": "http://json-schema.org/draft-07/schema#",
-	"$id": "synth-instrument-v1",
-	"title": "Synth instrument document",
-    "description": "One instrument for the sculptor synth, written for humans and LLMs. Units are musical: times in seconds, LFO rates in Hz, pitches in semitones, amounts 0..1. Paste into a zone with the zone right-click menu's 'Paste from Clipboard'. Copy an existing zone with 'Copy to Clipboard' to see a real document. Unknown fields and older format tags are ignored with a visible warning. Malformed JSON, bank invariant violations and invalid required fields remain errors. Omitted optional fields have working defaults; nested objects must provide their own required fields. The bank's channel and master effect chains and free-standing parameters are outside this format on purpose: a document covers the instrument only.",
-	"type": "object",
-	"properties": {
-    "pitch_bend_lock": { "type": "boolean", "default": true, "description": "Capture pitch bend when the voice starts release (pedal-up or timed auto-release included)." },
-		"format": {
-			"const": "synth-instrument-v1",
-            "description": "Document format identifier; writer emits synth-instrument-v1 and older values warn but do not block loading."
-		},
-		"note_skew_semitones": {
-			"type": "number",
-			"minimum": 0,
-			"maximum": 1,
-			"default": 0,
-			"description": "Random pitch skew drawn once per note."
-		},
-		"layer_skew_semitones": {
-			"type": "number",
-			"minimum": 0,
-			"maximum": 1,
-			"default": 0,
-			"description": "Random pitch skew drawn per oscillator layer."
-		},
-		"release_seconds": {
-			"type": "number",
-			"minimum": 0,
-			"maximum": 3600,
-			"default": 0,
-            "description": "Sustain decay length: once a layer's volume envelope enters its sustain span, the whole volume decays exponentially toward silence over this many seconds, through the release as well.  0 keeps the stored hold/loop behavior."
-		},
-		"voices": {
-			"type": "string",
-			"enum": ["multiple", "reuse per-note", "single"],
-			"default": "multiple",
-			"description": "Voice allocation.  multiple: every note-on takes new voices.  reuse per-note: a repeated note on the same instrument restarts its own voices in place and keeps their current loudness, so a quick re-press does not dip to silence.  single: the instrument plays one note at a time across all MIDI channels, and any new note takes over the sounding voices with the same restart; other notes of the instrument fade out."
-		},
-		"graph_layout": {
-			"type": "array",
-			"maxItems": 177,
-			"uniqueItems": true,
-			"description": "Optional portable positions and sizes of nodes derived from this instrument; no effects, wiring or missing-sum state.  Canonical 0 is input, 1 is sum, 2+n is oscillator layer n, which must exist.  Generator locators use layer and fixed numeric ModTarget; descriptor aliases resolve after the whole document parses and may have only one saved record.  Unresolved or duplicate resolved nodes are refused.  All numbers must be finite; sizes are nonnegative.  Newly encoded documents always include this array.",
-			"items": {
-				"oneOf": [
-					{
-						"type": "object",
-						"properties": {
-							"kind": {
-								"type": "integer",
-								"const": 0
-							},
-							"x": {
-								"type": "number"
-							},
-							"y": {
-								"type": "number"
-							},
-							"width": {
-								"type": "number",
-								"minimum": 0
-							},
-							"height": {
-								"type": "number",
-								"minimum": 0
-							},
-							"canonical_index": {
-								"type": "integer",
-								"minimum": 0,
-								"maximum": 8
-							}
-						},
-						"required": [
-							"kind",
-							"x",
-							"y",
-							"width",
-							"height",
-							"canonical_index"
-						],
-						"additionalProperties": false
-					},
-					{
-						"type": "object",
-						"properties": {
-							"kind": {
-								"type": "integer",
-								"const": 1
-							},
-							"x": {
-								"type": "number"
-							},
-							"y": {
-								"type": "number"
-							},
-							"width": {
-								"type": "number",
-								"minimum": 0
-							},
-							"height": {
-								"type": "number",
-								"minimum": 0
-							},
-							"layer": {
-								"type": "integer",
-								"minimum": 0,
-								"maximum": 6
-							},
-							"target": {
-								"type": "integer",
-								"enum": [0, 1, 2, 7, 8, 11]
-							}
-						},
-						"required": [
-							"kind",
-							"x",
-							"y",
-							"width",
-							"height",
-							"layer",
-							"target"
-						],
-						"additionalProperties": false
-					},
-					{
-						"type": "object",
-						"properties": {
-							"kind": {
-								"type": "integer",
-								"const": 2
-							},
-							"x": {
-								"type": "number"
-							},
-							"y": {
-								"type": "number"
-							},
-							"width": {
-								"type": "number",
-								"minimum": 0
-							},
-							"height": {
-								"type": "number",
-								"minimum": 0
-							},
-							"layer": {
-								"type": "integer",
-								"minimum": 0,
-								"maximum": 6
-							},
-							"target": {
-								"type": "integer",
-								"enum": [0, 1, 2, 7, 8, 11]
-							},
-							"depth_source": {
-								"type": "integer",
-								"minimum": 0,
-								"maximum": 6
-							},
-							"rate_source": {
-								"type": "integer",
-								"minimum": 0,
-								"maximum": 6
-							}
-						},
-						"required": [
-							"kind",
-							"x",
-							"y",
-							"width",
-							"height",
-							"layer",
-							"target",
-							"depth_source",
-							"rate_source"
-						],
-						"additionalProperties": false
-					}
-				]
-			}
-		},
-		"layers": {
-			"type": "array",
-			"minItems": 1,
-			"maxItems": 7,
-			"description": "Oscillator layers mixed together in one instrument voice. The editor supports up to 7; each Add Oscillator action adds one layer.",
-			"items": { "$ref": "#/definitions/layer" }
-		}
-	},
-	"required": ["format", "layers"],
-	"additionalProperties": false,
-	"definitions": {
-		"wave": {
-			"type": "string",
-			"enum": ["none", "sine", "sawtooth", "pulse", "noise", "pad", "string"],
-			"description": "Waveform names. A sawtooth at duty 0.5 is a triangle; a pulse at duty 0.5 is a square; set the target block 'duty_a' or 'duty_b' to place the duty.  Pad uses duty as the harmonic wander depth (0 = locked, 1 = deepest). String is a plucked string, accepted as wave_a only (wave_b refuses it)."
-		},
-		"mod_target": {
-			"type": "string",
-            "enum": ["volume", "pitch", "panning", "duty_a", "duty_b", "osc_mix", "fm_index", "fir_pitch_spread", "fm_ratio", "pad_tone_a", "pad_tone_b", "fir_slope", "fir_band0_offset", "fir_band0_gain", "fir_band1_offset", "fir_band1_spread", "fir_band1_gain", "fir_band1_slope", "fir_band2_offset", "fir_band2_spread", "fir_band2_gain", "fir_band2_slope", "fir_band3_offset", "fir_band3_spread", "fir_band3_gain", "fir_band3_slope", "string_damping", "string_release_damping", "string_dispersion", "string_brightness", "string_strike"],
-            "description": "Modulated quantities. Units: volume, panning (0.5 = center), duty_a/duty_b, osc_mix and fm_index (1.0 = full depth) are 0..1; pitch is -24..24 semitones; fir_pitch_spread depends on the layer fir_type: bandpass = spread in semitones 0..36 around the note pitch, one band of up to four (fir_bands); lowpass and highpass = fixed cutoff in Hz 0..22050 with no key tracking, 0 = the edge-off bypassed state; a bandpass bypasses only while every band's spread is zero, so a zero band 0 spread with a positive higher-band spread still filters; fm_ratio is the ratio, slider-bounded 0.125..8 (0 stays bank-legal as the stored unset carrier value). Only 'volume' defaults to 1.0 and 'panning' to 0.5, fm_ratio inherits the layer's stored mod_ratio when its block is absent, and every other base defaults to 0. pad_tone_a/pad_tone_b is the per-oscillator pad spectral tilt in -1..+1: the harmonic exponent is 1 + value (0 = saw-like 1/n spectrum, +1 = mellow 1/n^2, -1 = flat/brightest), inert for non-pad waves. string_damping/string_release_damping and string_dispersion are 0..1 (0 = natural decay) and inert for non-string waves. fir_slope is the FIR window slope as an integer percent 1..100; an unrouted layer carries it in the layer's fir_slope scalar, a routed one in the target block's base."
-		},
-		"mod_source": {
-			"type": "string",
-			"enum": ["none", "pitch_bend", "mod_wheel", "channel_pressure", "velocity", "aftertouch", "pressure_combine"],
-			"description": "MIDI modulation sources. velocity is per-note; aftertouch is polyphonic; pressure_combine is the max of per-note aftertouch and channel pressure."
-		},
-		"source_op": {
-			"type": "string",
-			"enum": ["add", "multiply"],
-			"description": "How a value combines onto its target: added or multiplied."
-		},
-		"layer": {
-			"type": "object",
-			"description": "One oscillator. The shared routing (base, sources) may be set by the first layer that supplies base or sources for a target (a layer with only generators does not claim it); every layer has its own envelope and LFO generators.",
-			"properties": {
-				"wave_a": { "$ref": "#/definitions/wave", "description": "Required. The primary oscillator; for fm the carrier, for sync the master." },
-				"wave_b": { "type": "string", "enum": ["none", "sine", "sawtooth", "pulse", "noise", "pad"], "description": "The second oscillator; for fm the modulator, for sync the slave, for ring_mod the carrier. Default: none." },
-				"mode": {
-					"type": "string",
-					"enum": ["blend", "fm", "sync", "ring_mod"],
-					"default": "blend",
-					"description": "blend mixes both waves by osc_mix; fm frequency-modulates wave_a with wave_b; sync hard-syncs wave_b to wave_a; ring_mod multiplies wave_a by wave_b evaluated at mod_ratio * wave_a's phase, with osc_mix crossfading the dry wave_a to the product."
-				},
-				"mod_ratio": {
-					"type": "number",
-					"default": 1,
-					"description": "The FM ratio (fm) or hard-sync cycle ratio (sync); 0 is a legal bank value, any nonzero value is 0.125..8; ignored by blend. For ring_mod it is the carrier ratio. The static value mirrors the fm_ratio target base for compatibility."
-				},
-				"octave_offset": {
-					"type": "integer",
-					"minimum": -12,
-					"maximum": 12,
-					"default": 0,
-					"description": "Whole-octave pitch shift; 12 * octave_offset semitones are added to the oscillator pitch."
-				},
-			"fir_slope": {
-				"oneOf": [
-					{
-						"type": "integer",
-						"minimum": 1,
-						"maximum": 100,
-						"default": 100,
-						"description": "FIR window slope percent; 100 is the sharpest response (the full 1025-tap window), lower values widen the transition band. The window span grows exponentially with the percent: 11 taps at 1, 1025 taps at 100. Only present while the layer's fir_slope target is unrouted; a routed layer states the target block instead and the scalar re-decodes to the default 100."
-					},
-					{ "$ref": "#/definitions/target_block" }
-				],
-				"description": "FIR window slope: the integer percent scalar when the layer's fir_slope target is unrouted, or that target's block (its base is the integer percent 1..100, see mod_target) when it is routed. The two forms never appear together in one layer object."
-			},
-				"fir_bands": {
-        "type": "integer", "minimum": 1, "maximum": 4,
-        "description": "Active bandpass band count; absent decodes as the stored single band. Bands 1..3 state their four parameters as fir_bandN_offset/spread/gain/slope target blocks; band 0 reuses fir_pitch_spread and fir_slope and adds fir_band0_offset/fir_band0_gain. A band whose block is absent decodes its defaults (offset 0, spread 0, gain 1, slope 100 for bands 1..3); a present block with an omitted base decodes 0, so an explicitly saved gain-0 band stays inactive instead of reloading as the 1.0 default."
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "synth-instrument-v2",
+  "title": "Sculptor instrument document v2",
+  "description": "One instrument for the sculptor synth, written for humans and LLMs. Units are musical: times in seconds, LFO rates in Hz, pitches in semitones, amounts 0..1. Paste into a zone with the zone right-click menu's 'Paste from Clipboard'. Copy an existing zone with 'Copy to Clipboard' to see a real document. Unknown fields and older format tags are ignored with a visible warning. Malformed JSON, bank invariant violations and invalid required fields remain errors. Omitted optional fields have working defaults; nested objects must provide their own required fields. The bank's channel and master effect chains and free-standing parameters are outside this format on purpose: a document covers the instrument only.",
+  "type": "object",
+  "properties": {
+    "pitch_bend_lock": {
+      "type": "boolean",
+      "default": true,
+      "description": "Capture pitch bend when the voice starts release (pedal-up or timed auto-release included)."
+    },
+    "format": {
+      "const": "synth-instrument-v2"
+    },
+    "note_skew_semitones": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0,
+      "description": "Random pitch skew drawn once per note."
+    },
+    "layer_skew_semitones": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0,
+      "description": "Random pitch skew drawn per oscillator layer."
+    },
+    "release_seconds": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 3600,
+      "default": 0,
+      "description": "Sustain decay length: once a layer's volume envelope enters its sustain span, the whole volume decays exponentially toward silence over this many seconds, through the release as well.  0 keeps the stored hold/loop behavior."
+    },
+    "voices": {
+      "type": "string",
+      "enum": [
+        "multiple",
+        "reuse per-note",
+        "single"
+      ],
+      "default": "multiple",
+      "description": "Voice allocation.  multiple: every note-on takes new voices.  reuse per-note: a repeated note on the same instrument restarts its own voices in place and keeps their current loudness, so a quick re-press does not dip to silence.  single: the instrument plays one note at a time across all MIDI channels, and any new note takes over the sounding voices with the same restart; other notes of the instrument fade out."
+    },
+    "graph_layout": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "input"
+              },
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "width": {
+                "type": "number"
+              },
+              "height": {
+                "type": "number"
+              },
+              "name": {
+                "type": "string",
+                "maxLength": 32
+              }
+            },
+            "required": [
+              "kind",
+              "x",
+              "y",
+              "width",
+              "height"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "sum"
+              },
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "width": {
+                "type": "number"
+              },
+              "height": {
+                "type": "number"
+              },
+              "name": {
+                "type": "string",
+                "maxLength": 32
+              }
+            },
+            "required": [
+              "kind",
+              "x",
+              "y",
+              "width",
+              "height"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "oscillator"
+              },
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "width": {
+                "type": "number"
+              },
+              "height": {
+                "type": "number"
+              },
+              "name": {
+                "type": "string",
+                "maxLength": 32
+              },
+              "layer": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 6
+              }
+            },
+            "required": [
+              "kind",
+              "x",
+              "y",
+              "width",
+              "height",
+              "layer"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "envelope"
+              },
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "width": {
+                "type": "number"
+              },
+              "height": {
+                "type": "number"
+              },
+              "name": {
+                "type": "string",
+                "maxLength": 32
+              },
+              "layer": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "target": {
+                "enum": [
+                  "volume",
+                  "pitch",
+                  "panning",
+                  "duty_a",
+                  "duty_b",
+                  "osc_mix",
+                  "fm_index",
+                  "fir_pitch_spread",
+                  "fm_ratio",
+                  "pad_tone_a",
+                  "pad_tone_b",
+                  "fir_slope",
+                  "fir_band0_offset",
+                  "fir_band0_gain",
+                  "fir_band1_offset",
+                  "fir_band1_spread",
+                  "fir_band1_gain",
+                  "fir_band1_slope",
+                  "fir_band2_offset",
+                  "fir_band2_spread",
+                  "fir_band2_gain",
+                  "fir_band2_slope",
+                  "fir_band3_offset",
+                  "fir_band3_spread",
+                  "fir_band3_gain",
+                  "fir_band3_slope",
+                  "string_damping",
+                  "string_release_damping",
+                  "string_dispersion",
+                  "string_brightness",
+                  "string_strike"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "x",
+              "y",
+              "width",
+              "height",
+              "layer",
+              "target"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "lfo"
+              },
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "width": {
+                "type": "number"
+              },
+              "height": {
+                "type": "number"
+              },
+              "name": {
+                "type": "string",
+                "maxLength": 32
+              },
+              "layer": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "target": {
+                "enum": [
+                  "volume",
+                  "pitch",
+                  "panning",
+                  "duty_a",
+                  "duty_b",
+                  "osc_mix",
+                  "fm_index",
+                  "fir_pitch_spread",
+                  "fm_ratio",
+                  "pad_tone_a",
+                  "pad_tone_b",
+                  "fir_slope",
+                  "fir_band0_offset",
+                  "fir_band0_gain",
+                  "fir_band1_offset",
+                  "fir_band1_spread",
+                  "fir_band1_gain",
+                  "fir_band1_slope",
+                  "fir_band2_offset",
+                  "fir_band2_spread",
+                  "fir_band2_gain",
+                  "fir_band2_slope",
+                  "fir_band3_offset",
+                  "fir_band3_spread",
+                  "fir_band3_gain",
+                  "fir_band3_slope",
+                  "string_damping",
+                  "string_release_damping",
+                  "string_dispersion",
+                  "string_brightness",
+                  "string_strike"
+                ]
+              },
+              "depth_source": {
+                "enum": [
+                  "none",
+                  "pitch_bend",
+                  "mod_wheel",
+                  "channel_pressure",
+                  "velocity",
+                  "aftertouch",
+                  "pressure_combine"
+                ]
+              },
+              "rate_source": {
+                "enum": [
+                  "none",
+                  "pitch_bend",
+                  "mod_wheel",
+                  "channel_pressure",
+                  "velocity",
+                  "aftertouch",
+                  "pressure_combine"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "x",
+              "y",
+              "width",
+              "height",
+              "layer",
+              "target",
+              "depth_source",
+              "rate_source"
+            ]
+          }
+        ]
       },
-				"fir_type": {
-					"type": "string",
-					"enum": ["off", "bandpass", "lowpass", "highpass"],
-					"default": "bandpass",
-					"description": "Oscillator filter type. bandpass uses fir_pitch_spread as a spread in semitones (0..36) around the note pitch; lowpass and highpass use it as a fixed cutoff in Hz (0..22050); off disables the filter."
-				},
-				"volume": { "$ref": "#/definitions/target_block" },
-				"pitch": { "$ref": "#/definitions/target_block" },
-				"panning": { "$ref": "#/definitions/target_block" },
-				"duty_a": { "$ref": "#/definitions/target_block" },
-				"duty_b": { "$ref": "#/definitions/target_block" },
-				"osc_mix": { "$ref": "#/definitions/target_block" },
-				"fm_index": { "$ref": "#/definitions/target_block" },
-				"fir_pitch_spread": { "$ref": "#/definitions/target_block" },
-      "fir_band0_offset": { "$ref": "#/definitions/target_block" }, "fir_band0_gain": { "$ref": "#/definitions/target_block" }, "fir_band1_offset": { "$ref": "#/definitions/target_block" }, "fir_band1_spread": { "$ref": "#/definitions/target_block" }, "fir_band1_gain": { "$ref": "#/definitions/target_block" }, "fir_band1_slope": { "$ref": "#/definitions/target_block" }, "fir_band2_offset": { "$ref": "#/definitions/target_block" }, "fir_band2_spread": { "$ref": "#/definitions/target_block" }, "fir_band2_gain": { "$ref": "#/definitions/target_block" }, "fir_band2_slope": { "$ref": "#/definitions/target_block" }, "fir_band3_offset": { "$ref": "#/definitions/target_block" }, "fir_band3_spread": { "$ref": "#/definitions/target_block" }, "fir_band3_gain": { "$ref": "#/definitions/target_block" }, "fir_band3_slope": { "$ref": "#/definitions/target_block" }, "string_damping": { "$ref": "#/definitions/target_block" }, "string_release_damping": { "$ref": "#/definitions/target_block" }, "string_pick": { "type": "number", "description": "Deprecated and ignored: the pick position was removed.  Old documents that carry it still load whatever the value; new saves omit it." },
-        "string_strike": { "oneOf": [{ "type": "number", "minimum": 0, "maximum": 1, "default": 0 }, { "$ref": "#/definitions/target_block" }], "description": "Strike blend or routing object, captured at note-on.  An omitted object base means zero." },
-        "string_drive": { "type": "number", "minimum": 0.5, "maximum": 10, "default": 3, "description": "Strike force window in milliseconds." },
-        "string_spectrum": { "type": "number", "minimum": 1.5, "maximum": 4, "default": 2, "description": "Strike harmonic rolloff exponent." },
-        "string_brightness": { "oneOf": [ { "type": "number", "minimum": 0, "maximum": 1, "default": 1 }, { "$ref": "#/definitions/target_block" } ], "description": "Pluck brightness scalar or routing object.  The scalar owns the base, including zero.  An omitted object base means one." },
-				"string_dispersion": { "oneOf": [ { "type": "number", "minimum": 0, "maximum": 1, "default": 0, "description": "Plucked-string dispersion (stiff-string inharmonicity, strongest on low notes); 0 = off (default), up to 1; used by wave_a string only.  Present while the layer's string_dispersion target is unrouted." }, { "$ref": "#/definitions/target_block" } ], "description": "Plucked-string dispersion: the number when the layer's string_dispersion target is unrouted, or that target's block (its base is 0..1, see mod_target) when it is routed.  A modulated value changes the timbre every block while the retune holds the fundamental.  The two forms never appear together in one layer object." },
-				"string_dispersion_sections": { "type": "integer", "minimum": 1, "maximum": 6, "default": 4, "description": "Plucked-string dispersion allpass section count, 1 to 6 (default 4); stored and round-tripped but currently inert: the synth always runs a single section." },
-				"fm_ratio": { "$ref": "#/definitions/target_block" },
-				"pad_tone_a": { "$ref": "#/definitions/target_block" },
-				"pad_tone_b": { "$ref": "#/definitions/target_block" },
-				"routing": {
-					"type": "object",
-					"description": "Bank-style routing alias: keyed by mod_target name, each value a bank routing block. Accepted so a routing block can share a layer with the fir_slope scalar key; documents written by the encoder never include it.",
-					"additionalProperties": { "$ref": "#/definitions/bank_routing_block" }
-				}
-			},
-			"required": ["wave_a"],
-			"additionalProperties": false
-		},
-		"bank_routing_block": {
-			"type": "object",
-			"description": "The saved-bank spelling of one target's routing: base_value in the target's units (for fir_slope, an integer percent 1..100) and up to two MIDI inputs.",
-			"properties": {
-				"base_value": { "type": "number" },
-				"inputs": {
-					"type": "array",
-					"maxItems": 2,
-					"items": {
-						"type": "object",
-						"properties": {
-							"source": { "$ref": "#/definitions/mod_source" },
-							"op": { "$ref": "#/definitions/source_op" },
-							"cc_number": { "type": "integer" },
-							"scale": { "type": "number" }
-						},
-						"required": ["source"],
-						"additionalProperties": false
-					}
-				}
-			},
-			"additionalProperties": false
-		},
-		"target_block": {
-			"type": "object",
-			"description": "One modulated quantity: a shared base value plus MIDI sources, with this layer's envelope and LFO generators on top.",
-			"properties": {
-				"base": {
-					"type": "number",
-                    "description": "The value in the target's units (see mod_target). Defaults: volume 1.0, panning 0.5, fm_ratio 1.0, everything else 0. The fm_ratio default applies on layer 0, whose targets are pre-seeded to these defaults, and on any layer whose fm_ratio block states sources without base; a later-layer fm_ratio block that states neither base nor sources keeps the zeroed binding; a wholly absent fm_ratio block instead inherits the layer's stored mod_ratio scalar (see mod_target)."
-				},
-				"envelope": { "$ref": "#/definitions/envelope" },
-				"lfo": { "$ref": "#/definitions/lfo" },
-				"sources": {
-					"type": "array",
-					"maxItems": 2,
-					"description": "MIDI inputs combined onto the base value.",
-					"items": {
-						"type": "object",
-						"properties": {
-							"source": { "$ref": "#/definitions/mod_source" },
-							"op": { "$ref": "#/definitions/source_op", "default": "add" },
-							"scale": { "type": "number", "description": "How much of the source applies; negative inverts." }
-						},
-						"required": ["source"],
-						"additionalProperties": false
-					}
-				}
-			},
-			"additionalProperties": false
-		},
-		"envelope": {
-			"type": "object",
-			"description": "The envelope this layer plays into the target. Point levels are the envelope's output values in the target's units, so a volume envelope sweeps 0..1 and a pitch envelope sweeps semitones.",
-			"properties": {
-				"points": {
-					"type": "array",
-					"minItems": 1,
-					"maxItems": 8,
-					"items": {
-						"type": "object",
-						"properties": {
-							"time_seconds": {
-								"type": "number",
-								"minimum": 0,
-								"description": "When the point is reached. Points quantize to ~5.8 ms ticks; a leading run of time 0 is allowed (the unplaced-point layout) and every later point must land on a later tick. The maximum is ~380 s."
-							},
-							"level": {
-								"type": "number",
-								"description": "The value reached, in the target's units. Generator levels are free finite values - the editor's envelope min/max slots are unbounded - so unlike the base they are not restricted to the slider range. Levels quantize to 16-bit steps; a spread level <= 0 bypasses the oscillator's filter at that point (generator levels stay free finite values, negatives included, clamped at use)."
-							}
-						},
-						"required": ["time_seconds", "level"],
-						"additionalProperties": false
-					}
-				},
-				"sustain_start": {
-					"type": "integer",
-					"minimum": 0,
-					"maximum": 7,
-					"description": "First point of the sustain loop; defaults to the last point (hold the end value until release)."
-				},
-				"sustain_end": {
-					"type": "integer",
-					"minimum": 0,
-					"maximum": 7,
-					"description": "Last point of the sustain loop; must not precede sustain_start; defaults to the last point."
-				},
-				"ping_pong": {
-					"type": "integer",
-					"minimum": 0,
-					"maximum": 1,
-					"default": 0,
-                    "description": "Multi-point sustain spans bounce between their ends instead of looping back to the span start; requires more than one point in the span.  0 keeps the stored loop."
-				},
-				"quick_release": {
-					"type": "integer",
-					"minimum": 0,
-					"maximum": 1,
-					"default": 0,
-					"description": "Note-off jumps forward to the first release-tail point at or below the current level; the final point is the fallback.  0 plays through the sustain span to the end."
-				},
-				"depth": {"type": "number", "default": 1, "description": "Multiplier on this envelope's contribution into its target. Lets several targets reuse one envelope shape at different amounts. 0 silences the contribution."}},
-			"required": ["points"],
-			"additionalProperties": false
-		},
-		"lfo": {
-			"type": "object",
-			"properties": {
-				"wave": {
-					"type": "string",
-					"enum": ["sine", "sawtooth"],
-					"description": "Required. The pool only holds sine and sawtooth LFOs; place the duty with this LFO's own 'duty' field."
-				},
-				"frequency_hz": {
-					"type": "number",
-					"exclusiveMinimum": 0,
-					"description": "Required. Cycles per second; the period must land between 1 ms and 65.535 s."
-				},
-				"duty": { "type": "number", "minimum": 0, "maximum": 1, "default": 0, "description": "Sawtooth slope (0.5 = triangle)." },
-				"min_level": { "type": "number", "description": "The LFO's low output, in the target's units; free finite values, not restricted to the base's slider range. Defaults to the target's minimum." },
-				"max_level": { "type": "number", "description": "The LFO's high output, in the target's units; free finite values, not restricted to the base's slider range. Defaults to the target's maximum." },
-				"op": { "$ref": "#/definitions/source_op", "default": "add", "description": "How the LFO combines onto the target." },
-				"depth": { "type": "number", "default": 0, "description": "How much of the LFO applies; negative inverts." },
-				"depth_source": { "$ref": "#/definitions/mod_source", "default": "none", "description": "A MIDI source scaling the depth." },
-				"rate_source": { "$ref": "#/definitions/mod_source", "default": "none", "description": "A MIDI source scaling the rate." },
-				"rate_scale_ms": { "type": "number", "default": 0, "description": "Milliseconds of period the rate source adds per unit." }
-			},
-			"required": ["wave", "frequency_hz"],
-			"additionalProperties": false
-		}
-	}
+      "maxItems": 256
+    },
+    "layers": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 7,
+      "description": "Oscillator layers mixed together in one instrument voice. The editor supports up to 7; each Add Oscillator action adds one layer.",
+      "items": {
+        "$ref": "#/definitions/layer"
+      }
+    },
+    "osc_sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "slot": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 6
+          },
+          "layer": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 7
+          }
+        },
+        "required": [
+          "slot",
+          "layer"
+        ]
+      },
+      "maxItems": 7,
+      "description": "Clipboard: present [] means all disconnected; absent means identity wiring. Bank validated-domain ignores this key. Slot is zero-based, layer one-based."
+    }
+  },
+  "required": [
+    "format",
+    "layers"
+  ],
+  "additionalProperties": false,
+  "definitions": {
+    "wave": {
+      "type": "string",
+      "enum": [
+        "none",
+        "sine",
+        "sawtooth",
+        "pulse",
+        "noise",
+        "pad",
+        "string"
+      ],
+      "description": "Waveform names. A sawtooth at duty 0.5 is a triangle; a pulse at duty 0.5 is a square; set the target block 'duty_a' or 'duty_b' to place the duty.  Pad uses duty as the harmonic wander depth (0 = locked, 1 = deepest). String is a plucked string, accepted as wave_a only (wave_b refuses it)."
+    },
+    "mod_target": {
+      "type": "string",
+      "enum": [
+        "volume",
+        "pitch",
+        "panning",
+        "duty_a",
+        "duty_b",
+        "osc_mix",
+        "fm_index",
+        "fir_pitch_spread",
+        "fm_ratio",
+        "pad_tone_a",
+        "pad_tone_b",
+        "fir_slope",
+        "fir_band0_offset",
+        "fir_band0_gain",
+        "fir_band1_offset",
+        "fir_band1_spread",
+        "fir_band1_gain",
+        "fir_band1_slope",
+        "fir_band2_offset",
+        "fir_band2_spread",
+        "fir_band2_gain",
+        "fir_band2_slope",
+        "fir_band3_offset",
+        "fir_band3_spread",
+        "fir_band3_gain",
+        "fir_band3_slope",
+        "string_damping",
+        "string_release_damping",
+        "string_dispersion",
+        "string_brightness",
+        "string_strike"
+      ],
+      "description": "Modulated quantities. Units: volume, panning (0.5 = center), duty_a/duty_b, osc_mix and fm_index (1.0 = full depth) are 0..1; pitch is -24..24 semitones; fir_pitch_spread depends on the layer fir_type: bandpass = spread in semitones 0..36 around the note pitch, one band of up to four (fir_bands); lowpass and highpass = fixed cutoff in Hz 0..22050 with no key tracking, 0 = the edge-off bypassed state; a bandpass bypasses only while every band's spread is zero, so a zero band 0 spread with a positive higher-band spread still filters; fm_ratio is the ratio, slider-bounded 0.125..8 (0 stays bank-legal as the stored unset carrier value). Only 'volume' defaults to 1.0 and 'panning' to 0.5, fm_ratio inherits the layer's stored mod_ratio when its block is absent, and every other base defaults to 0. pad_tone_a/pad_tone_b is the per-oscillator pad spectral tilt in -1..+1: the harmonic exponent is 1 + value (0 = saw-like 1/n spectrum, +1 = mellow 1/n^2, -1 = flat/brightest), inert for non-pad waves. string_damping/string_release_damping and string_dispersion are 0..1 (0 = natural decay) and inert for non-string waves. fir_slope is the FIR window slope as an integer percent 1..100; an unrouted layer carries it in the layer's fir_slope scalar, a routed one in the target block's base."
+    },
+    "mod_source": {
+      "type": "string",
+      "enum": [
+        "none",
+        "pitch_bend",
+        "mod_wheel",
+        "channel_pressure",
+        "velocity",
+        "aftertouch",
+        "pressure_combine",
+        "cc"
+      ],
+      "description": "MIDI modulation sources. velocity is per-note; aftertouch is polyphonic; pressure_combine is the max of per-note aftertouch and channel pressure."
+    },
+    "source_op": {
+      "type": "string",
+      "enum": [
+        "add",
+        "multiply"
+      ],
+      "description": "How a value combines onto its target: added or multiplied."
+    },
+    "layer": {
+      "type": "object",
+      "description": "One oscillator. The shared routing (base, sources) may be set by the first layer that supplies base or sources for a target (a layer with only generators does not claim it); every layer has its own envelope and LFO generators.",
+      "properties": {
+        "wave_a": {
+          "$ref": "#/definitions/wave",
+          "description": "Required. The primary oscillator; for fm the carrier, for sync the master."
+        },
+        "wave_b": {
+          "type": "string",
+          "enum": [
+            "none",
+            "sine",
+            "sawtooth",
+            "pulse",
+            "noise",
+            "pad"
+          ],
+          "description": "The second oscillator; for fm the modulator, for sync the slave, for ring_mod the carrier. Default: none."
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "blend",
+            "fm",
+            "sync",
+            "ring_mod"
+          ],
+          "default": "blend",
+          "description": "blend mixes both waves by osc_mix; fm frequency-modulates wave_a with wave_b; sync hard-syncs wave_b to wave_a; ring_mod multiplies wave_a by wave_b evaluated at mod_ratio * wave_a's phase, with osc_mix crossfading the dry wave_a to the product."
+        },
+        "mod_ratio": {
+          "type": "number",
+          "default": 1,
+          "description": "The FM ratio (fm) or hard-sync cycle ratio (sync); 0 is a legal bank value, any nonzero value is 0.125..8; ignored by blend. For ring_mod it is the carrier ratio. The static value mirrors the fm_ratio target base for compatibility."
+        },
+        "octave_offset": {
+          "type": "integer",
+          "minimum": -12,
+          "maximum": 12,
+          "default": 0,
+          "description": "Whole-octave pitch shift; 12 * octave_offset semitones are added to the oscillator pitch."
+        },
+        "fir_slope": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 100,
+              "description": "FIR window slope percent; 100 is the sharpest response (the full 1025-tap window), lower values widen the transition band. The window span grows exponentially with the percent: 11 taps at 1, 1025 taps at 100. Only present while the layer's fir_slope target is unrouted; a routed layer states the target block instead and the scalar re-decodes to the default 100."
+            },
+            {
+              "$ref": "#/definitions/target_block"
+            }
+          ],
+          "description": "FIR window slope: the integer percent scalar when the layer's fir_slope target is unrouted, or that target's block (its base is the integer percent 1..100, see mod_target) when it is routed. The two forms never appear together in one layer object."
+        },
+        "fir_bands": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4,
+          "description": "Active bandpass band count; absent decodes as the stored single band. Bands 1..3 state their four parameters as fir_bandN_offset/spread/gain/slope target blocks; band 0 reuses fir_pitch_spread and fir_slope and adds fir_band0_offset/fir_band0_gain. A band whose block is absent decodes its defaults (offset 0, spread 0, gain 1, slope 100 for bands 1..3); a present block with an omitted base decodes 0, so an explicitly saved gain-0 band stays inactive instead of reloading as the 1.0 default."
+        },
+        "fir_type": {
+          "type": "string",
+          "enum": [
+            "off",
+            "bandpass",
+            "lowpass",
+            "highpass"
+          ],
+          "default": "bandpass",
+          "description": "Oscillator filter type. bandpass uses fir_pitch_spread as a spread in semitones (0..36) around the note pitch; lowpass and highpass use it as a fixed cutoff in Hz (0..22050); off disables the filter."
+        },
+        "volume": {
+          "$ref": "#/definitions/target_block"
+        },
+        "pitch": {
+          "$ref": "#/definitions/target_block"
+        },
+        "panning": {
+          "$ref": "#/definitions/target_block"
+        },
+        "duty_a": {
+          "$ref": "#/definitions/target_block"
+        },
+        "duty_b": {
+          "$ref": "#/definitions/target_block"
+        },
+        "osc_mix": {
+          "$ref": "#/definitions/target_block"
+        },
+        "fm_index": {
+          "$ref": "#/definitions/target_block"
+        },
+        "fir_pitch_spread": {
+          "$ref": "#/definitions/target_block"
+        },
+        "fir_band0_offset": {
+          "$ref": "#/definitions/target_block"
+        },
+        "fir_band0_gain": {
+          "$ref": "#/definitions/target_block"
+        },
+        "fir_band1_offset": {
+          "$ref": "#/definitions/target_block"
+        },
+        "fir_band1_spread": {
+          "$ref": "#/definitions/target_block"
+        },
+        "fir_band1_gain": {
+          "$ref": "#/definitions/target_block"
+        },
+        "fir_band1_slope": {
+          "$ref": "#/definitions/target_block"
+        },
+        "fir_band2_offset": {
+          "$ref": "#/definitions/target_block"
+        },
+        "fir_band2_spread": {
+          "$ref": "#/definitions/target_block"
+        },
+        "fir_band2_gain": {
+          "$ref": "#/definitions/target_block"
+        },
+        "fir_band2_slope": {
+          "$ref": "#/definitions/target_block"
+        },
+        "fir_band3_offset": {
+          "$ref": "#/definitions/target_block"
+        },
+        "fir_band3_spread": {
+          "$ref": "#/definitions/target_block"
+        },
+        "fir_band3_gain": {
+          "$ref": "#/definitions/target_block"
+        },
+        "fir_band3_slope": {
+          "$ref": "#/definitions/target_block"
+        },
+        "string_damping": {
+          "$ref": "#/definitions/target_block"
+        },
+        "string_release_damping": {
+          "$ref": "#/definitions/target_block"
+        },
+        "string_pick": {
+          "type": "number",
+          "description": "Deprecated and ignored: the pick position was removed.  Old documents that carry it still load whatever the value; new saves omit it."
+        },
+        "string_strike": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "default": 0
+            },
+            {
+              "$ref": "#/definitions/target_block"
+            }
+          ],
+          "description": "Strike blend or routing object, captured at note-on.  An omitted object base means zero."
+        },
+        "string_drive": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 10,
+          "default": 3,
+          "description": "Strike force window in milliseconds."
+        },
+        "string_spectrum": {
+          "type": "number",
+          "minimum": 1.5,
+          "maximum": 4,
+          "default": 2,
+          "description": "Strike harmonic rolloff exponent."
+        },
+        "string_brightness": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "default": 1
+            },
+            {
+              "$ref": "#/definitions/target_block"
+            }
+          ],
+          "description": "Pluck brightness scalar or routing object.  The scalar owns the base, including zero.  An omitted object base means one."
+        },
+        "string_dispersion": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "default": 0,
+              "description": "Plucked-string dispersion (stiff-string inharmonicity, strongest on low notes); 0 = off (default), up to 1; used by wave_a string only.  Present while the layer's string_dispersion target is unrouted."
+            },
+            {
+              "$ref": "#/definitions/target_block"
+            }
+          ],
+          "description": "Plucked-string dispersion: the number when the layer's string_dispersion target is unrouted, or that target's block (its base is 0..1, see mod_target) when it is routed.  A modulated value changes the timbre every block while the retune holds the fundamental.  The two forms never appear together in one layer object."
+        },
+        "string_dispersion_sections": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 6,
+          "default": 4,
+          "description": "Plucked-string dispersion allpass section count, 1 to 6 (default 4); stored and round-tripped but currently inert: the synth always runs a single section."
+        },
+        "fm_ratio": {
+          "$ref": "#/definitions/target_block"
+        },
+        "pad_tone_a": {
+          "$ref": "#/definitions/target_block"
+        },
+        "pad_tone_b": {
+          "$ref": "#/definitions/target_block"
+        },
+        "routing": {
+          "type": "object",
+          "description": "Bank-style routing alias: keyed by mod_target name, each value a bank routing block. Accepted so a routing block can share a layer with the fir_slope scalar key; documents written by the encoder never include it.",
+          "additionalProperties": {
+            "$ref": "#/definitions/bank_routing_block"
+          }
+        }
+      },
+      "required": [
+        "wave_a"
+      ],
+      "additionalProperties": false
+    },
+    "bank_routing_block": {
+      "type": "object",
+      "description": "The saved-bank spelling of one target's routing: base_value in the target's units (for fir_slope, an integer percent 1..100) and up to two MIDI inputs.",
+      "properties": {
+        "base_value": {
+          "type": "number"
+        },
+        "inputs": {
+          "type": "array",
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "$ref": "#/definitions/mod_source"
+              },
+              "op": {
+                "$ref": "#/definitions/source_op"
+              },
+              "cc_number": {
+                "type": "integer"
+              },
+              "scale": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "source"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "target_block": {
+      "type": "object",
+      "description": "One modulated quantity: a shared base value plus MIDI sources, with this layer's envelope and LFO generators on top.",
+      "properties": {
+        "base": {
+          "type": "number",
+          "description": "The value in the target's units (see mod_target). Defaults: volume 1.0, panning 0.5, fm_ratio 1.0, everything else 0. The fm_ratio default applies on layer 0, whose targets are pre-seeded to these defaults, and on any layer whose fm_ratio block states sources without base; a later-layer fm_ratio block that states neither base nor sources keeps the zeroed binding; a wholly absent fm_ratio block instead inherits the layer's stored mod_ratio scalar (see mod_target)."
+        },
+        "envelope": {
+          "$ref": "#/definitions/envelope"
+        },
+        "lfo": {
+          "$ref": "#/definitions/lfo"
+        },
+        "sources": {
+          "type": "array",
+          "maxItems": 2,
+          "description": "MIDI inputs combined onto the base value.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "$ref": "#/definitions/mod_source"
+              },
+              "op": {
+                "$ref": "#/definitions/source_op",
+                "default": "add"
+              },
+              "scale": {
+                "type": "number",
+                "description": "How much of the source applies; negative inverts."
+              },
+              "cc": {
+                "type": "integer",
+                "minimum": 16,
+                "maximum": 31
+              }
+            },
+            "required": [
+              "source"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "envelope_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "lfo_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      },
+      "additionalProperties": false
+    },
+    "envelope": {
+      "type": "object",
+      "description": "The envelope this layer plays into the target. Point levels are the envelope's output values in the target's units, so a volume envelope sweeps 0..1 and a pitch envelope sweeps semitones.",
+      "properties": {
+        "points": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "properties": {
+              "time_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "description": "When the point is reached. Points quantize to ~5.8 ms ticks; a leading run of time 0 is allowed (the unplaced-point layout) and every later point must land on a later tick. The maximum is ~380 s."
+              },
+              "level": {
+                "type": "number",
+                "description": "The value reached, in the target's units. Generator levels are free finite values - the editor's envelope min/max slots are unbounded - so unlike the base they are not restricted to the slider range. Levels quantize to 16-bit steps; a spread level <= 0 bypasses the oscillator's filter at that point (generator levels stay free finite values, negatives included, clamped at use)."
+              }
+            },
+            "required": [
+              "time_seconds",
+              "level"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "sustain_start": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7,
+          "description": "First point of the sustain loop; defaults to the last point (hold the end value until release)."
+        },
+        "sustain_end": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7,
+          "description": "Last point of the sustain loop; must not precede sustain_start; defaults to the last point."
+        },
+        "ping_pong": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0,
+          "description": "Multi-point sustain spans bounce between their ends instead of looping back to the span start; requires more than one point in the span.  0 keeps the stored loop."
+        },
+        "quick_release": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0,
+          "description": "Note-off jumps forward to the first release-tail point at or below the current level; the final point is the fallback.  0 plays through the sustain span to the end."
+        },
+        "depth": {
+          "type": "number",
+          "default": 1,
+          "description": "Multiplier on this envelope's contribution into its target. Lets several targets reuse one envelope shape at different amounts. 0 silences the contribution."
+        },
+        "envelope_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      },
+      "required": [
+        "points"
+      ],
+      "additionalProperties": false
+    },
+    "lfo": {
+      "type": "object",
+      "properties": {
+        "wave": {
+          "type": "string",
+          "enum": [
+            "sine",
+            "sawtooth"
+          ],
+          "description": "Required. The pool only holds sine and sawtooth LFOs; place the duty with this LFO's own 'duty' field."
+        },
+        "frequency_hz": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Required. Cycles per second; the period must land between 1 ms and 65.535 s."
+        },
+        "duty": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0,
+          "description": "Sawtooth slope (0.5 = triangle)."
+        },
+        "min_level": {
+          "type": "number",
+          "description": "The LFO's low output, in the target's units; free finite values, not restricted to the base's slider range. Defaults to the target's minimum."
+        },
+        "max_level": {
+          "type": "number",
+          "description": "The LFO's high output, in the target's units; free finite values, not restricted to the base's slider range. Defaults to the target's maximum."
+        },
+        "op": {
+          "$ref": "#/definitions/source_op",
+          "default": "add",
+          "description": "How the LFO combines onto the target."
+        },
+        "depth": {
+          "type": "number",
+          "default": 0,
+          "description": "How much of the LFO applies; negative inverts."
+        },
+        "depth_source": {
+          "$ref": "#/definitions/mod_source",
+          "default": "none",
+          "description": "A MIDI source scaling the depth."
+        },
+        "rate_source": {
+          "$ref": "#/definitions/mod_source",
+          "default": "none",
+          "description": "A MIDI source scaling the rate."
+        },
+        "rate_scale_ms": {
+          "type": "number",
+          "default": 0,
+          "description": "Milliseconds of period the rate source adds per unit."
+        },
+        "pulse_mix": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "start_point": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "beat_div": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "lfo_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      },
+      "required": [
+        "wave",
+        "frequency_hz"
+      ],
+      "additionalProperties": false
+    }
+  }
 }

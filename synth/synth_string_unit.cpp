@@ -125,12 +125,13 @@ static void check_string_wave_json_codec()
         TEST(decoded.instr.layers[0].osc_type[0] == Synth::WaveType::string_wave);
         TEST(static_cast<uint32_t>(decoded.instr.layers[0].osc_mode) == m);
 
-        snprintf(doc,
-                 sizeof(doc),
-                 "{\"instrument_editor_bank\":{\"instruments\":[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\","
-                 "\"wave_b\":\"sine\",\"mode\":\"%s\",\"routing\":{}}]}],"
-                 "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}",
-                 modes[m]);
+        snprintf(
+            doc,
+            sizeof(doc),
+            "{\"instrument_editor_bank\":{\"instruments\":[{\"id\":1,\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\","
+            "\"wave_b\":\"sine\",\"mode\":\"%s\",\"routing\":{}}]}],"
+            "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":1}]}]}}",
+            modes[m]);
         const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
             std::make_unique<Synth::InstrumentEditorBank>();
         memset(static_cast<void*>(bank_storage.get()), 0, sizeof(*bank_storage));
@@ -144,9 +145,9 @@ static void check_string_wave_json_codec()
             "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"wave_b\":\"string\"}]}";
         TEST(! string_clip_decode(b_doc, &decoded));
         static const char b_bank[] =
-            "{\"instrument_editor_bank\":{\"instruments\":[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\","
+            "{\"instrument_editor_bank\":{\"instruments\":[{\"id\":1,\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\","
             "\"wave_b\":\"string\",\"routing\":{}}]}],"
-            "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}";
+            "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":1}]}]}}";
         const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
             std::make_unique<Synth::InstrumentEditorBank>();
         memset(static_cast<void*>(bank_storage.get()), 0, sizeof(*bank_storage));
@@ -160,7 +161,7 @@ static void check_string_wave_json_codec()
                                       "\"volume\":{\"lfo\":{\"wave\":\"string\",\"frequency_hz\":4}}}]}";
         TEST(! string_clip_decode(lfo_doc, &decoded));
         static const char lfo_bank[] =
-            "{\"instrument_editor_bank\":{\"lfos\":[{\"wave\":\"string\",\"period_ms\":100}]}}";
+            "{\"instrument_editor_bank\":{\"lfos\":[{\"id\":1,\"wave\":\"string\",\"period_ms\":100}]}}";
         const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
             std::make_unique<Synth::InstrumentEditorBank>();
         memset(static_cast<void*>(bank_storage.get()), 0, sizeof(*bank_storage));
@@ -820,17 +821,17 @@ static void check_string_brightness()
     }
     // Unknown keys still refuse; the bank decoder takes the key and refuses out of range too.
     static const char bank_ok[] =
-        "{\"instrument_editor_bank\":{\"instruments\":[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\","
+        "{\"instrument_editor_bank\":{\"instruments\":[{\"id\":1,\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\","
         "\"string_brightness\":0.5,\"routing\":{}}]}],"
-        "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}";
+        "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":1}]}]}}";
     static const char bank_absent[] =
-        "{\"instrument_editor_bank\":{\"instruments\":[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\","
+        "{\"instrument_editor_bank\":{\"instruments\":[{\"id\":1,\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\","
         "\"routing\":{}}]}],"
-        "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}";
+        "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":1}]}]}}";
     static const char bank_bad[] =
-        "{\"instrument_editor_bank\":{\"instruments\":[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\","
+        "{\"instrument_editor_bank\":{\"instruments\":[{\"id\":1,\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\","
         "\"string_brightness\":1.5,\"routing\":{}}]}],"
-        "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}";
+        "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":1}]}]}}";
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
     memset(static_cast<void*>(bank_storage.get()), 0, sizeof(*bank_storage));
     TEST(Synth::decode_editor_bank_json(bank_ok, static_cast<uint32_t>(strlen(bank_ok)), bank_storage.get()));
@@ -933,13 +934,14 @@ static const char* string_disp_clip_doc(char (&buf)[320], const char* key, const
 // Same for the editor bank document.
 static const char* string_disp_bank_doc(char (&buf)[512], const char* key, const char* value)
 {
-    snprintf(buf,
-             sizeof(buf),
-             "{\"instrument_editor_bank\":{\"instruments\":[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\","
-             "\"%s\":%s,\"routing\":{}}]}],"
-             "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}",
-             key,
-             value);
+    snprintf(
+        buf,
+        sizeof(buf),
+        "{\"instrument_editor_bank\":{\"instruments\":[{\"id\":1,\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\","
+        "\"%s\":%s,\"routing\":{}}]}],"
+        "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":1}]}]}}",
+        key,
+        value);
     return buf;
 }
 
@@ -966,8 +968,8 @@ static void check_string_dispersion_codec()
     Synth::InstrumentEditorBank&                       decoded_bank = *bank_storage;
     memset(static_cast<void*>(&decoded_bank), 0, sizeof(decoded_bank));
     static const char bank_absent[] =
-        "{\"instrument_editor_bank\":{\"instruments\":[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\","
-        "\"routing\":{}}]}],\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}";
+        "{\"instrument_editor_bank\":{\"instruments\":[{\"id\":1,\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\","
+        "\"routing\":{}}]}],\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":1}]}]}}";
     TEST(Synth::decode_editor_bank_json(bank_absent, static_cast<uint32_t>(strlen(bank_absent)), &decoded_bank));
     TEST(decoded_bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_string_dispersion].base_value == 0.0f);
     TEST(decoded_bank.bank.instruments.entries[0].layers[0].string_dispersion_sections == 4.0f);
@@ -4631,7 +4633,7 @@ static void check_string_strike_codecs()
         snprintf(
             doc,
             sizeof(doc),
-            "{\"instrument_editor_bank\":{\"instruments\":[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\",\"string_strike\":%s,\"routing\":{}}]}],\"channels\":[{\"zones\":[{\"start\":1,\"instrument\":0}]}]}}",
+            "{\"instrument_editor_bank\":{\"instruments\":[{\"id\":1,\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\",\"string_strike\":%s,\"routing\":{}}]}],\"channels\":[{\"zones\":[{\"start\":1,\"instrument\":1}]}]}}",
             value);
         TEST(! Synth::decode_editor_bank_json(doc, static_cast<uint32_t>(strlen(doc)), restored.get()));
     }
@@ -4717,7 +4719,7 @@ static void check_string_strike_codecs()
         decoded.get()));
     TEST(decoded->instr.layers[0].string_brightness == 1.0f);
     static const char bad_bank[] =
-        "{\"instrument_editor_bank\":{\"instruments\":[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\",\"routing\":{\"string_brightness\":{\"base_value\":0}}}]}],\"channels\":[{\"zones\":[{\"start\":1,\"instrument\":0}]}]}}";
+        "{\"instrument_editor_bank\":{\"instruments\":[{\"id\":1,\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\",\"routing\":{\"string_brightness\":{\"base_value\":0}}}]}],\"channels\":[{\"zones\":[{\"start\":1,\"instrument\":1}]}]}}";
     TEST(! Synth::decode_editor_bank_json(bad_bank, static_cast<uint32_t>(strlen(bad_bank)), restored.get()));
 }
 
@@ -5032,7 +5034,7 @@ static void check_string_strike_codecs_and_layout()
             snprintf(
                 doc,
                 sizeof(doc),
-                "{\"instrument_editor_bank\":{\"instruments\":[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\",\"%s\":%s,\"routing\":{}}]}],\"channels\":[{\"zones\":[{\"start\":1,\"instrument\":0}]}]}}",
+                "{\"instrument_editor_bank\":{\"instruments\":[{\"id\":1,\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\",\"%s\":%s,\"routing\":{}}]}],\"channels\":[{\"zones\":[{\"start\":1,\"instrument\":1}]}]}}",
                 keys[k],
                 value);
             TEST(! Synth::decode_editor_bank_json(doc, static_cast<uint32_t>(strlen(doc)), &restored));

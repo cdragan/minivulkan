@@ -1154,7 +1154,7 @@ static void check_core_inline_0()
         // document stands in for a pre-M2 bank) decodes with the defaults.
         {
             static const char t2_old_doc[] =
-                "{\"instrument_editor_bank\":{\"lfos\":[{\"wave\":\"sine\",\"period_ms\":100}]}}";
+                "{\"instrument_editor_bank\":{\"lfos\":[{\"id\":1,\"wave\":\"sine\",\"period_ms\":100}]}}";
             const std::unique_ptr<Synth::InstrumentEditorBank> t2_old_storage =
                 std::make_unique<Synth::InstrumentEditorBank>();
             Synth::InstrumentEditorBank& t2_old = *t2_old_storage;
@@ -1169,7 +1169,7 @@ static void check_core_inline_0()
         // validate_instrument_bank (garbage-tolerant decode, section 17.2).
         {
             static const char t2_oor_doc[] =
-                "{\"instrument_editor_bank\":{\"lfos\":[{\"wave\":\"sine\",\"period_ms\":100}]}}";
+                "{\"instrument_editor_bank\":{\"lfos\":[{\"id\":1,\"wave\":\"sine\",\"period_ms\":100}]}}";
             char           t2_oor_spliced[256];
             const uint32_t t2_oor_base_len = static_cast<uint32_t>(sizeof(t2_oor_doc) - 1);
             const uint32_t t2_beat_len     = splice_single_occurrence(t2_oor_doc,
