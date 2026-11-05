@@ -47,7 +47,6 @@ shader_files += synth_oscillator.comp.glsl
 shader_files += synth_chan_combine.comp.glsl
 shader_files += synth_master_mix.comp.glsl
 shader_files += synth_effect.comp.glsl
-shader_files += synth_output_16_interlv.comp.glsl
 shader_files += synth_output_f32_interlv.comp.glsl
 shader_files += synth_output_f32_separate.comp.glsl
 

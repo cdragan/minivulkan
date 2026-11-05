@@ -447,7 +447,6 @@ enum SynthPipelines {
     chan_combine_pipe,
     master_mix_pipe,
     effect_pipe,
-    output_16i_pipe,
     output_32fi_pipe,
     output_32f_pipe,
     num_synth_pipes
@@ -507,12 +506,6 @@ static bool create_shaders()
                                           { {
                                                 shader_synth_effect_comp,
                                                 0,
-                                            },
-                                            one_buffer_ds },
-                                          // TODO load only in builds which need it
-                                          { {
-                                                shader_synth_output_16_interlv_comp,
-                                                1,
                                             },
                                             one_buffer_ds },
                                           // TODO load only in builds which need it
@@ -743,7 +736,6 @@ static bool chain_has_enabled_effect(const EffectChain& chain)
 // per build.
 enum class ActiveRingFormat : uint8_t {
     none,
-    int16_interleaved,
     float_interleaved,
     float_planar
 };
@@ -1085,7 +1077,7 @@ void Synth::stop_synth()
 }
 
 // Template boilerplate to support different output audio buffer types,
-// for example float non-interleaved or int16_t interleaved.
+// for example float interleaved or planar.
 
 template <typename T, bool interleaved> struct StereoPtr {
     T* left;
@@ -3008,32 +3000,6 @@ static void render_audio_step()
 
 template <typename T, bool interleaved> void prepare_copy_audio_step_to_host(uint32_t offset);
 
-template <> void prepare_copy_audio_step_to_host<int16_t, true>(uint32_t offset)
-{
-    vkCmdBindPipeline(audio_cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[output_16i_pipe]);
-
-    offset *= 2 * sizeof(int16_t);
-
-    static const PushDescriptorInfo push_out_data = { output_16i_pipe, 0, 0, data_buf, VK_WHOLE_SIZE };
-    push_descriptor(push_out_data, 0);
-
-    static const PushDescriptorInfo push_out_output = { output_16i_pipe,
-                                                        1,
-                                                        0,
-                                                        output_buf,
-                                                        sizeof(int16_t) * 2 * Synth::rt_step_samples };
-    push_descriptor(push_out_output, offset);
-
-    const ShaderParams::OutputPushConst push = { master_output_offs / 4 };
-
-    vkCmdPushConstants(audio_cmd_buf,
-                       pipe_layouts[output_16i_pipe],
-                       VK_SHADER_STAGE_COMPUTE_BIT,
-                       0,            // offset
-                       sizeof(push), // size
-                       &push);       // pValues
-}
-
 template <> void prepare_copy_audio_step_to_host<float, true>(uint32_t offset)
 {
     vkCmdBindPipeline(audio_cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[output_32fi_pipe]);
@@ -3148,14 +3114,8 @@ static std::atomic<uint32_t> audio_underrun_count; // ring ran dry; read by the 
 
 template <typename T, bool interleaved> static constexpr ActiveRingFormat ring_format_for()
 {
-    if constexpr (std::is_same_v<T, int16_t>) {
-        static_assert(interleaved, "int16 ring is interleaved only");
-        return ActiveRingFormat::int16_interleaved;
-    }
-    else if constexpr (interleaved)
-        return ActiveRingFormat::float_interleaved;
-    else
-        return ActiveRingFormat::float_planar;
+    static_assert(std::is_same_v<T, float>);
+    return interleaved ? ActiveRingFormat::float_interleaved : ActiveRingFormat::float_planar;
 }
 
 // A StereoPtr addressing the ring storage at a frame offset.
@@ -3274,18 +3234,15 @@ template <typename T, bool interleaved> uint32_t Synth::consume_audio(uint32_t n
     return to_copy;
 }
 
-// Copies one contiguous chunk of ring frames into the caller's float channels,
-// converting from the ring's sample format on the way.
+// Copies one contiguous chunk of float ring frames into the caller's channels.
 template <typename T, bool interleaved>
 static void peek_chunk(StereoPtr<T, interleaved> src, float* left, float* right, uint32_t num_frames)
 {
-    // One interleaved traversal; the conversion is a compile-time scale
-    // (identity for float, 1 / 32768 for the full-scale int16 ring).
+    // Read both channels in one interleaved traversal.
     if constexpr (interleaved) {
-        constexpr float scale = std::is_same_v<T, int16_t> ? 1.0f / 32768.0f : 1.0f;
         for (uint32_t i = 0; i < num_frames; i++) {
-            left[i]  = static_cast<float>(src.data[i * 2]) * scale;
-            right[i] = static_cast<float>(src.data[i * 2 + 1]) * scale;
+            left[i]  = src.data[i * 2];
+            right[i] = src.data[i * 2 + 1];
         }
     }
     else {
@@ -3317,8 +3274,6 @@ template <typename T, bool interleaved> static uint32_t peek_copy(uint32_t num_f
 uint32_t Synth::peek_recent_audio(uint32_t num_frames, float* left, float* right)
 {
     switch (active_ring_format.load(std::memory_order_relaxed)) {
-        case ActiveRingFormat::int16_interleaved:
-            return peek_copy<int16_t, true>(num_frames, left, right);
         case ActiveRingFormat::float_interleaved:
             return peek_copy<float, true>(num_frames, left, right);
         case ActiveRingFormat::float_planar:
@@ -3341,10 +3296,8 @@ uint32_t Synth::get_oscillator_wave_types(WaveType* dest, uint32_t max_entries)
     return count;
 }
 
-template bool Synth::produce_audio_batch<int16_t, true>();
 template bool Synth::produce_audio_batch<float, true>();
 template bool Synth::produce_audio_batch<float, false>();
 
-template uint32_t Synth::consume_audio<int16_t, true>(uint32_t, int16_t*, int16_t*);
 template uint32_t Synth::consume_audio<float, true>(uint32_t, float*, float*);
 template uint32_t Synth::consume_audio<float, false>(uint32_t, float*, float*);

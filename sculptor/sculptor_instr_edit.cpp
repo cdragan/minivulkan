@@ -542,6 +542,15 @@ constexpr float spectrum_plot_height = 80.0f;
 // never push a displayed value outside the fixed scale.
 constexpr float spectrum_db_floor = -80.0f;
 
+// Peak release is about 20 dB per second. RMS has a short attack and a slower release.
+constexpr float    meter_peak_release_s = 0.4343f;
+constexpr float    meter_rms_attack_s   = 0.01f;
+constexpr float    meter_rms_release_s  = 0.3f;
+constexpr double   meter_clip_hold_s    = 0.5;
+constexpr double   peak_linger_window_s = 2.0;
+constexpr uint32_t peak_linger_capacity = 1024;
+constexpr float    meter_sample_limit   = 1000.0f;
+
 // 256 entries cover the 500 ms linger window up to 512 redraws per second, so
 // a transient low level inside the window cannot be overwritten before it
 // expires at any realistic refresh rate.
@@ -590,6 +599,48 @@ struct SynthInfoLingerMin {
         return found;
     }
 };
+
+// Max-variant sibling of SynthInfoLingerMin. 1024 entries cover 2 s at 512 redraws per second.
+struct SynthInfoLingerMax {
+    double   time_s[peak_linger_capacity];
+    float    level[peak_linger_capacity];
+    uint32_t head  = 0;
+    uint32_t count = 0;
+
+    void add(double now_s, float new_level)
+    {
+        time_s[head] = now_s;
+        level[head]  = new_level;
+        head         = (head + 1) % peak_linger_capacity;
+        if (count < peak_linger_capacity)
+            count++;
+    }
+
+    bool maximum(double now_s, float* max_level)
+    {
+        bool found = false;
+        for (uint32_t i = 0; i < count; i++) {
+            const uint32_t idx = (head + peak_linger_capacity - 1 - i) % peak_linger_capacity;
+            if (now_s - time_s[idx] > peak_linger_window_s)
+                break;
+            if (! found || level[idx] > *max_level) {
+                *max_level = level[idx];
+                found      = true;
+            }
+        }
+        return found;
+    }
+};
+
+struct SynthInfoMeter {
+    float              peak;
+    float              rms;
+    double             clip_until_s;
+    SynthInfoLingerMax linger;
+};
+
+static SynthInfoMeter info_meter[2];
+static double         info_meter_time_s;
 
 static float    info_twiddle_re[spectrum_half_bins];
 static float    info_twiddle_im[spectrum_half_bins];
@@ -5218,6 +5269,83 @@ static void gui_fill_bar(const Synth::AudioRingStatus& ring)
     ImGui::Dummy(ImVec2(width, height));
 }
 
+static float meter_follow(float current, float target, float dt, float attack_tau, float release_tau)
+{
+    const float tau = target > current ? attack_tau : release_tau;
+    if (tau <= 0.0f)
+        return target;
+    return current + (target - current) * (1.0f - expf(-dt / tau));
+}
+
+static void gui_loudness_bars(bool have_window)
+{
+    const double now_s = ImGui::GetTime();
+    const float  dt    = static_cast<float>(vmath::clamp(now_s - info_meter_time_s, 0.0, 0.1));
+    info_meter_time_s  = now_s;
+
+    for (uint32_t channel = 0; channel < 2; channel++) {
+        SynthInfoMeter& meter = info_meter[channel];
+        if (have_window) {
+            const float* samples  = channel == 0 ? info_peek_l : info_peek_r;
+            float        raw_peak = 0.0f;
+            float        win_peak = 0.0f;
+            float        sum      = 0.0f;
+            for (uint32_t i = 0; i < spectrum_frames; i++) {
+                const float a = fabsf(samples[i]);
+                // Check clipping before the safety bound. NaN is silence; infinity clips.
+                if (a > raw_peak)
+                    raw_peak = a;
+                if (! (a <= meter_sample_limit))
+                    continue;
+                win_peak = fmaxf(win_peak, a);
+                sum += a * a;
+            }
+            if (raw_peak > 1.0f)
+                meter.clip_until_s = now_s + meter_clip_hold_s;
+            const float win_rms = sqrtf(sum / static_cast<float>(spectrum_frames));
+            meter.peak          = meter_follow(meter.peak, win_peak, dt, 0.0f, meter_peak_release_s);
+            meter.rms           = meter_follow(meter.rms, win_rms, dt, meter_rms_attack_s, meter_rms_release_s);
+            meter.linger.add(now_s, fminf(raw_peak, 1.0f));
+        }
+        else {
+            // A short peek has no valid analysis window. Do not retain old levels or markers.
+            meter.peak         = 0.0f;
+            meter.rms          = 0.0f;
+            meter.clip_until_s = 0.0;
+            meter.linger.head  = 0;
+            meter.linger.count = 0;
+        }
+
+        const ImVec2 pos    = ImGui::GetCursorScreenPos();
+        const float  width  = fmaxf(ImGui::GetContentRegionAvail().x, 1.0f);
+        const float  height = ImGui::GetFrameHeight() * 0.5f;
+        ImDrawList*  draw   = ImGui::GetWindowDrawList();
+        draw->AddRectFilled(pos, ImVec2(pos.x + width, pos.y + height), ImGui::GetColorU32(ImGuiCol_FrameBg));
+
+        const bool  clipped  = now_s < meter.clip_until_s;
+        const ImU32 fill_col = clipped ? IM_COL32(220, 40, 40, 255) : ImGui::GetColorU32(ImGuiCol_PlotHistogram);
+        const ImU32 peak_col =
+            clipped ? IM_COL32(255, 150, 150, 255) : ImGui::GetColorU32(ImGuiCol_PlotHistogramHovered);
+        // Linear amplitude: RMS 1 fills the strip; a full-scale sine fills about 70.7 percent.
+        const float fill_w = vmath::clamp(meter.rms, 0.0f, 1.0f) * width;
+        if (fill_w > 0.0f)
+            draw->AddRectFilled(pos, ImVec2(pos.x + fill_w, pos.y + height), fill_col);
+
+        const float tick_w = fminf(2.0f, width);
+        const float peak_x = pos.x + fminf(vmath::clamp(meter.peak, 0.0f, 1.0f) * width, width - tick_w);
+        draw->AddRectFilled(ImVec2(peak_x, pos.y), ImVec2(peak_x + tick_w, pos.y + height), peak_col);
+
+        float max_level = 0.0f;
+        if (meter.linger.maximum(now_s, &max_level)) {
+            const float marker_x = pos.x + fminf(vmath::clamp(max_level, 0.0f, 1.0f) * width, width - tick_w);
+            draw->AddRectFilled(ImVec2(marker_x, pos.y),
+                                ImVec2(marker_x + tick_w, pos.y + height),
+                                ImGui::GetColorU32(ImGuiCol_PlotLinesHovered));
+        }
+        ImGui::Dummy(ImVec2(width, height));
+    }
+}
+
 void Sculptor::gui_synth_info_panel(uint32_t current_channel)
 {
     if (! synth_settings_registered) {
@@ -5274,7 +5402,10 @@ void Sculptor::gui_synth_info_panel(uint32_t current_channel)
 
     gui_fill_bar(ring);
 
-    if (Synth::peek_recent_audio(spectrum_frames, info_peek_l, info_peek_r) == spectrum_frames) {
+    const bool have_window = Synth::peek_recent_audio(spectrum_frames, info_peek_l, info_peek_r) == spectrum_frames;
+    gui_loudness_bars(have_window);
+
+    if (have_window) {
         for (uint32_t i = 0; i < spectrum_frames; i++)
             info_mono[i] = (info_peek_l[i] + info_peek_r[i]) * 0.5f;
 
