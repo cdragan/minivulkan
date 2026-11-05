@@ -1082,11 +1082,22 @@ static bool channel_has_custom_name(const Synth::InstrumentEditorBank& bank, uin
     return strncmp(bank.channel_names[channel], default_name, Synth::max_name_len) != 0;
 }
 
+static bool channel_has_category(const Synth::InstrumentEditorBank& bank, uint32_t channel)
+{
+    if (! bank.channel_category[channel][0])
+        return false;
+    char text[160];
+    static_assert(sizeof(text) >= Synth::max_name_len * 6 + 2);
+    Out output = { text, sizeof(text), 0, false, false };
+    output.text_value(bank.channel_category[channel], Synth::max_name_len);
+    return ! output.invalid && ! output.overflow;
+}
+
 static bool channel_is_default(const Synth::InstrumentEditorBank& bank, uint32_t channel)
 {
     return ! bank.bank.channel_zones[channel][0].start_note &&
            chain_is_empty(bank.bank.channel_chains[channel], bank.effect_routing[channel]) &&
-           ! channel_has_custom_name(bank, channel);
+           ! channel_has_custom_name(bank, channel) && ! channel_has_category(bank, channel);
 }
 
 static void enc_channel(Out& o, const Synth::InstrumentEditorBank& bank, uint32_t channel)
@@ -1103,6 +1114,10 @@ static void enc_channel(Out& o, const Synth::InstrumentEditorBank& bank, uint32_
     if (channel_has_custom_name(bank, channel)) {
         o.key("name");
         o.text_value(bank.channel_names[channel], Synth::max_name_len);
+    }
+    if (channel_has_category(bank, channel)) {
+        o.key("category");
+        o.text_value(bank.channel_category[channel], Synth::max_name_len);
     }
     if (zones[0].start_note) {
         o.key("zones");
@@ -3528,16 +3543,38 @@ static void decode_zone(Walker& w, uint32_t obj, Synth::Zone& zone, uint16_t& in
     });
 }
 
+static void canonicalize_name(char* name);
+
 static void decode_channel(Walker& w, uint32_t obj, Synth::InstrumentEditorBank* out, uint32_t channel)
 {
-    // Present content defaults to enabled.  Empty objects keep decode defaults.
-    if (w.toks[obj].type == JSMN_OBJECT && w.toks[obj].size > 0)
+    // Category metadata alone must not enable an otherwise empty channel.
+    int content_pairs = w.toks[obj].type == JSMN_OBJECT ? w.toks[obj].size : 0;
+    walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
+        if (key_eq(w, key_idx, "category"))
+            --content_pairs;
+    });
+    if (content_pairs > 0)
         out->bank.channel_enabled[channel] = 1;
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         // An explicit empty name is stored as-is but is not custom.  The next
         // encode omits it, so the factory name returns on the next decode.
         if (key_eq(w, key_idx, "name"))
             want_text(w, val_idx, out->channel_names[channel], Synth::max_name_len);
+        else if (key_eq(w, key_idx, "category")) {
+            char             category[Synth::max_name_len] = {};
+            const jsmntok_t& token                         = w.toks[val_idx];
+            if (token.type != JSMN_STRING || ! unescape_string(w.doc + token.start,
+                                                               static_cast<uint32_t>(token.end - token.start),
+                                                               category,
+                                                               sizeof(category))) {
+                record_ignored("category");
+                memset(out->channel_category[channel], 0, Synth::max_name_len);
+            }
+            else {
+                memcpy(out->channel_category[channel], category, sizeof(category));
+                canonicalize_name(out->channel_category[channel]);
+            }
+        }
         else if (key_eq(w, key_idx, "zones"))
             walk_array(w, val_idx, Synth::max_instr_per_channel, [&](uint32_t elem, uint32_t pos) {
                 decode_zone(w, elem, out->bank.channel_zones[channel][pos], file_zone_ids[channel][pos]);
@@ -4301,8 +4338,10 @@ static void canonicalize_editor_bank(Synth::InstrumentEditorBank* editor_bank)
 
     for (uint32_t i = 0; i < bank.instruments.num_allocated; i++)
         canonicalize_name(editor_bank->instrument_names[i]);
-    for (uint32_t c = 0; c < Synth::max_channels; c++)
+    for (uint32_t c = 0; c < Synth::max_channels; c++) {
         canonicalize_name(editor_bank->channel_names[c]);
+        canonicalize_name(editor_bank->channel_category[c]);
+    }
 
     for (uint32_t i = 0; i < bank.envelopes.num_allocated; i++) {
         Synth::EnvelopeDescriptor& env = bank.envelopes.entries[i];

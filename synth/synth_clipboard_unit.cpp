@@ -5071,9 +5071,278 @@ static void portability_clipboard_generator_locators_and_roles()
     }
 }
 
+static void check_channel_categories()
+{
+    static Synth::ChannelCategories categories         = {};
+    static Synth::ChannelCategories before_invalid_set = {};
+    const char*                     fallback           = "Global";
+    const char*                     full_category      = "12345678901234567890123";
+
+    // Set and get a category.
+    Synth::channel_category_set(&categories, 0, "Piano");
+    TEST(strcmp(Synth::channel_category_get(categories, 0, fallback), "Piano") == 0);
+
+    // Use the fallback when no category is stored.
+    TEST(Synth::channel_category_get(categories, 1, fallback) == fallback);
+
+    // Keep each channel independent.
+    Synth::channel_category_set(&categories, 1, "Strings");
+    TEST(strcmp(Synth::channel_category_get(categories, 0, fallback), "Piano") == 0);
+    TEST(strcmp(Synth::channel_category_get(categories, 1, fallback), "Strings") == 0);
+
+    // Use the last valid channel.
+    Synth::channel_category_set(&categories, Synth::max_channels - 1, "Brass");
+    TEST(strcmp(Synth::channel_category_get(categories, Synth::max_channels - 1, fallback), "Brass") == 0);
+
+    // Ignore an invalid channel without a change to the store.
+    before_invalid_set = categories;
+    Synth::channel_category_set(&categories, Synth::max_channels, "Invalid");
+    TEST(memcmp(&categories, &before_invalid_set, sizeof(categories)) == 0);
+    TEST(Synth::channel_category_get(categories, Synth::max_channels, fallback) == fallback);
+
+    // Keep all 23 characters of a valid category.
+    Synth::channel_category_set(&categories, 2, full_category);
+    TEST(strcmp(Synth::channel_category_get(categories, 2, fallback), full_category) == 0);
+
+    // Truncate a long category and keep the NUL terminator.
+    Synth::channel_category_set(&categories, 2, "12345678901234567890123456789");
+    TEST(categories.names[2][Synth::library_category_len - 1] == '\0');
+    TEST(strncmp(categories.names[2], full_category, Synth::library_category_len) == 0);
+
+    // Clear a category with an empty value.
+    Synth::channel_category_set(&categories, 2, "");
+    TEST(categories.names[2][0] == '\0');
+    TEST(Synth::channel_category_get(categories, 2, fallback) == fallback);
+
+    // Forget all matching categories and keep the other categories.
+    Synth::channel_category_set(&categories, 2, "Piano");
+    Synth::channel_category_forget(&categories, "Piano");
+    TEST(Synth::channel_category_get(categories, 0, fallback) == fallback);
+    TEST(Synth::channel_category_get(categories, 2, fallback) == fallback);
+    TEST(strcmp(Synth::channel_category_get(categories, 1, fallback), "Strings") == 0);
+    TEST(strcmp(Synth::channel_category_get(categories, Synth::max_channels - 1, fallback), "Brass") == 0);
+
+    // Copy safely when the source is inside the destination entry.
+    Synth::channel_category_set(&categories, 3, "Alias");
+    Synth::channel_category_set(&categories, 3, categories.names[3] + 2);
+    TEST(strcmp(Synth::channel_category_get(categories, 3, fallback), "ias") == 0);
+
+    // Keep the previous category when the Rename field is empty.
+    TEST(! Synth::channel_category_update(&categories, 1, "", fallback));
+    TEST(strcmp(Synth::channel_category_get(categories, 1, fallback), "Strings") == 0);
+
+    // Do not store a category that is equal to the fallback.
+    TEST(! Synth::channel_category_update(&categories, 0, fallback, fallback));
+    TEST(categories.names[0][0] == '\0');
+    TEST(Synth::channel_category_get(categories, 0, fallback) == fallback);
+
+    // Make a new category available to the Save lookup at once.
+    TEST(Synth::channel_category_update(&categories, 0, "Organ", fallback));
+    TEST(strcmp(categories.names[0], "Organ") == 0);
+    TEST(strcmp(Synth::channel_category_get(categories, 0, fallback), "Organ") == 0);
+
+    // Do not change a category that is already stored.
+    TEST(! Synth::channel_category_update(&categories, 0, "Organ", fallback));
+    TEST(strcmp(Synth::channel_category_get(categories, 0, fallback), "Organ") == 0);
+
+    // Keep the comparison key when it points into an entry that is cleared.
+    Synth::channel_category_set(&categories, 0, "Shared");
+    Synth::channel_category_set(&categories, 2, "Shared");
+    before_invalid_set             = categories;
+    before_invalid_set.names[0][0] = '\0';
+    before_invalid_set.names[2][0] = '\0';
+    Synth::channel_category_forget(&categories, categories.names[0]);
+    TEST(categories.names[0][0] == '\0');
+    TEST(categories.names[2][0] == '\0');
+    TEST(memcmp(&categories, &before_invalid_set, sizeof(categories)) == 0);
+}
+
+static void check_channel_category_persistence()
+{
+    static_assert(Synth::library_category_len == Synth::max_name_len);
+    static Synth::InstrumentEditorBank          source;
+    static Synth::InstrumentEditorBank          decoded;
+    static FixedArray<char, clipboard_capacity> text;
+
+    // Keep the bank format unchanged when no category is set.
+    memset(static_cast<void*>(&source), 0, sizeof(source));
+    memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
+    memset(text.elements, 0, sizeof(text.elements));
+    Synth::init_default_bank(&source.bank);
+    memset(source.bank.channel_zones, 0, sizeof(source.bank.channel_zones));
+    memset(source.bank.channel_enabled, 0, sizeof(source.bank.channel_enabled));
+    for (uint32_t ch = 0; ch < Synth::max_channels; ++ch) {
+        Synth::get_default_channel_name(ch, source.channel_names[ch], Synth::max_name_len);
+    }
+    const uint32_t capacity = sizeof(text.elements) / 2;
+    const uint32_t length   = Synth::encode_editor_bank_json(&source, text.elements, capacity);
+    TEST(length > 0);
+    if (length > 0) {
+        text.elements[length] = '\0';
+        TEST(strstr(text.elements, "\"category\"") == nullptr);
+        TEST(strstr(text.elements, "\"channels\"") == nullptr);
+        TEST(Synth::decode_editor_bank_json(text.elements, length, &decoded));
+        const uint32_t encoded_length = Synth::encode_editor_bank_json(&decoded, text.elements + capacity, capacity);
+        TEST(encoded_length == length);
+        TEST(memcmp(text.elements, text.elements + capacity, length) == 0);
+    }
+
+    // Reject malformed JSON even when the category key is not recognized.
+    const char* const malformed[] = {
+        "{\"instrument_editor_bank\":{\"format\":\"synth-bank-v2\",\"channels\":[{\"category\":\"\\q\"}]}}",
+        "{\"instrument_editor_bank\":{\"format\":\"synth-bank-v2\",\"channels\":[{\"category\":\"\\u12\"}]}}",
+        "{\"instrument_editor_bank\":{\"format\":\"synth-bank-v2\",\"channels\":[{\"category\":\"\xc3\x28\"}]}}"
+    };
+    for (const char* document : malformed) {
+        memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
+        TEST(! Synth::decode_editor_bank_json(document, static_cast<uint32_t>(strlen(document)), &decoded));
+    }
+    static Synth::ChannelCategories categories;
+    const auto                      reset = [&]() {
+        memset(static_cast<void*>(&source), 0, sizeof(source));
+        memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
+        memset(&categories, 0, sizeof(categories));
+        memset(text.elements, 0, sizeof(text.elements));
+        for (uint32_t ch = 0; ch < Synth::max_channels; ++ch)
+            Synth::get_default_channel_name(ch, source.channel_names[ch], Synth::max_name_len);
+    };
+    const auto round_trip = [&]() {
+        const uint32_t count = Synth::encode_editor_bank_json(&source, text.elements, capacity);
+        TEST(count > 0);
+        if (! count)
+            return;
+        text.elements[count] = 0;
+        TEST(Synth::decode_editor_bank_json(text.elements, count, &decoded));
+        const uint32_t again = Synth::encode_editor_bank_json(&decoded, text.elements + capacity, capacity);
+        TEST(again == count);
+        TEST(memcmp(text.elements, text.elements + capacity, count) == 0);
+    };
+
+    // Copy, compare and restore independent channel categories.
+    reset();
+    for (uint32_t ch = 0; ch < Synth::max_channels; ++ch)
+        Synth::channel_category_set(&categories, ch, ch == 3 ? "Strings" : "Piano");
+    TEST(Synth::channel_categories_to_bank(categories, &source));
+    TEST(! Synth::channel_categories_to_bank(categories, &source));
+    TEST(memcmp(source.channel_category, categories.names, sizeof(categories.names)) == 0);
+    memset(&categories, 0, sizeof(categories));
+    Synth::channel_categories_from_bank(&categories, source);
+    TEST(memcmp(source.channel_category, categories.names, sizeof(categories.names)) == 0);
+    Synth::channel_category_set(&categories, 0, "");
+    Synth::channel_category_forget(&categories, "Piano");
+    TEST(Synth::channel_categories_to_bank(categories, &source));
+    for (uint32_t ch = 0; ch < Synth::max_channels; ++ch)
+        TEST(strcmp(source.channel_category[ch], ch == 3 ? "Strings" : "") == 0);
+    strcpy(source.channel_category[3], "Stale");
+    TEST(Synth::channel_categories_to_bank(categories, &source));
+    TEST(strcmp(source.channel_category[3], "Strings") == 0);
+
+    // A restored snapshot supplies the category after Undo or Redo.
+    reset();
+    Synth::channel_category_set(&categories, 3, "Strings");
+    TEST(Synth::channel_categories_to_bank(categories, &source));
+    memcpy(static_cast<void*>(&decoded), &source, sizeof(source));
+    Synth::channel_category_set(&categories, 3, "");
+    TEST(Synth::channel_categories_to_bank(categories, &source));
+    Synth::channel_categories_from_bank(&categories, decoded);
+    TEST(strcmp(categories.names[3], "Strings") == 0);
+    Synth::channel_categories_from_bank(&categories, source);
+    TEST(categories.names[3][0] == 0);
+    memset(source.channel_category[3], 'x', Synth::max_name_len);
+    Synth::channel_categories_from_bank(&categories, source);
+    TEST(categories.names[3][Synth::library_category_len - 1] == 0);
+
+    // Interior and trailing category-only channels retain their positions.
+    reset();
+    strcpy(source.channel_category[3], "Strings");
+    strcpy(source.channel_category[Synth::max_channels - 1], "12345678901234567890123");
+    round_trip();
+    TEST(strcmp(decoded.channel_category[3], "Strings") == 0);
+    TEST(strcmp(decoded.channel_category[Synth::max_channels - 1], "12345678901234567890123") == 0);
+    TEST(decoded.bank.channel_enabled[3] == 0);
+    TEST(decoded.bank.channel_enabled[Synth::max_channels - 1] == 0);
+
+    // A channel with a zone stays enabled.
+    reset();
+    Synth::init_default_bank(&source.bank);
+    strcpy(source.channel_category[0], "Piano");
+    round_trip();
+    TEST(decoded.bank.channel_enabled[0] == 1);
+    TEST(decoded.bank.channel_zones[0][0].start_note != 0);
+    TEST(strcmp(decoded.channel_category[0], "Piano") == 0);
+
+    // The encoder escapes usable text and canonicalizes its padding.
+    reset();
+    strcpy(source.channel_category[0], "Quote\" slash\\ tab\t");
+    memset(source.channel_category[0] + strlen(source.channel_category[0]) + 1,
+           'x',
+           Synth::max_name_len - strlen(source.channel_category[0]) - 1);
+    round_trip();
+    TEST(strcmp(decoded.channel_category[0], "Quote\" slash\\ tab\t") == 0);
+    TEST(decoded.channel_category[0][Synth::max_name_len - 1] == 0);
+
+    // Unencodable category bytes must not refuse a whole-bank save.
+    for (uint32_t bad = 0; bad < 2; ++bad) {
+        reset();
+        if (bad == 0) {
+            source.channel_category[0][0] = static_cast<char>(0xc3);
+            source.channel_category[0][1] = '(';
+        }
+        else
+            memset(source.channel_category[0], 'x', Synth::max_name_len);
+        round_trip();
+        TEST(strstr(text.elements, "\"category\"") == nullptr);
+        TEST(decoded.channel_category[0][0] == 0);
+    }
+
+    // Grammar-valid but unusable values are ignored, not document failures.
+    const char* const ignored_values[] = { "42", "{}", "\"123456789012345678901234\"", "\"\\u0000\"" };
+    for (const char* value : ignored_values) {
+        reset();
+        char document[256];
+        char ignored[8][48] = {};
+        snprintf(document,
+                 sizeof(document),
+                 "{\"instrument_editor_bank\":{\"format\":\"synth-bank-v2\",\"channels\":[{\"category\":%s}]}}",
+                 value);
+        Synth::take_ignored_fields(ignored, 8);
+        TEST(Synth::decode_editor_bank_json(document, static_cast<uint32_t>(strlen(document)), &decoded));
+        TEST(decoded.channel_category[0][0] == 0);
+        TEST(decoded.bank.channel_enabled[0] == 0);
+        const uint32_t ignored_count = Synth::take_ignored_fields(ignored, 8);
+        bool           found         = false;
+        for (uint32_t i = 0; i < ignored_count; ++i)
+            found |= strcmp(ignored[i], "category") == 0;
+        TEST(found);
+    }
+    const char* const unset_documents[] = {
+        "{\"instrument_editor_bank\":{\"format\":\"synth-bank-v2\"}}",
+        "{\"instrument_editor_bank\":{\"format\":\"synth-bank-v2\",\"channels\":[{\"category\":\"\"}]}}"
+    };
+    for (const char* document : unset_documents) {
+        reset();
+        TEST(Synth::decode_editor_bank_json(document, static_cast<uint32_t>(strlen(document)), &decoded));
+        for (uint32_t ch = 0; ch < Synth::max_channels; ++ch)
+            TEST(decoded.channel_category[ch][0] == 0);
+    }
+
+    // Save and reload the category through the file API.
+    reset();
+    strcpy(source.channel_category[3], "Strings");
+    const char* path = "Out/synth_channel_category_persistence.tmp";
+    TEST(Synth::save_editor_bank_file(path, &source) == 0);
+    TEST(Synth::load_editor_bank_file(path, &decoded) == Synth::BankFileStatus::ok);
+    TEST(strcmp(decoded.channel_category[3], "Strings") == 0);
+    Synth::channel_categories_from_bank(&categories, decoded);
+    TEST(strcmp(Synth::channel_category_get(categories, 3, "Global"), "Strings") == 0);
+    TEST(remove(path) == 0);
+}
+
 int main()
 {
     test_silence_stdout();
+    check_channel_categories();
+    check_channel_category_persistence();
     portability_clipboard_sources_and_locators();
     portability_clipboard_generator_locators_and_roles();
     check_shared_instrument_json_domains();

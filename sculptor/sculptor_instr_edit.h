@@ -99,6 +99,7 @@ private:
     void        gui_zone_menu_items(uint32_t channel, uint32_t note, bool keyboard_range);
     static void osc_canvas_menu_entry(void* user_data);
     void        gui_rename_popup();
+    void        rebuild_library_categories();
     void        gui_library_popups();
     void        gui_library_browser();
     void        gui_library_save_popups();
@@ -123,12 +124,13 @@ private:
     bool     zone_menu_open       = false; // deferred: same ID-scope rule as channel_menu_open
     int32_t  zone_tab_force_entry = -1;    // one-shot: make the zone tab bar select this entry, cleared once shown
 
-    vmath::vec2 rename_anchor                   = {};
-    char        rename_buf[Synth::max_name_len] = {};
-    bool        rename_popup_open               = false;
-    bool        rename_zone                     = false; // rename modal targets a zone instrument
-    uint32_t    rename_zone_entry               = 0;     // zone entry the rename modal targets
-    bool        show_effects_mode               = false; // zone vs Effects view; persists across targets
+    vmath::vec2 rename_anchor                                = {};
+    char        rename_buf[Synth::max_name_len]              = {};
+    char        rename_category[Synth::library_category_len] = {};
+    bool        rename_popup_open                            = false;
+    bool        rename_zone                                  = false; // rename modal targets a zone instrument
+    uint32_t    rename_zone_entry                            = 0;     // zone entry the rename modal targets
+    bool        show_effects_mode                            = false; // zone vs Effects view; persists across targets
     int32_t     effects_tab_pend = -1; // one-shot: force-select the Effects tab after an undo/redo restore
 
     // Instrument library. Entries refresh on every browser open and before every
@@ -144,7 +146,13 @@ private:
     uint32_t                 library_num_categories                                                      = 0;
     int32_t                  library_category = -1; // selected category index, -1 = none
 
-    char save_category[Synth::max_name_len]    = {}; // last-used category
+    char save_category[Synth::max_name_len] = {}; // last-used category
+
+    // The store is authoritative; the bank field is its saved copy.
+    // Initialize and Delete clear both through the next-frame sync.
+    // Undo and redo re-read the store from the restored bank field.
+    Synth::ChannelCategories channel_categories = {};
+
     char save_as_name[Synth::max_name_len]     = {};
     char save_as_category[Synth::max_name_len] = {};
     bool save_as_open                          = false; // deferred Save As popup

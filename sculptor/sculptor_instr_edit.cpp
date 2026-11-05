@@ -1948,7 +1948,7 @@ static void editor_snapshot(uint32_t origin)
 // The entry's origin says where its edit was made: the redo entry this
 // creates replays that edit, and the caller refocuses that channel and
 // pane so a whole-bank restore is never silent about what changed.
-static bool editor_undo(uint32_t* origin)
+static bool editor_undo(uint32_t* origin, Synth::ChannelCategories* categories)
 {
     undo_init_once();
 
@@ -1969,6 +1969,7 @@ static bool editor_undo(uint32_t* origin)
     undo_redo.pop_u32();
     undo_redo.pop(&instr_bank, sizeof(instr_bank));
     undo_redo.finish_undo();
+    Synth::channel_categories_from_bank(categories, instr_bank);
 
     if (origin)
         *origin = entry_origin;
@@ -1981,7 +1982,7 @@ static bool editor_undo(uint32_t* origin)
 
 // A redo entry's payload reads forward, so its origin sits at the start:
 // the edit it replays becomes visible at that origin again.
-static bool editor_redo(uint32_t* origin)
+static bool editor_redo(uint32_t* origin, Synth::ChannelCategories* categories)
 {
     undo_init_once();
 
@@ -2004,6 +2005,7 @@ static bool editor_redo(uint32_t* origin)
     undo_redo.pop_u32();
     undo_redo.pop(&instr_bank, sizeof(instr_bank));
     undo_redo.finish_redo();
+    Synth::channel_categories_from_bank(categories, instr_bank);
 
     if (origin)
         *origin = entry_origin;
@@ -2462,6 +2464,7 @@ bool Sculptor::SynthEditor::allocate_resources()
     if (! editor_bank_initialized) {
         editor_bank_initialized = true;
         init_editor();
+        Synth::channel_categories_from_bank(&channel_categories, instr_bank);
     }
     return true;
 }
@@ -2471,6 +2474,11 @@ void Sculptor::SynthEditor::delayed_updates()
     // Runs from sculptor.cpp before the editors loop, regardless of the
     // enabled flag: a disabled editor must still publish pending banks.
     pump_bank_publish();
+
+    if (editor_bank_initialized && Synth::channel_categories_to_bank(channel_categories, &instr_bank)) {
+        save_pending         = true;
+        frames_since_publish = 0;
+    }
 
     if (save_pending && bank_auto_save_armed) {
         // Publishes happen during the GUI frame; two passes without a new
@@ -2611,6 +2619,7 @@ void Sculptor::SynthEditor::do_initialize(uint32_t channel)
     selected_target = channel;
     Sculptor::undo_group_reset(&osc_undo_group);
     if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_init, channel, 0 })) {
+        Synth::channel_category_set(&channel_categories, channel, "");
         invalidate_channel_views(channel);
         osc_graph_reproject = true;
         fx_graph_reproject  = true;
@@ -2636,6 +2645,7 @@ void Sculptor::SynthEditor::do_delete(uint32_t channel)
     selected_target = channel;
     Sculptor::undo_group_reset(&osc_undo_group);
     if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_delete, channel, 0 })) {
+        Synth::channel_category_set(&channel_categories, channel, "");
         invalidate_channel_views(channel);
         osc_graph_reproject = true;
         fx_graph_reproject  = true;
@@ -2700,7 +2710,7 @@ bool Sculptor::SynthEditor::create_gui_frame(uint32_t image_idx, bool* need_real
         if (is_ctrl_down() && ! is_shift_down() && ImGui::IsKeyPressed(ImGuiKey_Z)) {
             uint32_t origin = 0;
             snapshot_view_structure();
-            if (editor_undo(&origin)) {
+            if (editor_undo(&origin, &channel_categories)) {
                 reconcile_view_structure();
                 apply_edit_origin(origin);
                 osc_graph_reproject = true;
@@ -2712,7 +2722,7 @@ bool Sculptor::SynthEditor::create_gui_frame(uint32_t image_idx, bool* need_real
                                (is_shift_down() && ImGui::IsKeyPressed(ImGuiKey_Z)))) {
             uint32_t origin = 0;
             snapshot_view_structure();
-            if (editor_redo(&origin)) {
+            if (editor_redo(&origin, &channel_categories)) {
                 reconcile_view_structure();
                 apply_edit_origin(origin);
                 osc_graph_reproject = true;
@@ -4520,7 +4530,12 @@ void Sculptor::SynthEditor::gui_channel_popup()
             snprintf(name, sizeof(name), "%s", instr_bank.channel_names[channel]);
         else
             Synth::get_zone_name(&instr_bank, channel, save_entry, name, sizeof(name));
-        save_instrument_to_library(save_category, name);
+        char category[Synth::library_category_len];
+        snprintf(category,
+                 sizeof(category),
+                 "%s",
+                 Synth::channel_category_get(channel_categories, channel, save_category));
+        save_instrument_to_library(category, name);
         ImGui::CloseCurrentPopup();
     }
     if (can_save && ImGui::MenuItem("Save As...")) {
@@ -4549,6 +4564,20 @@ void Sculptor::SynthEditor::gui_rename_popup()
                 ? instr_bank.instrument_names[instr_bank.bank.channel_zones[menu_channel][rename_zone_entry].instrument]
                 : instr_bank.channel_names[menu_channel],
             sizeof(rename_buf));
+        if (! rename_zone) {
+            snprintf(rename_category,
+                     sizeof(rename_category),
+                     "%s",
+                     Synth::channel_category_get(channel_categories, menu_channel, save_category));
+            Synth::LibraryScanStatus status = Synth::library_valid;
+            library_num_entries =
+                Synth::read_library_index(library_path, library_entries, Synth::library_max_records, &status);
+            if (status == Synth::library_valid)
+                rebuild_library_categories();
+            else
+                library_num_categories = 0;
+        }
+
         ImGui::OpenPopup("Rename");
     }
 
@@ -4569,17 +4598,46 @@ void Sculptor::SynthEditor::gui_rename_popup()
     if (esc)
         ImGui::CloseCurrentPopup();
 
-    ImGui::SetNextItemWidth(240.0f);
+    const float label_width = rename_zone ? 0.0f : ImGui::CalcTextSize("Category").x + 8.0f;
+    const float edit_column = ImGui::GetCursorPosX() + label_width;
+    if (! rename_zone) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Name");
+        ImGui::SameLine(edit_column);
+    }
+    ImGui::SetNextItemWidth(240.0f - label_width);
     if (just_opened)
         ImGui::SetKeyboardFocusHere();
     const bool pressed_enter =
         ImGui::InputText("##rename", rename_buf, sizeof(rename_buf), ImGuiInputTextFlags_EnterReturnsTrue) != 0;
+    bool category_enter = false;
+    if (! rename_zone) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Category");
+        ImGui::SameLine(edit_column);
+        ImGui::BeginGroup();
+        ImGui::SetNextItemWidth(240.0f - label_width - ImGui::GetFrameHeight());
+        category_enter = ImGui::InputText("##rename_category",
+                                          rename_category,
+                                          sizeof(rename_category),
+                                          ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::SameLine(0.0f, 0.0f);
+        if (ImGui::BeginCombo("##rename_cat_pick", "", ImGuiComboFlags_NoPreview)) {
+            for (uint32_t category = 0; category < library_num_categories; ++category) {
+                if (library_categories[category][0] && ImGui::Selectable(library_categories[category]))
+                    snprintf(rename_category, sizeof(rename_category), "%s", library_categories[category]);
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::EndGroup();
+    }
+
     const bool pressed_ok = ImGui::Button("OK");
     ImGui::SameLine();
     const bool pressed_cancel = ImGui::Button("Cancel");
     if (pressed_cancel)
         ImGui::CloseCurrentPopup();
-    if ((pressed_enter || pressed_ok) && rename_buf[0] && ! esc) {
+    if (rename_buf[0] && ! esc && (pressed_ok || pressed_enter || category_enter)) {
         candidate = instr_bank;
         memcpy(
             rename_zone
@@ -4590,6 +4648,9 @@ void Sculptor::SynthEditor::gui_rename_popup()
         Sculptor::undo_group_reset(&osc_undo_group);
         commit_candidate(candidate,
                          Sculptor::UndoGroupTag{ osc_tag_rename, menu_channel, rename_zone ? rename_zone_entry : 0 });
+        if (! rename_zone)
+            Synth::channel_category_update(&channel_categories, menu_channel, rename_category, save_category);
+
         ImGui::CloseCurrentPopup();
     }
     if (! rename_zone && ImGui::IsWindowAppearing()) {
@@ -4625,6 +4686,8 @@ bool Sculptor::SynthEditor::do_library_load(const Synth::LibraryEntry& entry)
     Synth::reclaim_unused_slots(&candidate);
     if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_load, library_channel, 0 }))
         return false;
+
+    Synth::channel_category_set(&channel_categories, library_channel, entry.category);
     invalidate_channel_views(library_channel);
     report_ignored_fields("instrument library");
     selected_target                    = library_channel;
@@ -4702,10 +4765,43 @@ bool Sculptor::SynthEditor::finish_library_save(const char* category, const char
     bank_auto_save_armed = true;
 
     snprintf(save_category, sizeof(save_category), "%s", category);
+    Synth::channel_category_set(&channel_categories, library_channel, category);
 
     Sculptor::notify_info("Synth: instrument saved to library: %s", name);
 
     return true;
+}
+
+void Sculptor::SynthEditor::rebuild_library_categories()
+{
+    // A rescan triggered by a delete must keep the selected category;
+    // only a vanished category falls back to the fresh-open selection.
+    char       selected_category[Synth::library_category_len];
+    const bool had_selection =
+        library_category >= 0 && static_cast<uint32_t>(library_category) < library_num_categories;
+    if (had_selection)
+        memcpy(selected_category, library_categories[library_category], Synth::library_category_len);
+
+    library_num_categories = 0;
+    for (uint32_t i = 0; i < library_num_entries && library_num_categories < Synth::library_max_records; i++) {
+        uint32_t c = 0;
+        while (c < library_num_categories &&
+               strncmp(library_categories[c], library_entries[i].category, Synth::library_category_len) != 0)
+            c++;
+        if (c == library_num_categories) {
+            memcpy(library_categories[c], library_entries[i].category, Synth::library_category_len);
+            library_num_categories++;
+        }
+    }
+    library_category = library_num_categories ? 0 : -1;
+    if (had_selection) {
+        for (uint32_t c = 0; c < library_num_categories; c++) {
+            if (strncmp(library_categories[c], selected_category, Synth::library_category_len) == 0) {
+                library_category = static_cast<int32_t>(c);
+                break;
+            }
+        }
+    }
 }
 
 void Sculptor::SynthEditor::gui_library_popups()
@@ -4732,34 +4828,8 @@ void Sculptor::SynthEditor::gui_library_popups()
             return; // failed scans never open the browser: the notification reports why
         }
 
-        // A rescan triggered by a delete must keep the selected category;
-        // only a vanished category falls back to the fresh-open selection.
-        char       selected_category[Synth::library_category_len];
-        const bool had_selection =
-            library_category >= 0 && static_cast<uint32_t>(library_category) < library_num_categories;
-        if (had_selection)
-            memcpy(selected_category, library_categories[library_category], Synth::library_category_len);
+        rebuild_library_categories();
 
-        library_num_categories = 0;
-        for (uint32_t i = 0; i < library_num_entries && library_num_categories < Synth::library_max_records; i++) {
-            uint32_t c = 0;
-            while (c < library_num_categories &&
-                   strncmp(library_categories[c], library_entries[i].category, Synth::library_category_len) != 0)
-                c++;
-            if (c == library_num_categories) {
-                memcpy(library_categories[c], library_entries[i].category, Synth::library_category_len);
-                library_num_categories++;
-            }
-        }
-        library_category = library_num_categories ? 0 : -1;
-        if (had_selection) {
-            for (uint32_t c = 0; c < library_num_categories; c++) {
-                if (strncmp(library_categories[c], selected_category, Synth::library_category_len) == 0) {
-                    library_category = static_cast<int32_t>(c);
-                    break;
-                }
-            }
-        }
         // Re-opening an already-open popup repositions it to the trigger; skip
         // when the browser is already on screen (delete handlers re-trigger this).
         if (! ImGui::IsPopupOpen("##synth_library", ImGuiPopupFlags_None))
@@ -4780,7 +4850,10 @@ void Sculptor::SynthEditor::gui_library_popups()
             return;
         }
         snprintf(save_as_name, sizeof(save_as_name), "%s", instr_bank.channel_names[library_channel]);
-        snprintf(save_as_category, sizeof(save_as_category), "%s", save_category);
+        snprintf(save_as_category,
+                 sizeof(save_as_category),
+                 "%s",
+                 Synth::channel_category_get(channel_categories, library_channel, save_category));
         ImGui::OpenPopup("##synth_library_save_as");
     }
 
@@ -4829,6 +4902,8 @@ void Sculptor::SynthEditor::gui_library_browser()
                         // the decision reads the pre-delete browser snapshot.
                         if (strcmp(save_category, category) == 0)
                             save_category[0] = 0;
+
+                        Synth::channel_category_forget(&channel_categories, category);
                         Sculptor::notify_info("Synth: library category deleted: %s", category);
                         library_open = true; // the reopen rescans the index before the browser draws
                     }
@@ -4873,8 +4948,12 @@ void Sculptor::SynthEditor::gui_library_browser()
                                     strncmp(library_entries[j].name, record_name, Synth::library_name_len) != 0)
                                     num_other_in_category++;
                             }
-                            if (strcmp(save_category, record_category) == 0 && num_other_in_category == 0)
-                                save_category[0] = 0;
+                            if (num_other_in_category == 0) {
+                                if (strcmp(save_category, record_category) == 0)
+                                    save_category[0] = 0;
+
+                                Synth::channel_category_forget(&channel_categories, record_category);
+                            }
                             Sculptor::notify_info("Synth: instrument deleted from library: %s", record_name);
                             library_open = true; // the reopen rescans the index before the browser draws
                         }

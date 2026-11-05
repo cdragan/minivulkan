@@ -14,6 +14,70 @@
 #include <stdio.h>
 #include <string.h>
 
+void Synth::channel_category_set(ChannelCategories* categories, uint32_t channel, const char* category)
+{
+    if (channel >= max_channels)
+        return;
+
+    // Copy before writing the entry because the source can point into it.
+    char copied_category[library_category_len] = {};
+    strncpy(copied_category, category, sizeof(copied_category) - 1);
+    memcpy(categories->names[channel], copied_category, sizeof(copied_category));
+}
+
+const char* Synth::channel_category_get(const ChannelCategories& categories, uint32_t channel, const char* fallback)
+{
+    if (channel >= max_channels || ! categories.names[channel][0])
+        return fallback;
+
+    return categories.names[channel];
+}
+
+void Synth::channel_category_forget(ChannelCategories* categories, const char* category)
+{
+    // Keep the key before clearing entries because it can point into the store.
+    char copied_category[library_category_len] = {};
+    strncpy(copied_category, category, sizeof(copied_category) - 1);
+
+    for (uint32_t channel = 0; channel < max_channels; ++channel) {
+        if (strncmp(categories->names[channel], copied_category, library_category_len) == 0)
+            categories->names[channel][0] = 0;
+    }
+}
+
+bool Synth::channel_category_update(ChannelCategories* categories,
+                                    uint32_t           channel,
+                                    const char*        text,
+                                    const char*        fallback)
+{
+    if (channel >= max_channels || ! text[0] ||
+        strncmp(text, channel_category_get(*categories, channel, fallback), library_category_len) == 0)
+        return false;
+
+    channel_category_set(categories, channel, text);
+    return true;
+}
+
+void Synth::channel_categories_from_bank(ChannelCategories* categories, const InstrumentEditorBank& bank)
+{
+    for (uint32_t channel = 0; channel < max_channels; ++channel) {
+        memcpy(categories->names[channel], bank.channel_category[channel], library_category_len);
+        categories->names[channel][library_category_len - 1] = 0;
+    }
+}
+
+bool Synth::channel_categories_to_bank(const ChannelCategories& categories, InstrumentEditorBank* bank)
+{
+    bool changed = false;
+    for (uint32_t channel = 0; channel < max_channels; ++channel) {
+        if (memcmp(bank->channel_category[channel], categories.names[channel], library_category_len) != 0) {
+            memcpy(bank->channel_category[channel], categories.names[channel], library_category_len);
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 constexpr uint32_t library_file_magic = 0x42494C49;
 
 static char                         library_transfer_text[128 * 1024];

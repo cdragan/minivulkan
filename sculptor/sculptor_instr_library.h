@@ -11,9 +11,10 @@
 namespace Synth {
 
 constexpr uint32_t library_category_len = 24;
-constexpr uint32_t library_name_len     = 24;
-constexpr uint32_t library_max_records  = 256;
-constexpr uint32_t library_version      = 2;
+static_assert(library_category_len == max_name_len);
+constexpr uint32_t library_name_len    = 24;
+constexpr uint32_t library_max_records = 256;
+constexpr uint32_t library_version     = 2;
 
 // A record payload is the reduced whole-channel editor bank encoded as JSON text,
 // with its explicit length in the record header.  A payload beyond the capacity is
@@ -23,6 +24,18 @@ constexpr uint32_t library_version      = 2;
 // A record whose category or name fields lack a NUL terminator is likewise
 // preserved: the scan reports the corruption instead of indexing around it.
 constexpr uint32_t library_payload_max = 1024 * 1024;
+
+struct ChannelCategories {
+    char names[max_channels][library_category_len];
+};
+
+void        channel_category_set(ChannelCategories* categories, uint32_t channel, const char* category);
+const char* channel_category_get(const ChannelCategories& categories, uint32_t channel, const char* fallback);
+void        channel_category_forget(ChannelCategories* categories, const char* category);
+bool channel_category_update(ChannelCategories* categories, uint32_t channel, const char* text, const char* fallback);
+
+void channel_categories_from_bank(ChannelCategories* categories, const InstrumentEditorBank& bank);
+bool channel_categories_to_bank(const ChannelCategories& categories, InstrumentEditorBank* bank);
 
 struct LibraryEntry {
     char     category[library_category_len];

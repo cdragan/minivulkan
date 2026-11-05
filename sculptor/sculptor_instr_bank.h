@@ -97,6 +97,7 @@ struct InstrumentEditorBank {
     Sculptor::EffectChainRouting effect_routing[max_channels + 1];
     char                         instrument_names[max_instruments][max_name_len];
     char                         channel_names[max_channels][max_name_len];
+    char                         channel_category[max_channels][max_name_len];
     // Editor-side per-zone wiring state, sparse with a global cap.
     GraphNodeLayout graph_layout[max_graph_records];
     uint32_t        graph_layout_count;
