@@ -5417,8 +5417,149 @@ static void check_fir_spread_helpers()
     // silently reintroduce them.
 }
 
+// Read the source contract separately from the arithmetic mirror.  No GPU is used.
+
+// The test-declared single-entry contract is in synth_test_common.h.
+static void m1_check_window(const uint32_t* entry, uint32_t lo, uint32_t hi)
+{
+    const uint32_t packed = Synth::fir_window_from_entry(entry);
+    TEST((packed & 2047u) == lo);
+    TEST(((packed >> 11u) & 2047u) == hi);
+    TEST((packed & 0x80000000u) == 0u);
+    TEST(packed == (lo | (hi << 11u)));
+}
+
+static float m1_nonband_divisor(float coeff_sum)
+{
+    // Revised shader contract.  Zero and nonfinite divisors must not poison zero taps.
+    return coeff_sum == 0.0f || ! std::isfinite(coeff_sum) ? 1.0f : coeff_sum;
+}
+
+static float m1_norm_sum(uint32_t hp, uint32_t lp, uint32_t span)
+{
+    const float pi  = 3.141592653589793f;
+    float       sum = 0.0f;
+    for (uint32_t tap = 0; tap < Synth::num_fir_taps; ++tap) {
+        const float x      = static_cast<float>(tap) - static_cast<float>((span - 1u) / 2u);
+        const float cutoff = static_cast<float>(lp) / 44100.0f;
+        float       value  = x == 0.0f && hp == 0 && lp == 0 ? 1.0f : 0.0f;
+        if (lp > 0) {
+            value = x == 0.0f ? 2.0f * cutoff : sinf(2.0f * pi * cutoff * x) / (pi * x);
+        }
+        float norm_value = value;
+        if (hp > 0 && hp >= lp && x == 0.0f && lp == 0) {
+            norm_value += 1.0f;
+        }
+        const float wpos   = x + static_cast<float>(span) * 0.5f - 0.5f;
+        const float m1     = static_cast<float>(span - 1u);
+        const float window = wpos >= 0.0f && wpos <= m1
+                                 ? 0.42f - 0.5f * cosf((2.0f * pi * wpos) / m1) + 0.08f * cosf((4.0f * pi * wpos) / m1)
+                                 : 0.0f;
+        sum += norm_value * window;
+    }
+    return sum;
+}
+
+static void m1_fir_regressions()
+{
+    static_assert(Synth::num_fir_taps == 1025);
+    static_assert(Synth::num_fir_taps <= 2047);
+    uint32_t entry[Synth::fir_coeff_entry_words] = {};
+    entry[0]                                     = 4096;
+    // Every reachable band interval is nested: unaligned starts at zero;
+    // aligned shares the largest half-span centre.  No interval list is needed.
+    for (uint32_t align : { 0u, 0x80000000u }) {
+        for (uint32_t count = 1; count <= 4; ++count) {
+            entry[1] = align | count;
+            for (uint32_t b = 0; b < count; ++b) {
+                entry[4 + 4 * b] = 11u;
+            }
+            m1_check_window(entry, 0, 11);
+            entry[4 + 4 * (count - 1)] = 31;
+            m1_check_window(entry, 0, 31);
+            entry[4 + 4 * (count - 1)] = Synth::num_fir_taps;
+            m1_check_window(entry, 0, Synth::num_fir_taps);
+            // Gains remain zero.  Staged zero-gain bands must not be excluded.
+            entry[4 + 4 * (count - 1)] = 2049;
+            m1_check_window(entry, 0, Synth::num_fir_taps);
+        }
+    }
+    memset(entry, 0, sizeof(entry));
+    m1_check_window(entry, 0, Synth::num_fir_taps);
+    entry[1] = 1;
+    m1_check_window(entry, 0, Synth::num_fir_taps);
+    // Bounds do not depend on edge order or filter shape.
+    const uint32_t edges[][2] = {
+        { 0, 1000 }, { 14016, 0 }, { 0, 0 }, { 1000, 1000 }, { 20000, 1000 }, { 1000, 20000 }
+    };
+    for (const auto& edge : edges) {
+        entry[2] = edge[0];
+        entry[3] = edge[1];
+        entry[4] = 11;
+        m1_check_window(entry, 0, 11);
+        entry[1] |= 0x80000000u;
+        m1_check_window(entry, 0, 11);
+        entry[1] = 1;
+    }
+    // Oracle only: disjoint intervals cannot be produced by FIRCoeff entries.
+    // A packed enclosing interval still preserves exclusive hi and bit 31.
+    const uint32_t disjoint[][2] = { { 7, 18 }, { 1000, 1025 } };
+    const uint32_t oracle        = disjoint[0][0] | (disjoint[1][1] << 11u) | 0x80000000u;
+    TEST((oracle & 2047u) == 7u);
+    TEST(((oracle >> 11u) & 2047u) == 1025u);
+    TEST((oracle & 0x80000000u) != 0);
+    entry[1] = 1;
+    entry[4] = 31;
+    uint32_t previous[Synth::fir_coeff_entry_words];
+    memcpy(previous, entry, sizeof(entry));
+    const uint32_t packed = Synth::fir_window_from_entry(entry);
+    TEST(Synth::fir_coeff_cache_action(previous, 1, entry, 1, false) == Synth::fir_coeff_skip);
+    TEST(Synth::fir_window_from_entry(previous) == packed);
+    TEST(Synth::fir_coeff_cache_action(previous, 1, entry, 1, true) == Synth::fir_coeff_dispatch);
+    TEST(Synth::fir_window_from_entry(entry) == packed);
+    TEST(Synth::fir_coeff_cache_action(previous, 1, entry, 0, false) == Synth::fir_coeff_invalidate);
+    entry[4] = 11;
+    TEST(Synth::fir_coeff_cache_action(previous, 1, entry, 1, false) == Synth::fir_coeff_dispatch);
+    m1_check_window(entry, 0, 11);
+}
+
+static void m1_normalization_regressions()
+{
+    // norm_value is captured BEFORE highpass subtraction.  Never sum value here.
+    for (uint32_t hp : { 14016u, 19959u, 21818u }) {
+        const float divisor = m1_norm_sum(hp, 0, 31);
+        TEST(fabsf(divisor - 1.0f) < 0.000001f);
+        TEST(m1_nonband_divisor(divisor) == divisor);
+    }
+    TEST(fabsf(m1_norm_sum(0, 0, 11) - 1.0f) < 0.000001f);
+    TEST(m1_norm_sum(0, 1000, 31) == m1_norm_sum(20000, 1000, 31));
+    TEST(m1_norm_sum(1000, 1000, 31) == m1_norm_sum(0, 1000, 31));
+    TEST(m1_nonband_divisor(0.0f) == 1.0f);
+    TEST(m1_nonband_divisor(-0.0f) == 1.0f);
+    TEST(m1_nonband_divisor(NAN) == 1.0f);
+    TEST(m1_nonband_divisor(INFINITY) == 1.0f);
+    TEST(m1_nonband_divisor(-INFINITY) == 1.0f);
+    for (float value : { 1.0f, -1.0f, 0.00001f, FLT_MIN, FLT_MAX }) {
+        const float result = m1_nonband_divisor(value);
+        TEST(memcmp(&result, &value, sizeof(value)) == 0);
+    }
+}
+
+#ifdef SYNTH_M1_INTENTIONAL_FAILURE
+static void m1_intentional_failure()
+{
+    // Harness negative control only.  This expectation is deliberately wrong, so
+    // the enabled build must fail.  Never ship it enabled.
+    TEST(fabsf(m1_norm_sum(0, 0, 31) - 2.0f) < 0.000001f);
+}
+#endif
 int main()
 {
+    m1_fir_regressions();
+    m1_normalization_regressions();
+#ifdef SYNTH_M1_INTENTIONAL_FAILURE
+    m1_intentional_failure();
+#endif
     test_silence_stdout();
     check_fir_spread_helpers();
     check_fir_slope_helpers();

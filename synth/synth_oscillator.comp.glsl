@@ -27,6 +27,8 @@ const float inv_pad_time_wrap = 1.0f / 1048576.0f;
 
 const float two_pi = 6.283185307179586;
 
+const uint production_step_samples = 256u;
+
 const uint osc_mode_blend     = 0;  // Mix osc_type[0] and osc_type[1] by osc_mix (default)
 const uint osc_mode_fm        = 1;  // osc_type[0] is carrier, osc_type[1] is modulator
 const uint osc_mode_hard_sync = 2;  // osc_type[0] sets master frequency, osc_type[1] is the hard-synced slave
@@ -59,13 +61,29 @@ struct OscillatorParams {
     float string_strike;              // Strike blend
     float string_drive;               // Force window in milliseconds
     float string_spectrum;            // Harmonic rolloff exponent
+    uint  fir_window;
 };
 
-layout(binding = 0) buffer data_buf { float data[]; };
+layout(binding = 0) buffer data_buf { float data[];
+};
+
+layout(binding = 0) readonly buffer coeff_buf
+{
+    vec4 coefficients[];
+};
 
 layout(binding = 1, std430) readonly buffer param_buf { OscillatorParams params[]; };
 
-shared float cached_input[num_taps - 1 + work_group_size];
+// One shared region with three tenants whose lifetimes are strictly ordered.  Order:
+// string_burst during string_pass, then pad_constants from the lane 0 fill until the last
+// oscillator() read, then cached_input (the FIR window) after the barrier before the FIR fill.
+// 2048 floats is the string burst size and also covers pad_constants (296 floats).
+const uint fir_input_floats = num_taps - 1u +
+    (work_group_size > production_step_samples ? work_group_size : production_step_samples);
+shared float shared_region[fir_input_floats > 2048u ? fir_input_floats : 2048u];
+#define string_burst shared_region
+#define pad_constants shared_region
+#define cached_input shared_region
 
 uint pcg_hash(uint state)
 {
@@ -79,53 +97,46 @@ uint pcg_hash(uint state)
 // independently in phase, which approximates the smeared, decorrelated
 // spectrum of a PADsynth wavetable without storing one.  duty scales the
 // wander depth; pad_tilt sets the spectral exponent (1 + clamp(tilt, -1, 1)).
-float pad_oscillator(float phase, float duty, float tilt, uint seed, float pad_time, float phase_step)
+void fill_pad_constants(uint slot, float duty, float tilt, uint seed, float phase_step)
 {
-    // Silent when the fundamental is at or above Nyquist; otherwise at least one
-    // harmonic sounds, and a harmonic sitting exactly on Nyquist is excluded.
-    if (phase_step >= 0.5) {
-        return 0.0;
-    }
+    const uint  base           = slot * 148u;
     const float harmonic_limit = 0.5 / max(phase_step, 1e-9) - 1e-6;
-    const uint  num_harmonics  = uint(min(24.0, floor(harmonic_limit)));
-
-    // Duty sets the wander depth (about 2 percent at duty 1).  The spectral tilt
-    // is separate: exponent 1 + clamp(tilt, -1, 1), so 0 keeps the saw-like 1/n
-    // spectrum, +1 gives 1/n^2 (mellow) and -1 gives a flat spectrum.
-    const float duty_depth = clamp(duty, 0.0, 1.0);
-    const float wander_ratio = duty_depth * 0.02;
-    const float base_freq = phase_step * float(sampling_rate);
-    const float exponent = 1.0 + clamp(tilt, -1.0, 1.0);
-
-    float value = 0.0;
+    const uint  count          = phase_step >= 0.5 ? 0u : uint(min(24.0, floor(harmonic_limit)));
+    pad_constants[base + 2u]   = float(count);
     float norm = 0.0;
-
-    for (uint n = 1u; n <= num_harmonics; n++) {
+    for (uint n = 1u; n <= count; ++n) {
         const float nfloat = float(n);
         const float rand_a = float(pcg_hash(seed ^ (n * 0x85ebca6bu))) / 4294967296.0;
         const float rand_b = float(pcg_hash(seed ^ (n * 0x9e3779b9u))) / 4294967296.0;
         const float rand_c = float(pcg_hash(seed ^ (n * 0xc2b2ae35u))) / 4294967296.0;
-
-        // Fixed random phase decorrelates the harmonic from note onset.
-        const float phase_offs = two_pi * rand_a;
-
-        // Drift rate quantized to 3..10 cycles per wrap period, which is
-        // k * sampling_rate / 1048576 Hz.  Whole cycles per wrap keep the wave
-        // phase-continuous when the masked time base wraps.
         const float k = 3.0 + float(uint(8.0 * rand_b));
-
-        // The amplitude divides by the drift rate, so the pitch deviation stays
-        // at wander_ratio of the harmonic's frequency regardless of the drawn rate.
-        const float wander_amp = wander_ratio * nfloat * base_freq * float(pad_time_wrap) /
-            (two_pi * k * float(sampling_rate));
-        const float wander = wander_amp * sin(two_pi * (k * pad_time + rand_c));
-
-        const float amp = 1.0 / pow(nfloat, exponent);
-        value += amp * sin(two_pi * (nfloat * phase + wander) + phase_offs);
-        norm  += amp;
+        const uint  record         = base + 4u + (n - 1u) * 6u;
+        pad_constants[record]      = nfloat;
+        pad_constants[record + 1u] = two_pi * rand_a;
+        pad_constants[record + 2u] = k;
+        pad_constants[record + 3u] = rand_c;
+        pad_constants[record + 4u] = clamp(duty, 0.0, 1.0) * 0.02 * nfloat * (phase_step * float(sampling_rate)) *
+                                     float(pad_time_wrap) / (two_pi * k * float(sampling_rate));
+        const float amp            = 1.0 / pow(nfloat, 1.0 + clamp(tilt, -1.0, 1.0));
+        pad_constants[record + 5u] = amp;
+        norm += amp;
     }
+    pad_constants[base + 3u] = max(norm, 1e-9);
+}
 
-    return value / max(norm, 1e-9);
+float pad_oscillator(float phase, float pad_time, uint slot)
+{
+    const uint base  = slot * 148u;
+    const uint count = uint(pad_constants[base + 2u]);
+    float      value = 0.0;
+    for (uint n = 0u; n < count; ++n) {
+        const uint  record = base + 4u + n * 6u;
+        const float wander = pad_constants[record + 4u] *
+                             sin(two_pi * (pad_constants[record + 2u] * pad_time + pad_constants[record + 3u]));
+        value += pad_constants[record + 5u] *
+                 sin(two_pi * (pad_constants[record] * phase + wander) + pad_constants[record + 1u]);
+    }
+    return value / pad_constants[base + 3u];
 }
 
 // Band-limited step residual (PolyBLEP).  t is the phase in [0, 1) and dt the phase
@@ -161,7 +172,15 @@ float poly_blamp(float t, float dt)
     return 0.0;
 }
 
-float oscillator(uint osc_type, float phase, float duty, float tilt, uint noise_index, uint note_seed, float pad_time, float phase_step)
+float oscillator(uint  osc_type,
+                 float phase,
+                 float duty,
+                 float tilt,
+                 uint  noise_index,
+                 uint  note_seed,
+                 float pad_time,
+                 float phase_step,
+                 uint  slot)
 {
     // Wave edges are band-limited, so the wave does not alias at high pitch.
     const float step_dt = min(phase_step, 0.5);
@@ -192,8 +211,8 @@ float oscillator(uint osc_type, float phase, float duty, float tilt, uint noise_
         // Two slope changes: at the wrap and at the duty point, equal and opposite.
         // The kink window cannot exceed half of the shorter segment, or the
         // large slope change would overshoot.
-        const float kink_dt = min(step_dt, 0.5 * min(duty, 1.0 - duty));
-        const float kink_half = 1.0 / (duty * (1.0 - duty));
+        const float kink_dt    = pad_constants[slot * 148u];
+        const float kink_half  = pad_constants[slot * 148u + 1u];
         const float correction = poly_blamp(phase, kink_dt) - poly_blamp(fract(phase - duty), kink_dt);
 
         return value - 1.0 + kink_half * kink_dt * correction;
@@ -206,7 +225,7 @@ float oscillator(uint osc_type, float phase, float duty, float tilt, uint noise_
         return value + poly_blep(phase, step_dt) - poly_blep(fract(phase - duty), step_dt);
     }
     else if (osc_type == pad_wave) {
-        return pad_oscillator(phase, duty, tilt, note_seed, pad_time, phase_step);
+        return pad_oscillator(phase, pad_time, slot);
     }
     else { // noise_wave
         const uint uvalue = pcg_hash(noise_index);
@@ -219,7 +238,7 @@ const uint   string_header_words = 14;
 const float  string_min_freq     = 22.0;
 const float  string_dispersion_strength = 0.05863;
 shared float string_block_out[256];
-shared float string_burst[2048];
+shared float string_params[7];
 shared uint  string_write_pos;
 shared float string_loop_length;
 
@@ -276,40 +295,81 @@ float string_ring_read(uint ring_offs, float loop_phase)
 // 5-6 seed tag, 7 dispersion section state, 8-9 chain token (two-word integer),
 // 10 strike drive counter, 11-13 unused.
 // Positive-Strike scratch shaping.  Keep the legacy zero path inline below.
+float string_reduce(uint count, bool energy)
+{
+    float      total = 0.0;
+    const uint lane  = gl_LocalInvocationID.x;
+    for (uint base = 0u; base < count; base += 256u) {
+        for (uint j = lane; j < 256u; j += work_group_size) {
+            float v = 0.0;
+            if (base + j < count) {
+                v = string_burst[base + j];
+            }
+            string_block_out[j] = energy ? v * v : v;
+        }
+        barrier();
+        for (uint stride = 128u; stride != 0u; stride >>= 1u) {
+            for (uint j = lane; j < stride; j += work_group_size) {
+                string_block_out[j] += string_block_out[j + stride];
+            }
+            barrier();
+        }
+        total += string_block_out[0];
+        barrier();
+    }
+    return total;
+}
+
+float string_noise_fill(uint count, uint seed)
+{
+    for (uint i = gl_LocalInvocationID.x; i < count; i += work_group_size) {
+        const float noise_value = float(pcg_hash(seed + i) & 0xFFFFu) / 32767.5 - 1.0;
+        string_burst[i]         = noise_value;
+    }
+    barrier();
+    return string_reduce(count, false);
+}
+
+float string_burst_sample(uint count, float age, float loop_length)
+{
+    const float position = fract(age / loop_length) * float(count);
+    const uint  first    = uint(floor(position));
+    const uint  next     = first + 1u == count ? 0u : first + 1u;
+    return string_burst[first] + (string_burst[next] - string_burst[first]) * (position - float(first));
+}
+
 void string_shape_excitation(uint delay_whole, float sum, float brightness)
 {
+    const uint  lane = gl_LocalInvocationID.x;
     const float mean = sum / float(delay_whole);
-    for (uint k = 0u; k < delay_whole; k++) {
+    for (uint k = lane; k < delay_whole; k += work_group_size) {
         string_burst[k] -= mean;
     }
+    barrier();
     if (brightness < 1.0) {
-        // Pluck brightness: a circular one-pole lowpass over the finished burst, skipped at 1 so
-        // the default excitation stays bit-identical.  A zero-state lap gives the tail, which
-        // fixes the exact wrap-around start state so the ring closes without a seam.  The
-        // result is re-centered and rescaled to the burst RMS, so brightness shapes tone only.
-        const float tone_coeff = 0.95 * (1.0 - clamp(brightness, 0.0, 1.0));
-        float       tone_state = 0.0;
-        float       energy_in  = 0.0;
-        for (uint k = 0u; k < delay_whole; k++) {
-            const float sample_in = string_burst[k];
-            tone_state            = (1.0 - tone_coeff) * sample_in + tone_coeff * tone_state;
-            energy_in += sample_in * sample_in;
+        const float energy_in = string_reduce(delay_whole, true);
+        if (lane == 0u) {
+            const float tone_coeff = 0.95 * (1.0 - clamp(brightness, 0.0, 1.0));
+            float       tone_state = 0.0;
+            for (uint k = 0u; k < delay_whole; k++) {
+                tone_state = (1.0 - tone_coeff) * string_burst[k] + tone_coeff * tone_state;
+            }
+            tone_state /= 1.0 - pow(tone_coeff, float(delay_whole));
+            for (uint k = 0u; k < delay_whole; k++) {
+                tone_state      = (1.0 - tone_coeff) * string_burst[k] + tone_coeff * tone_state;
+                string_burst[k] = tone_state;
+            }
         }
-        tone_state /= 1.0 - pow(tone_coeff, float(delay_whole));
-        float tone_sum    = 0.0;
-        float tone_energy = 0.0;
-        for (uint k = 0u; k < delay_whole; k++) {
-            tone_state          = (1.0 - tone_coeff) * string_burst[k] + tone_coeff * tone_state;
-            string_burst[k]     = tone_state;
-            tone_sum += tone_state;
-            tone_energy += tone_state * tone_state;
-        }
+        barrier();
+        const float tone_sum    = string_reduce(delay_whole, false);
+        const float tone_energy = string_reduce(delay_whole, true);
         const float tone_mean = tone_sum / float(delay_whole);
-        const float tone_var  = tone_energy - tone_sum * tone_mean;
+        const float tone_var    = tone_energy - tone_sum * tone_mean;
         const float tone_gain = tone_var > 0.0 ? sqrt(energy_in / tone_var) : 1.0;
-        for (uint k = 0u; k < delay_whole; k++) {
+        for (uint k = lane; k < delay_whole; k += work_group_size) {
             string_burst[k] = (string_burst[k] - tone_mean) * tone_gain;
         }
+        barrier();
     }
 }
 
@@ -342,40 +402,65 @@ void string_pass(uint  base,
         return;
     }
 
-    float loop_length                = sample_rate / f0;
-    loop_length                      = loop_length < 3.0 ? 3.0 : loop_length;
-    const float string_damping_coeff = 0.10 + 0.30 * damping;
-    const float lowpass_delay        = string_damping_coeff / (1.0 - string_damping_coeff);
-    const float decay_t60            = 20.0 * pow(0.25 / 20.0, damping);
-    const float omega                = 6.2831853 * f0 / sample_rate;
-    const float lowpass_mag      = (1.0 - string_damping_coeff) / sqrt(1.0 - 2.0 * string_damping_coeff * cos(omega) +
-            string_damping_coeff * string_damping_coeff);
-    const float loop_gain_raw    = pow(10.0, -3.0 * loop_length / (sample_rate * decay_t60)) / lowpass_mag;
-    const float string_loop_gain = loop_gain_raw < 0.9999 ? loop_gain_raw : 0.9999;
-
-    // Dispersion block-rate setup, gated off entirely at 0 (a zero-coefficient section still delays one sample).
-    // The cascade is a single allpass section (the section count is frozen at one).  It falls back to no section
-    // at all when it would leave less than 3 samples of loop delay.
-    // Dispersion is modulatable: a modulated value changes the timbre every block while the retune below
-    // (loop_length minus the section delay) holds the fundamental.
-    float disp_coeff  = 0.0;
-    float disp_delay  = 0.0;
-    bool  disp_active = false;
-    if (dispersion > 0.0) {
-        const float disp_q = string_dispersion_strength * dispersion / (omega * omega * omega);
-        const float disp_r = string_dispersion_ratio(disp_q);
-        const float section_coeff = (1.0 - disp_r) / (1.0 + disp_r);
-        const float section_delay = string_allpass_phase_delay(section_coeff, omega);
-        if (loop_length - lowpass_delay - section_delay >= 3.0) {
-            disp_coeff  = section_coeff;
-            disp_delay  = section_delay;
-            disp_active = true;
-        }
+    float loop_length, string_damping_coeff, string_loop_gain, disp_coeff, string_allpass_coeff;
+    bool  disp_active;
+    uint  delay_whole;
+    if (lane != 0u) {
+        // Other lanes join the scalar publication below.
     }
-    const float delay                = loop_length - lowpass_delay - disp_delay;
-    const uint  delay_whole      = uint(floor(delay - 1.0));
-    const float delay_frac       = delay - float(delay_whole);
-    const float string_allpass_coeff = (1.0 - delay_frac) / (1.0 + delay_frac);
+    else {
+        loop_length               = sample_rate / f0;
+        loop_length               = loop_length < 3.0 ? 3.0 : loop_length;
+        string_damping_coeff      = 0.10 + 0.30 * damping;
+        const float lowpass_delay = string_damping_coeff / (1.0 - string_damping_coeff);
+        const float decay_t60     = 20.0 * pow(0.25 / 20.0, damping);
+        const float omega         = 6.2831853 * f0 / sample_rate;
+        const float lowpass_mag   = (1.0 - string_damping_coeff) / sqrt(1.0 - 2.0 * string_damping_coeff * cos(omega) +
+                                                                        string_damping_coeff * string_damping_coeff);
+        const float loop_gain_raw = pow(10.0, -3.0 * loop_length / (sample_rate * decay_t60)) / lowpass_mag;
+        string_loop_gain          = loop_gain_raw < 0.9999 ? loop_gain_raw : 0.9999;
+
+        // Dispersion block-rate setup, gated off entirely at 0 (a zero-coefficient section still delays one sample).
+        // The cascade is a single allpass section (the section count is frozen at one).  It falls back to no section
+        // at all when it would leave less than 3 samples of loop delay.
+        // Dispersion is modulatable: a modulated value changes the timbre every block while the retune below
+        // (loop_length minus the section delay) holds the fundamental.
+        disp_coeff       = 0.0;
+        float disp_delay = 0.0;
+        disp_active      = false;
+        if (dispersion > 0.0) {
+            const float disp_q        = string_dispersion_strength * dispersion / (omega * omega * omega);
+            const float disp_r        = string_dispersion_ratio(disp_q);
+            const float section_coeff = (1.0 - disp_r) / (1.0 + disp_r);
+            const float section_delay = string_allpass_phase_delay(section_coeff, omega);
+            if (loop_length - lowpass_delay - section_delay >= 3.0) {
+                disp_coeff  = section_coeff;
+                disp_delay  = section_delay;
+                disp_active = true;
+            }
+        }
+        const float delay      = loop_length - lowpass_delay - disp_delay;
+        delay_whole            = uint(floor(delay - 1.0));
+        const float delay_frac = delay - float(delay_whole);
+        string_allpass_coeff   = (1.0 - delay_frac) / (1.0 + delay_frac);
+
+        string_params[0] = loop_length;
+        string_params[1] = string_damping_coeff;
+        string_params[2] = string_loop_gain;
+        string_params[3] = disp_coeff;
+        string_params[4] = disp_active ? 1.0 : 0.0;
+        string_params[5] = float(delay_whole);
+        string_params[6] = string_allpass_coeff;
+    }
+    barrier();
+    loop_length          = string_params[0];
+    string_damping_coeff = string_params[1];
+    string_loop_gain     = string_params[2];
+    disp_coeff           = string_params[3];
+    disp_active          = string_params[4] != 0.0;
+    delay_whole          = uint(string_params[5]);
+    string_allpass_coeff = string_params[6];
+    barrier();
 
     // Init runs on the first in-range pass of a note.  The seed tag (header words 5 and 6) records
     // which note seed the ring was filled for, so a note that starts below the pitch floor still
@@ -396,71 +481,42 @@ void string_pass(uint  base,
     float       string_release_gain;
     float       disp_state;
     if (init) {
-        if (strike > 0.0) {
-            if (lane == 0u) {
-                for (uint i = 0u; i < delay_whole; i++) {
-                    string_burst[i] = 0.0;
+        for (uint i = lane; i < delay_whole; i += work_group_size) {
+            string_burst[i] = 0.0;
+        }
+        barrier();
+        if (strike < 1.0) {
+            const float sum = string_noise_fill(delay_whole, strike > 0.0 ? 0u : note_seed);
+            string_shape_excitation(delay_whole, sum, brightness);
+            if (strike > 0.0) {
+                for (uint i = lane; i < delay_whole; i += work_group_size) {
+                    string_burst[i] *= 1.0 - strike;
                 }
-                if (strike < 1.0) {
-                    float sum = 0.0;
-                    for (uint i = 0u; i < delay_whole; i++) {
-                        const float noise_value = float(pcg_hash(i) & 0xFFFFu) / 32767.5 - 1.0;
-                        string_burst[i] = noise_value;
-                        sum += noise_value;
-                    }
-                    string_shape_excitation(delay_whole, sum, brightness);
-                    for (uint i = 0u; i < delay_whole; i++) {
-                        string_burst[i] *= 1.0 - strike;
-                    }
-                }
-                data[base + 10u] = 0.0;
+                barrier();
             }
         }
-        else {
-            // Note-on or retrigger: noise burst, then zero mean.  Lane 0 owns the whole excitation; the other
-            // lanes leave the init block and reach the barrier in main() after the pass.
-            if (lane == 0u) {
-                float sum = 0.0;
-                for (uint i = 0u; i < delay_whole; i++) {
-                    const float noise_value = float(pcg_hash(note_seed + i) & 0xFFFFu) / 32767.5 - 1.0;
-                    string_burst[i]         = noise_value;
-                    sum += noise_value;
-                }
-                const float mean = sum / float(delay_whole);
-                for (uint k = 0u; k < delay_whole; k++) {
-                    string_burst[k] -= mean;
-                }
+        if (lane == 0u && strike > 0.0) {
+            data[base + 10u] = 0.0;
+        }
+        const uint initial_pos = additive ? floatBitsToUint(data[base]) : delay_whole;
+        if (! additive && strike > 0.0) {
+            for (uint i = lane; i < string_ring_size; i += work_group_size) {
+                data[ring_offs + i] = 0.0;
             }
-            if (lane == 0u && brightness < 1.0) {
-                // Pluck brightness: a circular one-pole lowpass over the finished burst, skipped at 1 so
-                // the default excitation stays bit-identical.  A zero-state lap gives the tail, which
-                // fixes the exact wrap-around start state so the ring closes without a seam.  The
-                // result is re-centered and rescaled to the burst RMS, so brightness shapes tone only.
-                const float tone_coeff = 0.95 * (1.0 - clamp(brightness, 0.0, 1.0));
-                float       tone_state = 0.0;
-                float       energy_in  = 0.0;
-                for (uint k = 0u; k < delay_whole; k++) {
-                    const float sample_in = string_burst[k];
-                    tone_state            = (1.0 - tone_coeff) * sample_in + tone_coeff * tone_state;
-                    energy_in += sample_in * sample_in;
-                }
-                tone_state /= 1.0 - pow(tone_coeff, float(delay_whole));
-                float tone_sum    = 0.0;
-                float tone_energy = 0.0;
-                for (uint k = 0u; k < delay_whole; k++) {
-                    tone_state          = (1.0 - tone_coeff) * string_burst[k] + tone_coeff * tone_state;
-                    string_burst[k]     = tone_state;
-                    tone_sum += tone_state;
-                    tone_energy += tone_state * tone_state;
-                }
-                const float tone_mean = tone_sum / float(delay_whole);
-                const float tone_var  = tone_energy - tone_sum * tone_mean;
-                const float tone_gain = tone_var > 0.0 ? sqrt(energy_in / tone_var) : 1.0;
-                for (uint k = 0u; k < delay_whole; k++) {
-                    string_burst[k] = (string_burst[k] - tone_mean) * tone_gain;
-                }
+            memoryBarrierBuffer();
+            barrier();
+        }
+        for (uint i = lane; i < delay_whole; i += work_group_size) {
+            if (additive) {
+                data[ring_offs + (initial_pos + i + string_ring_size - delay_whole) % string_ring_size] +=
+                    string_burst[i];
+            }
+            else {
+                data[ring_offs + i] = string_burst[i];
             }
         }
+        memoryBarrierBuffer();
+        barrier();
         if (lane == 0u) {
             data[base + 5u] = string_seed_tag_lo;
             data[base + 6u] = string_seed_tag_hi;
@@ -473,20 +529,8 @@ void string_pass(uint  base,
                 string_prev_lowpass = data[base + 1u];
                 string_prev_allpass = data[base + 2u];
                 disp_state          = data[base + 7u];
-                for (uint i = 0u; i < delay_whole; i++) {
-                    data[ring_offs + (write_pos + i + (string_ring_size - delay_whole)) % string_ring_size] +=
-                        string_burst[i];
-                }
             }
             else {
-                if (strike > 0.0) {
-                    for (uint i = 0u; i < string_ring_size; i++) {
-                        data[ring_offs + i] = 0.0;
-                    }
-                }
-                for (uint i = 0u; i < delay_whole; i++) {
-                    data[ring_offs + i] = string_burst[i];
-                }
                 write_pos           = delay_whole;
                 string_prev_lowpass = 0.0;
                 string_prev_allpass = 0.0;
@@ -505,15 +549,12 @@ void string_pass(uint  base,
     }
 
     if (strike > 0.0) {
-        // cached_input is not live until the later FIR pass.  All lanes rendezvous
-        // before lane 0 borrows it; main publishes completion before FIR writes.
+        // Retain this rendezvous to leave the string-phase barrier structure unchanged.
+        // The shared region holds string_burst for the whole string phase.
+        memoryBarrierBuffer();
         memoryBarrierShared();
         barrier();
     }
-    if (lane != 0u) {
-        return;
-    }
-
     float drive_age = 0.0;
     float contact_samples = 0.0;
     if (strike > 0.0) {
@@ -521,65 +562,69 @@ void string_pass(uint  base,
         contact_samples = drive_ms * 0.001 * sample_rate;
         if (drive_age < contact_samples) {
             // Match the drive to the deterministic noise burst before applying Strike.
-            float noise_sum = 0.0;
-            for (uint i = 0u; i < delay_whole; i++) {
-                const float noise_value = float(pcg_hash(i) & 0xFFFFu) / 32767.5 - 1.0;
-                string_burst[i] = noise_value;
-                noise_sum += noise_value;
-            }
+            float noise_sum = string_noise_fill(delay_whole, 0u);
             string_shape_excitation(delay_whole, noise_sum, brightness);
-            float noise_energy = 0.0;
-            for (uint i = 0u; i < delay_whole; i++) {
-                noise_energy += string_burst[i] * string_burst[i];
-            }
+            const float noise_energy = string_reduce(delay_whole, true);
             const float target_rms = sqrt(noise_energy / float(delay_whole));
-            for (uint i = 0u; i < delay_whole; i++) {
+            for (uint i = lane; i < delay_whole; i += work_group_size) {
                 string_burst[i] = 0.0;
             }
+            barrier();
             const uint max_harmonic = min((delay_whole - 1u) / 2u, 2896u);
             for (uint n = 1u; n <= max_harmonic; n++) {
-                const float amplitude = n % 8u == 0u ? 0.0 : sin(3.141592653589793 * float(n) / 8.0) / pow(float(n), spectrum);
-                const float phase_offs = 6.283185307179586 * float(pcg_hash(n * 0x85ebca6bu)) / 4294967296.0;
-                const float angle_step = 6.283185307179586 * float(n) / float(delay_whole);
-                for (uint i = 0u; i < delay_whole; i++) {
+                const float amplitude =
+                    n % 8u == 0u ? 0.0 : sin((0.5 * two_pi) * float(n) / 8.0) / pow(float(n), spectrum);
+                const float phase_offs = two_pi * float(pcg_hash(n * 0x85ebca6bu)) / 4294967296.0;
+                const float angle_step = two_pi * float(n) / float(delay_whole);
+                for (uint i = lane; i < delay_whole; i += work_group_size) {
                     string_burst[i] += amplitude * cos(angle_step * float(i) + phase_offs);
                 }
             }
-            float sum = 0.0;
-            for (uint i = 0u; i < delay_whole; i++) {
-                sum += string_burst[i];
-            }
+            barrier();
+            const float sum = string_reduce(delay_whole, false);
             string_shape_excitation(delay_whole, sum, brightness);
             const uint window_samples = uint(ceil(contact_samples));
             const uint touched = min(window_samples, delay_whole);
             float drive_gain = 1.0;
-            if (touched <= num_taps - 1u + work_group_size) {
-                for (uint j = 0u; j < touched; j++) {
-                    cached_input[j] = 0.0;
+            if (touched <= num_taps - 1u + production_step_samples) {
+                float partial = 0.0;
+                for (uint j = lane; j < touched; j += work_group_size) {
+                    float folded = 0.0;
+                    for (uint k = j; k < window_samples; k += delay_whole) {
+                        const float age         = float(k);
+                        const float shaped_wave = string_burst_sample(delay_whole, age, loop_length);
+                        const float force       = 0.5 - 0.5 * cos(two_pi * age / contact_samples);
+                        folded += force * shaped_wave;
+                    }
+                    partial += folded * folded;
                 }
-                for (uint k = 0u; k < window_samples; k++) {
-                    const float age = float(k);
-                    const float position = fract(age / loop_length) * float(delay_whole);
-                    const uint first = uint(floor(position));
-                    const uint next = first + 1u == delay_whole ? 0u : first + 1u;
-                    const float shaped_wave = string_burst[first] + (string_burst[next] - string_burst[first]) * (position - float(first));
-                    const float force = 0.5 - 0.5 * cos(6.283185307179586 * age / contact_samples);
-                    cached_input[k % delay_whole] += force * shaped_wave;
+                string_block_out[lane] = partial;
+                for (uint i = work_group_size + lane; i < 256u; i += work_group_size) {
+                    string_block_out[i] = 0.0;
                 }
-                float drive_energy = 0.0;
-                for (uint j = 0u; j < touched; j++) {
-                    drive_energy += cached_input[j] * cached_input[j];
+                barrier(); // publication
+                for (uint stride = 128u; stride != 0u; stride >>= 1u) {
+                    for (uint s = lane; s < stride; s += work_group_size) {
+                        string_block_out[s] += string_block_out[s + stride];
+                    }
+                    barrier(); // one per stride
                 }
-                const float drive_rms = sqrt(drive_energy / float(delay_whole));
+                const float drive_energy = string_block_out[0];
+                barrier(); // completion
+                const float drive_rms         = sqrt(drive_energy / float(delay_whole));
                 const float drive_rms_epsilon = 0.000001;
-                drive_gain = drive_rms > drive_rms_epsilon ? target_rms / drive_rms : 1.0;
+                drive_gain                    = drive_rms > drive_rms_epsilon ? target_rms / drive_rms : 1.0;
             }
             // Measured 22 Hz, 0.5 ms boundary: the next larger float trips the flush guard.
             drive_gain = min(drive_gain, 16.5609913);
-            for (uint i = 0u; i < delay_whole; i++) {
+            for (uint i = lane; i < delay_whole; i += work_group_size) {
                 string_burst[i] *= drive_gain;
             }
         }
+    }
+    barrier();
+    if (lane != 0u) {
+        return;
     }
     const float release_gain_target  = pow(10.0, -release_damping * 3.0 * loop_length / (sample_rate * 0.05));
     const float release_smooth_coeff = 1.0 - exp(-1.0 / (sample_rate * 0.003));
@@ -606,11 +651,8 @@ void string_pass(uint  base,
         float loop_output = cascade_out * (string_loop_gain * string_release_gain);
         if (strike > 0.0) {
             if (drive_age < contact_samples) {
-                const float position = fract(drive_age / loop_length) * float(delay_whole);
-                const uint first = uint(floor(position));
-                const uint next = first + 1u == delay_whole ? 0u : first + 1u;
-                const float shaped_wave = string_burst[first] + (string_burst[next] - string_burst[first]) * (position - float(first));
-                const float force = strike * (0.5 - 0.5 * cos(6.283185307179586 * drive_age / contact_samples));
+                const float shaped_wave = string_burst_sample(delay_whole, drive_age, loop_length);
+                const float force       = strike * (0.5 - 0.5 * cos(two_pi * drive_age / contact_samples));
                 const float injection = force * shaped_wave;
                 string_block_out[i] += injection;
                 loop_output += injection;
@@ -686,45 +728,116 @@ void main()
         barrier();
     }
 
+    if (lane == 0u) {
+        const float slave_step = osc_mode == osc_mode_fm ? param.mod_phase_step
+                                 : (osc_mode == osc_mode_hard_sync || osc_mode == osc_mode_ring_mod)
+                                     ? param.mod_ratio * param.phase_step
+                                     : param.phase_step;
+        pad_constants[0]       = min(min(param.phase_step, 0.5), 0.5 * min(duty1, 1.0 - duty1));
+        pad_constants[1]       = 1.0 / (duty1 * (1.0 - duty1));
+        pad_constants[148]     = min(min(slave_step, 0.5), 0.5 * min(duty2, 1.0 - duty2));
+        pad_constants[149]     = 1.0 / (duty2 * (1.0 - duty2));
+        if (type1 == pad_wave) {
+            fill_pad_constants(0u, duty1, tilt1, note_seed, param.phase_step);
+        }
+        if (type2 == pad_wave) {
+            fill_pad_constants(1u, duty2, tilt2, note_seed ^ noise_salt, slave_step);
+        }
+    }
+    barrier();
+
+    const float master_value = is_string ? 0.0
+                                         : oscillator(type1,
+                                                      phase,
+                                                      duty1,
+                                                      tilt1,
+                                                      noise_index ^ noise_key,
+                                                      note_seed,
+                                                      pad_time,
+                                                      param.phase_step,
+                                                      0u);
     float value;
 
     if (type2 == no_wave) {
-        value = is_string ? string_block_out[lane] : oscillator(type1, phase, duty1, tilt1, noise_index ^ noise_key, note_seed, pad_time, param.phase_step);
+        value = is_string ? string_block_out[lane] : master_value;
     }
     else if (osc_mode == osc_mode_fm) {
         // Frequency modulation: type1 is the carrier, type2 the modulator.
         // The modulator runs at its own frequency with its own phase.
         const float mod_phase = param.mod_phase + param.mod_phase_step * gl_LocalInvocationID.x;
-        const float modulator = oscillator(type2, mod_phase, duty2, tilt2, noise_index ^ noise_key ^ noise_salt, note_seed ^ noise_salt, pad_time, param.mod_phase_step);
+        const float modulator = oscillator(type2,
+                                           mod_phase,
+                                           duty2,
+                                           tilt2,
+                                           noise_index ^ noise_key ^ noise_salt,
+                                           note_seed ^ noise_salt,
+                                           pad_time,
+                                           param.mod_phase_step,
+                                           1u);
 
-        value = is_string ? string_ring_read(param.string_state_offs + string_header_words, phase + param.fm_index * modulator) : oscillator(type1, phase + param.fm_index * modulator, duty1, tilt1, noise_index ^ noise_key, note_seed, pad_time, param.phase_step);
+        value = is_string ? string_ring_read(param.string_state_offs + string_header_words,
+                                             phase + param.fm_index * modulator)
+                          : oscillator(type1,
+                                       phase + param.fm_index * modulator,
+                                       duty1,
+                                       tilt1,
+                                       noise_index ^ noise_key,
+                                       note_seed,
+                                       pad_time,
+                                       param.phase_step,
+                                       0u);
     }
     else if (osc_mode == osc_mode_hard_sync) {
         // first oscillator is the master providing the note frequency
         // second oscillator is the slave whose phase resets each time the master phase wraps
         // mod_ratio is used as the sync ratio (slave cycles per master cycle).
-        value = oscillator(type2, fract(param.mod_ratio * fract(phase)), duty2, tilt2, noise_index ^ noise_key ^ noise_salt, note_seed ^ noise_salt, pad_time, param.mod_ratio * param.phase_step);
+        value = oscillator(type2,
+                           fract(param.mod_ratio * fract(phase)),
+                           duty2,
+                           tilt2,
+                           noise_index ^ noise_key ^ noise_salt,
+                           note_seed ^ noise_salt,
+                           pad_time,
+                           param.mod_ratio * param.phase_step,
+                           1u);
     }
     else if (osc_mode == osc_mode_ring_mod) {
         // type1 is the note-tied master
         // type2 is the carrier evaluated at mod_ratio times the master phase
         // osc_mix crossfades the dry master to the product.
-        const float carrier = oscillator(type2, fract(param.mod_ratio * fract(phase)), duty2, tilt2, noise_index ^ noise_salt, note_seed ^ noise_salt, pad_time, param.mod_ratio * param.phase_step);
+        const float carrier = oscillator(type2,
+                                         fract(param.mod_ratio * fract(phase)),
+                                         duty2,
+                                         tilt2,
+                                         noise_index ^ noise_salt,
+                                         note_seed ^ noise_salt,
+                                         pad_time,
+                                         param.mod_ratio * param.phase_step,
+                                         1u);
 
-        value = is_string ? string_block_out[lane] : oscillator(type1, phase, duty1, tilt1, noise_index ^ noise_key, note_seed, pad_time, param.phase_step);
+        value = is_string ? string_block_out[lane] : master_value;
         value = mix(value, value * carrier, param.osc_mix);
     }
     else {
         // Blend mode: mix the two oscillators by osc_mix.
-        value = is_string ? string_block_out[lane] : oscillator(type1, phase, duty1, tilt1, noise_index ^ noise_key, note_seed, pad_time, param.phase_step);
+        value = is_string ? string_block_out[lane] : master_value;
 
-        if (type2 != no_wave) {
-            value = mix(value, oscillator(type2, phase, duty2, tilt2, noise_index ^ noise_key ^ noise_salt, note_seed ^ noise_salt, pad_time, param.phase_step), param.osc_mix);
-        }
+        value = mix(value,
+                    oscillator(type2,
+                               phase,
+                               duty2,
+                               tilt2,
+                               noise_index ^ noise_key ^ noise_salt,
+                               note_seed ^ noise_salt,
+                               pad_time,
+                               param.phase_step,
+                               1u),
+                    param.osc_mix);
     }
 
     // Apply FIR filter (optional)
     if (param.taps_offs != 0) {
+        barrier();
 
         // Read previously saved inputs
         for (uint tap = gl_LocalInvocationID.x; tap < num_taps - 1; tap += work_group_size) {
@@ -742,10 +855,24 @@ void main()
             data[param.fir_memory_offs + tap] = cached_input[work_group_size + tap];
         }
 
-        // Apply FIR filter convolution
-        value *= data[param.taps_offs];
-
-        for (uint tap = 1; tap < num_taps; tap++) {
+        // Preserve ascending accumulation with scalar head and tail.
+        uint       tap = param.fir_window & 2047u;
+        const uint hi  = min((param.fir_window >> 11u) & 2047u, num_taps);
+        value          = tap == 0u && hi != 0u ? value * data[param.taps_offs] : 0.0;
+        if (tap == 0u && hi != 0u) {
+            ++tap;
+        }
+        for (; tap < hi && ((param.taps_offs + tap) & 3u) != 0u; ++tap) {
+            value += data[param.taps_offs + tap] * cached_input[base_pos - tap];
+        }
+        for (; tap + 3u < hi; tap += 4u) {
+            const vec4 coeff = coefficients[(param.taps_offs + tap) >> 2u];
+            value += coeff.x * cached_input[base_pos - tap];
+            value += coeff.y * cached_input[base_pos - tap - 1u];
+            value += coeff.z * cached_input[base_pos - tap - 2u];
+            value += coeff.w * cached_input[base_pos - tap - 3u];
+        }
+        for (; tap < hi; ++tap) {
             value += data[param.taps_offs + tap] * cached_input[base_pos - tap];
         }
     }

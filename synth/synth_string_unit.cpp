@@ -4047,6 +4047,31 @@ static float string_strike_sample(const float* table, uint32_t n, float age, flo
     return table[first] + (table[next] - table[first]) * fraction;
 }
 
+// Fixed lane ownership and one float tree model the new drive summation order.
+// Repeatability is required.  Equality with the previous order is not.
+static float string_drive_energy_tree(const float* folded, uint32_t touched, uint32_t lanes)
+{
+    static float slots[256];
+    for (uint32_t lane = 0; lane < lanes; ++lane) {
+        float partial = 0.0f;
+        for (uint32_t j = lane; j < touched; j += lanes) {
+            partial += folded[j] * folded[j];
+        }
+        slots[lane] = partial;
+        for (uint32_t i = lanes + lane; i < 256u; i += lanes) {
+            slots[i] = 0.0f;
+        }
+    }
+    for (uint32_t stride = 128u; stride != 0u; stride >>= 1u) {
+        for (uint32_t lane = 0; lane < lanes; ++lane) {
+            for (uint32_t s = lane; s < stride; s += lanes) {
+                slots[s] += slots[s + stride];
+            }
+        }
+    }
+    return slots[0];
+}
+
 static float string_strike_gain(const float* table, uint32_t n, float loop_length, float samples, float brightness)
 {
     static float noise[string_ring_size];
@@ -4070,10 +4095,7 @@ static float string_strike_gain(const float* table, uint32_t n, float loop_lengt
         const float age = static_cast<float>(k);
         accumulated[k % n] += string_strike_force(age, samples) * string_strike_sample(table, n, age, loop_length);
     }
-    float drive_energy = 0.0f;
-    for (uint32_t j = 0; j < touched; ++j) {
-        drive_energy += accumulated[j] * accumulated[j];
-    }
+    const float     drive_energy      = string_drive_energy_tree(accumulated, touched, 256u);
     const float     target_rms        = sqrtf(noise_energy / static_cast<float>(n));
     const float     drive_rms         = sqrtf(drive_energy / static_cast<float>(n));
     constexpr float drive_rms_epsilon = 0.000001f;
@@ -5163,8 +5185,95 @@ static void check_string_strike_caps()
     check_string_strike_codecs_and_layout();
 }
 
+static void check_string_drive_reduction()
+{
+    static float     table[string_ring_size], noise[string_ring_size], folded[1280];
+    constexpr float  clamp           = 16.5609913f;
+    constexpr double tolerance       = 0.00001;
+    constexpr double clamp_double    = static_cast<double>(clamp);
+    uint32_t         clearly_clamped = 0;
+    uint32_t         near_threshold  = 0;
+    for (float pitch : { 22.0f, 30.0f, 110.0f, 441.0f }) {
+        const float    loop_length = string_fs / pitch;
+        const uint32_t n           = string_mirror_scalars(pitch, 0.0f, 0.0f).n;
+        for (float brightness : { 0.25f, 1.0f }) {
+            string_strike_table(table, n, 2.0f);
+            string_strike_shape(table, n, brightness);
+            for (uint32_t i = 0; i < n; ++i) {
+                noise[i] = static_cast<float>(string_pcg_hash(i) & 0xFFFFu) / 32767.5f - 1.0f;
+            }
+            string_strike_shape(noise, n, brightness);
+            double noise_energy = 0.0;
+            for (uint32_t i = 0; i < n; ++i) {
+                noise_energy += static_cast<double>(noise[i]) * static_cast<double>(noise[i]);
+            }
+            const float target_rms = static_cast<float>(sqrt(noise_energy / n));
+            // Includes 3 ms, 10 ms and the 22 Hz, 0.5 ms flush boundary.
+            for (float samples : { 22.05f, 132.3f, 441.0f, 1280.0f }) {
+                const uint32_t window_samples = static_cast<uint32_t>(ceilf(samples));
+                for (uint32_t touched : { 1u, 63u, 256u, 257u, 1000u, 1280u }) {
+                    double serial_energy = 0.0;
+                    for (uint32_t j = 0; j < touched; ++j) {
+                        folded[j] = 0.0f;
+                        // Stress counts beyond the physical period are zero padding.
+                        if (j < n) {
+                            for (uint32_t k = j; k < window_samples; k += n) {
+                                const float age = static_cast<float>(k);
+                                folded[j] += string_strike_force(age, samples) *
+                                             string_strike_sample(table, n, age, loop_length);
+                            }
+                        }
+                        serial_energy += static_cast<double>(folded[j]) * static_cast<double>(folded[j]);
+                    }
+                    for (uint32_t lanes : { 256u, 64u }) {
+                        const float energy   = string_drive_energy_tree(folded, touched, lanes);
+                        const float repeated = string_drive_energy_tree(folded, touched, lanes);
+                        TEST(memcmp(&energy, &repeated, sizeof(energy)) == 0);
+                        TEST(fabs(static_cast<double>(energy) - serial_energy) <= tolerance * serial_energy);
+                        const float  tree_rms   = sqrtf(energy / static_cast<float>(n));
+                        const double serial_rms = sqrt(serial_energy / n);
+                        // Natural loudness plus below, near and clearly above clamp cases.
+                        for (float target : { target_rms,
+                                              static_cast<float>(serial_rms * clamp_double * 0.5),
+                                              static_cast<float>(serial_rms * clamp_double * (1.0 - 0.000005)),
+                                              static_cast<float>(serial_rms * clamp_double * (1.0 + 0.000005)),
+                                              static_cast<float>(serial_rms * clamp_double * 2.0) }) {
+                            const float tree_gain   = tree_rms > 0.000001f ? target / tree_rms : 1.0f;
+                            const float serial_gain = serial_rms > 0.000001
+                                                          ? static_cast<float>(static_cast<double>(target) / serial_rms)
+                                                          : 1.0f;
+                            const float tree_clamped   = fminf(tree_gain, clamp);
+                            const float serial_clamped = fminf(serial_gain, clamp);
+                            TEST(fabs(static_cast<double>(tree_clamped) - static_cast<double>(serial_clamped)) <=
+                                 tolerance * static_cast<double>(serial_clamped));
+                            if (static_cast<double>(tree_gain) > clamp_double * (1.0 + tolerance) &&
+                                static_cast<double>(serial_gain) > clamp_double * (1.0 + tolerance)) {
+                                TEST(tree_clamped == clamp);
+                                TEST(serial_clamped == clamp);
+                                ++clearly_clamped;
+                            }
+                            if (fabs(static_cast<double>(serial_gain) - clamp_double) <= tolerance * clamp_double) {
+                                ++near_threshold;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    TEST(clearly_clamped > 0);
+    TEST(near_threshold > 0);
+#ifdef SYNTH_STRING_DRIVE_INTENTIONAL_FAILURE
+    // Harness negative control only.  Never enable this in the makefiles.
+    // The energy of one folded value of 2 is 4, not 2.
+    const float negative_control[] = { 2.0f };
+    TEST(string_drive_energy_tree(negative_control, 1u, 256u) == 2.0f);
+#endif
+}
+
 static void string_strike_regressions()
 {
+    check_string_drive_reduction();
     check_string_strike_load_publish();
     check_string_strike_zero_brightness_edit();
     check_string_strike_mirror();
@@ -5176,8 +5285,70 @@ static void string_strike_regressions()
     check_string_strike_projection();
 }
 
+// Read the source contract separately from the arithmetic mirror.  No GPU is used.
+
+static void m1_string_regressions()
+{
+    static float serial[string_ring_size], strided[string_ring_size];
+    for (float f0 : { 22.0f, 110.0f, 220.0f, 4410.0f }) {
+        const uint32_t n = string_mirror_scalars(f0, 0.5f, 0.0f).n;
+        for (uint32_t seed : { 0u, 71u, 0xffffffffu }) {
+            for (uint32_t workers : { 1u, 2u, 16u, 64u, 256u }) {
+                for (uint32_t i = 0; i < n; ++i) {
+                    serial[i] = static_cast<float>(string_pcg_hash(seed + i) & 0xffffu) / 32767.5f - 1.0f;
+                }
+                for (uint32_t lane = 0; lane < workers; ++lane) {
+                    for (uint32_t i = lane; i < n; i += workers) {
+                        strided[i] = static_cast<float>(string_pcg_hash(seed + i) & 0xffffu) / 32767.5f - 1.0f;
+                    }
+                }
+                TEST(memcmp(serial, strided, n * sizeof(float)) == 0);
+            }
+            for (float brightness : { 0.0f, 0.25f, 1.0f }) {
+                for (uint32_t i = 0; i < n; ++i) {
+                    serial[i] = static_cast<float>(string_pcg_hash(seed + i) & 0xffffu) / 32767.5f - 1.0f;
+                }
+                string_strike_shape(serial, n, brightness);
+                TEST(string_mirror_burst(strided, f0, 0.5f, seed, brightness) == n);
+                TEST(memcmp(serial, strided, n * sizeof(float)) == 0);
+            }
+        }
+    }
+    // Tonal n-outer/i-inner fill preserves the ascending harmonic order per sample.
+    for (uint32_t n : { 11u, 31u, 199u }) {
+        string_strike_table(serial, n, 2.5f);
+        memset(strided, 0, n * sizeof(float));
+        for (uint32_t h = 1; h <= (n - 1u) / 2u; ++h) {
+            const float amp   = string_strike_amplitude(h, 2.5f);
+            const float phase = vmath::two_pi * static_cast<float>(string_pcg_hash(h * 0x85ebca6bu)) / 4294967296.0f;
+            const float step  = vmath::two_pi * static_cast<float>(h) / static_cast<float>(n);
+            for (uint32_t lane = 0; lane < 256; ++lane) {
+                for (uint32_t i = lane; i < n; i += 256) {
+                    strided[i] += amp * cosf(step * static_cast<float>(i) + phase);
+                }
+            }
+        }
+        TEST(memcmp(serial, strided, n * sizeof(float)) == 0);
+        for (uint32_t k = 0; k < 1000; ++k) {
+            const float    age    = static_cast<float>(k) * 0.5f;
+            const float    loop   = static_cast<float>(n) + 0.75f;
+            const float    phase  = age / loop;
+            const float    pos    = (phase - floorf(phase)) * static_cast<float>(n);
+            const uint32_t first  = static_cast<uint32_t>(floorf(pos));
+            const uint32_t next   = first + 1 == n ? 0 : first + 1;
+            const float    old    = serial[first] + (serial[next] - serial[first]) * (pos - static_cast<float>(first));
+            const float    helper = string_strike_sample(serial, n, age, loop);
+            TEST(memcmp(&old, &helper, sizeof(old)) == 0);
+        }
+    }
+    // Existing fixture assertions pin tonal injection and the serial recurrence.
+    check_string_mirror_recurrence();
+    check_string_strike_mirror();
+}
+
 int main()
 {
+    m1_string_regressions();
     test_silence_stdout();
     string_strike_regressions();
     check_string_strike_caps();

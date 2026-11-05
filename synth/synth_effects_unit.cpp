@@ -7880,8 +7880,121 @@ static void portability_effects_pool_ids()
         TEST(! Synth::decode_effects_json(value, static_cast<uint32_t>(strlen(value)), &decoded));
 }
 
+// Read the source contract separately from the arithmetic mirror.  No GPU is used.
+
+// Current call-site mirrors.  IMPLEMENT must change both to bit-31 decoding.
+static bool m1_fir_bypass(uint32_t packed, bool multiband)
+{
+    (void)multiband;
+    // Revised contract for both sites.  Whole-word truthiness is not a bypass decode.
+    return (packed & 0x80000000u) != 0u;
+}
+
+static void m1_bypass_regressions()
+{
+    for (bool multiband : { false, true }) {
+        for (uint32_t bounds : { 0u, 7u, 7u | (18u << 11u), 1025u << 11u }) {
+            TEST(! m1_fir_bypass(bounds, multiband));
+            TEST(m1_fir_bypass(bounds | 0x80000000u, multiband));
+        }
+    }
+}
+
+// Full persistent state mirror.  Separate comb ownership cannot reorder a
+// channel's ascending c fold if bit equivalence with the two-lane path is needed.
+struct M1Reverb {
+    float    data[60000];
+    uint32_t counter;
+};
+
+static void m1_reverb(M1Reverb& state, float* left, float* right, uint32_t rate, bool lanes)
+{
+    const uint32_t comb_base[8] = { 1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617 };
+    const uint32_t ap_base[4]   = { 556, 441, 341, 225 };
+    uint32_t       len[8], off[8], alen[4], aoff[4];
+    uint32_t       sum = 0, asum = 0;
+    for (uint32_t c = 0; c < 8; ++c) {
+        len[c] = comb_base[c] * rate / 44100u;
+        off[c] = sum;
+        sum += len[c];
+    }
+    for (uint32_t a = 0; a < 4; ++a) {
+        alen[a] = ap_base[a] * rate / 44100u;
+        aoff[a] = asum;
+        asum += alen[a];
+    }
+    const uint32_t stride   = sum + 8 + asum;
+    const float    feedback = 0.75f * 0.28f + 0.7f;
+    const float    damp1    = 0.4f * 0.4f;
+    const float    damp2    = 1.0f - damp1;
+    for (uint32_t i = 0; i < 256; ++i) {
+        float scratch[16];
+        // Serial side-major versus lanes 0-7 left, 8-15 right.
+        for (uint32_t worker = 0; worker < (lanes ? 16u : 2u); ++worker) {
+            const uint32_t side  = lanes ? worker / 8 : worker;
+            const uint32_t first = lanes ? worker % 8 : 0;
+            const uint32_t end   = lanes ? first + 1 : 8;
+            const uint32_t base  = side * stride;
+            const float    dry   = side == 0 ? left[i] : right[i];
+            for (uint32_t c = first; c < end; ++c) {
+                const uint32_t p      = base + off[c] + (state.counter + i) % len[c];
+                const float    y      = state.data[p];
+                float&         fs     = state.data[base + sum + c];
+                fs                    = y * damp2 + fs * damp1;
+                state.data[p]         = dry * 0.015f + fs * feedback;
+                scratch[side * 8 + c] = y;
+            }
+        }
+        for (uint32_t side = 0; side < 2; ++side) {
+            float x = 0.0f;
+            for (uint32_t c = 0; c < 8; ++c) {
+                x += scratch[side * 8 + c];
+            }
+            for (uint32_t a = 0; a < 4; ++a) {
+                const uint32_t p   = side * stride + sum + 8 + aoff[a] + (state.counter + i) % alen[a];
+                const float    out = state.data[p];
+                state.data[p]      = x + out * 0.5f;
+                x                  = out - x;
+            }
+            float& dry = side == 0 ? left[i] : right[i];
+            dry        = dry * (1.0f - 0.6f) + x * 0.6f;
+        }
+    }
+    state.counter += 256;
+}
+
+static void m1_reverb_regressions()
+{
+    static M1Reverb serial, lanes;
+    for (uint32_t rate : { 22050u, 44100u, 48000u, 96000u }) {
+        memset(&serial, 0, sizeof(serial));
+        for (uint32_t j = 0; j < 60000; ++j) {
+            serial.data[j] = static_cast<float>(j % 17) * 0.001f;
+        }
+        serial.counter = 0xfffffff0u;
+        lanes          = serial;
+        for (uint32_t block = 0; block < 8; ++block) {
+            float a[256], b[256], c[256], d[256];
+            for (uint32_t j = 0; j < 256; ++j) {
+                a[j] = c[j] = j == block ? 1.0f : -0.0003f * static_cast<float>(j);
+                b[j] = d[j] = j == 255 - block ? -1.0f : 0.0002f * static_cast<float>(j);
+            }
+            m1_reverb(serial, a, b, rate, false);
+            m1_reverb(lanes, c, d, rate, true);
+            TEST(memcmp(a, c, sizeof(a)) == 0 && memcmp(b, d, sizeof(b)) == 0);
+            TEST(memcmp(&serial, &lanes, sizeof(serial)) == 0);
+        }
+    }
+}
+
+static void m1_effect_regressions()
+{
+    m1_bypass_regressions();
+    m1_reverb_regressions();
+}
 int main()
 {
+    m1_effect_regressions();
     test_silence_stdout();
     portability_effects_named_parameters();
     portability_effects_pool_ids();

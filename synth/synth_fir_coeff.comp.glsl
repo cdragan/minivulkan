@@ -203,7 +203,11 @@ void main()
                     norm_sum[0] = denominator;
                 }
             } else if (subgroupElect()) {
-                norm_sum[0] = coeff_sum;
+                float denominator = coeff_sum;
+                if (denominator == 0.0 || isnan(denominator) || isinf(denominator)) {
+                    denominator = 1.0;
+                }
+                norm_sum[0] = denominator;
             }
         }
 

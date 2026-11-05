@@ -727,6 +727,33 @@ uint32_t Synth::fir_effective_span(const float slope_percent)
     return odd < num_fir_taps ? odd : num_fir_taps;
 }
 
+uint32_t Synth::fir_window_for_taps(const void* entries, uint32_t count, uint32_t taps_offs)
+{
+    const uint32_t* words = static_cast<const uint32_t*>(entries);
+    for (uint32_t entry = 0; entry < count; ++entry) {
+        const uint32_t* current = words + entry * fir_coeff_entry_words;
+        if (current[0] == taps_offs) {
+            return fir_window_from_entry(current);
+        }
+    }
+    return num_fir_taps << 11u;
+}
+
+uint32_t Synth::fir_window_from_entry(const uint32_t* entry)
+{
+    const uint32_t count = (entry[1] & 0xffu) < 4u ? entry[1] & 0xffu : 4u;
+    uint32_t       span  = 0;
+    for (uint32_t band = 0; band < count; ++band) {
+        const uint32_t current = entry[4u + 4u * band];
+        if (current >= 11u && current > span) {
+            span = current;
+        }
+    }
+    // All intervals are nested under either centre policy.  Gains do not affect support.
+    const uint32_t hi = ! span || span > num_fir_taps ? num_fir_taps : span;
+    return hi << 11u;
+}
+
 Synth::FirCoeffCacheAction Synth::fir_coeff_cache_action(const void*    prev_entries,
                                                          const uint32_t prev_entry_count,
                                                          const void*    cur_entries,

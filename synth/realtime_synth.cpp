@@ -400,6 +400,7 @@ struct ShaderParams {
         float    string_strike;       // Strike blend 0..1, captured at note-on
         float    string_drive;        // Strike force window in milliseconds, captured at note-on
         float    string_spectrum;     // Harmonic rolloff exponent, captured at note-on
+        uint32_t fir_window;
     };
 
     // synth_chan_combine shader (binding 0); the master-mix pass reuses the
@@ -435,8 +436,8 @@ struct ShaderParams {
         uint32_t in_sound_offs;
     };
 
-    static_assert(sizeof(Oscillator) == 104);
-
+    static_assert(sizeof(EffectParams) == 36);
+    static_assert(sizeof(Oscillator) == 108);
     static constexpr uint32_t max_param_range = sizeof(Oscillator) * 256;
 };
 
@@ -762,6 +763,7 @@ static_assert(sizeof(Synth::FirEffectCoeffEntry) == sizeof(ShaderParams::FIRCoef
 static_assert(max_fir_coeff_entries * sizeof(ShaderParams::FIRCoeff) <= ShaderParams::max_param_range);
 static ShaderParams::FIRCoeff fir_coeff_stage[max_fir_coeff_entries];
 static ShaderParams::FIRCoeff fir_coeff_prev[max_fir_coeff_entries];
+static uint32_t               fir_coeff_stage_count = 0;
 static uint32_t               fir_coeff_prev_count = 0; // 0 = no valid snapshot
 static bool                   fir_taps_cleared     = false;
 
@@ -2005,10 +2007,6 @@ struct EffectTarget {
 // Runs the targets as dependency-depth waves: wave d = the d-th enabled effect of
 // every target, packed into one dispatch; a barrier precedes each wave.  Chains are
 // sequential per buffer, but the buffers are distinct, so one wave has no conflicts.
-// Defined below apply_effects; the dispatch needs a FIR effect's staging
-// result to drive the shader's bypass flag.
-static bool stage_effect_fir_entry(const EffectInstance& instance, Synth::FirEffectCoeffEntry* entry);
-
 static void apply_effects(const EffectTarget* targets, uint32_t num_targets)
 {
     for (uint32_t depth = 0;; depth++) {
@@ -2040,7 +2038,6 @@ static void apply_effects(const EffectTarget* targets, uint32_t num_targets)
         const uint32_t param_offs = static_cast<uint32_t>(param_allocator.allocate(param_size, synth_alignment).offset);
 
         for (uint32_t wave_idx = 0; wave_idx < wave_count; wave_idx++) {
-
             const uint32_t cur_param_offs =
                 param_offs + wave_idx * static_cast<uint32_t>(sizeof(ShaderParams::EffectParams));
             ShaderParams::EffectParams& param = get_param<ShaderParams::EffectParams>(cur_param_offs);
@@ -2049,14 +2046,15 @@ static void apply_effects(const EffectTarget* targets, uint32_t num_targets)
             param.sound_offs = wave_sound_offs[wave_idx];
             param.state_offs = wave_instances[wave_idx]->state_offs / 4;
             param.bypass     = 0;
-            // A multiband FIR whose coefficient entry failed to stage (all
-            // bands inactive) dispatches as pass-through instead of
-            // convolving with a stale kernel; the shader keeps the history
-            // advancing.  The plain FIR never reads the flag.
-            Synth::FirEffectCoeffEntry fir_entry;
-            if (wave_instances[wave_idx]->type == Synth::EffectType::fir_multiband &&
-                ! stage_effect_fir_entry(*wave_instances[wave_idx], &fir_entry)) {
-                param.bypass = 1;
+            if (is_fir_effect_type(wave_instances[wave_idx]->type)) {
+                param.bypass = 0x80000000u;
+                for (uint32_t entry = 0; entry < fir_coeff_stage_count; ++entry) {
+                    if (fir_coeff_stage[entry].taps_offs == param.state_offs) {
+                        param.bypass =
+                            Synth::fir_window_from_entry(reinterpret_cast<const uint32_t*>(&fir_coeff_stage[entry]));
+                        break;
+                    }
+                }
             }
             memcpy(param.params, wave_instances[wave_idx]->params, sizeof(param.params));
         }
@@ -2433,6 +2431,7 @@ static uint32_t count_effect_fir(const EffectChain& chain)
 
 static void compute_fir_coefficients()
 {
+    fir_coeff_stage_count       = 0;
     uint32_t num_active_filters = 0;
     for (uint32_t osc_idx = 1; osc_idx < Synth::max_oscillators; osc_idx++) {
         if (oscillators[osc_idx].osc_type[0] != WaveType::no_wave && oscillators[osc_idx].fir_taps_offs) {
@@ -2576,6 +2575,7 @@ static void compute_fir_coefficients()
     }
     stage_effect_fir_coeffs(master_chain, &staged);
     assert(staged == num_active_filters);
+    fir_coeff_stage_count = staged;
 
     // Skip the dispatch when the previous computation already produced these coefficients and the
     // taps are intact; dispatch otherwise.
@@ -2785,6 +2785,7 @@ static void render_audio_step()
         // passes through (taps offset 0), an all-zero-gain bandpass keeps
         // reading its staged zeroed kernel (silence).
         param.taps_offs         = oscillator.fir_active ? oscillator.fir_taps_offs / 4 : 0;
+        param.fir_window        = Synth::fir_window_for_taps(fir_coeff_stage, fir_coeff_stage_count, param.taps_offs);
         param.noise_counter     = oscillator.noise_counter;
         param.note_seed         = oscillator.note_seed;
         param.pad_tilt[0]       = oscillator.pad_tilt[0];
@@ -2800,7 +2801,6 @@ static void render_audio_step()
         param.string_strike          = oscillator.string_strike;
         param.string_drive           = oscillator.string_drive;
         param.string_spectrum        = oscillator.string_spectrum;
-
         // Wrap the phases so float precision does not degrade on long notes.
         oscillator.phase += phase_step;
         oscillator.phase -= mstd::floorf(oscillator.phase);

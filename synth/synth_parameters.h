@@ -301,6 +301,14 @@ enum FirCoeffCacheAction {
 // uint32_t members and one float per band, no padding inside, so a byte
 // compare over the entry covers every member).
 constexpr uint32_t fir_coeff_entry_words = 18;
+constexpr uint32_t production_step_samples = 256u;
+static_assert(production_step_samples == rt_step_samples);
+static_assert(num_fir_taps <= 2047u);
+uint32_t fir_window_for_taps(const void* entries, uint32_t count, uint32_t taps_offs);
+static_assert(num_fir_taps > 1u && ((num_fir_taps - 1u) & (num_fir_taps - 2u)) == 0u);
+
+// Pack the enclosing tap interval from one unchanged coefficient entry.
+uint32_t fir_window_from_entry(const uint32_t* entry);
 
 // Decide what to do with the FIR coefficient cache this step.  prev_entries and cur_entries point
 // at fir_coeff_entry_words-word entries (the FIRCoeff param records, compared bytewise);

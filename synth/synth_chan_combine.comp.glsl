@@ -37,31 +37,34 @@ void main()
     float left_value  = 0;
     float right_value = 0;
 
-    for (uint i = 0; i < param.num_inputs; i++) {
+    const float step         = float(gl_LocalInvocationID.x) / float(work_group_size - 1u);
+    const float linear_fade  = gl_LocalInvocationID.x < volume_adjustment_samples
+                                   ? float(gl_LocalInvocationID.x + 1) / float(volume_adjustment_samples)
+                                   : 1.0;
+    const float quintic_fade = step * step * step * (step * (step * 6.0 - 15.0) + 10.0);
+    const uint  num_inputs   = param.num_inputs;
+    for (uint i = 0; i < num_inputs; i++) {
         const InputParams input_param = input_params[param.input_params_offs + i];
 
         // Read input sound data
         float value = data[input_param.in_sound_offs + gl_LocalInvocationID.x];
 
         // Calculate multipliers with smooth adjustment
-        const float step = float(gl_LocalInvocationID.x) / float(work_group_size - 1u);
 
         float fade;
         if (input_param.old_volume == 0.0 && input_param.volume != 0.0) {
-            fade = gl_LocalInvocationID.x < volume_adjustment_samples
-                ? float(gl_LocalInvocationID.x + 1) / float(volume_adjustment_samples)
-                : 1.0;
+            fade = linear_fade;
         }
         else {
             // Zero target: ease the volume ramp down to 0 to avoid audible
             // clicks; the other arm keeps the full-step interpolation.
-            fade = input_param.volume == 0.0
-                ? step * step * step * (step * (step * 6.0 - 15.0) + 10.0)
-                : step;
+            fade = input_param.volume == 0.0 ? quintic_fade : step;
         }
 
         const float multiplier = mix(input_param.old_volume,  input_param.volume,  fade);
-        const float panning    = mix(input_param.old_panning, input_param.panning, step);
+        const float panning    = input_param.old_panning == input_param.panning
+                                     ? input_param.panning
+                                     : mix(input_param.old_panning, input_param.panning, step);
 
         // Apply volume
         value *= multiplier;

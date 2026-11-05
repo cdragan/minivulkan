@@ -3537,8 +3537,72 @@ static void check_runtime_inline_0()
     }
 }
 
+// Read the source contract separately from the arithmetic mirror.  No GPU is used.
+
+// Fixed 256-leaf tiles keep the addition tree independent of worker count.
+static constexpr uint32_t m1_production_step_samples = 256;
+static_assert(m1_production_step_samples == 256);
+static_assert(Synth::num_fir_taps - 1 + m1_production_step_samples == 1280);
+
+static float m1_tiled_sum(const float* values, uint32_t count, uint32_t workers)
+{
+    float total = 0.0f;
+    float tile[256];
+    for (uint32_t base = 0; base < count; base += 256) {
+        for (uint32_t lane = 0; lane < workers; ++lane) {
+            for (uint32_t j = lane; j < 256; j += workers) {
+                tile[j] = base + j < count ? values[base + j] : 0.0f;
+            }
+        }
+        for (uint32_t stride = 128; stride; stride /= 2) {
+            for (uint32_t lane = 0; lane < workers; ++lane) {
+                for (uint32_t j = lane; j < stride; j += workers) {
+                    tile[j] += tile[j + stride];
+                }
+            }
+        }
+        total += tile[0];
+    }
+    return total;
+}
+
+// These checks complement mirrors.  They do not claim SPIR-V execution coverage.
+
+static void m1_reduction_regressions()
+{
+    float values[2048];
+    for (uint32_t j = 0; j < 2048; ++j) {
+        values[j] = (j % 3 == 0 ? 100000.0f : (j % 3 == 1 ? -100000.0f : 0.125f));
+    }
+    for (uint32_t count : { 1u, 11u, 255u, 256u, 257u, 1280u, 2034u, 2048u }) {
+        const float expected = m1_tiled_sum(values, count, 256);
+        for (uint32_t workers = 1; workers <= 256; workers *= 2) {
+            const float actual = m1_tiled_sum(values, count, workers);
+            TEST(memcmp(&actual, &expected, sizeof(actual)) == 0);
+        }
+    }
+    // Each folded j sees k in ascending order, exactly as the old serial k loop.
+    for (uint32_t delay : { 1u, 11u, 31u, 257u, 2034u }) {
+        float serial[2034] = {};
+        for (uint32_t k = 0; k < 2048; ++k) {
+            serial[k % delay] += values[k];
+        }
+        for (uint32_t workers = 1; workers <= 256; workers *= 2) {
+            float folded[2034] = {};
+            for (uint32_t lane = 0; lane < workers; ++lane) {
+                for (uint32_t j = lane; j < delay; j += workers) {
+                    for (uint32_t k = j; k < 2048; k += delay) {
+                        folded[j] += values[k];
+                    }
+                }
+            }
+            TEST(memcmp(serial, folded, delay * sizeof(float)) == 0);
+        }
+    }
+}
 int main()
 {
+    m1_reduction_regressions();
     test_silence_stdout();
     external_held_notes_regressions();
     device_midi_route_regressions();

@@ -23,7 +23,7 @@ struct EffectParams {
     uint  type;
     uint  sound_offs;   // float index into data[], interleaved stereo, read + write in place
     uint  state_offs;   // float index into data[] for persistent state
-    uint  bypass;       // FIR types: 1 = no staged entry, pass the dry input through; keeps params[] 16-byte aligned for std430
+    uint  bypass;       // FIR bounds: lo bits 0-10, exclusive hi bits 11-21, dry bypass bit 31
     float params[5];    // effect's tweakable values, uploaded every step
 };
 
@@ -191,9 +191,7 @@ vec2 apply_chorus(in EffectParams eff)
     return result;
 }
 
-// Freeverb: 8 parallel feedback combs (each with a one-pole damping lowpass) summed
-// into 4 series allpasses.  Per-sample feedback forbids splitting a side across lanes,
-// so lane 0 runs the whole left side and lane 1 the whole right side; other lanes idle.
+// Freeverb combs use separate lanes.  Each side folds results in ascending comb order.
 vec2 apply_reverb(in EffectParams eff)
 {
     const float room_size = eff.params[0];
@@ -306,7 +304,6 @@ vec2 apply_reverb(in EffectParams eff)
 
     return vec2(samples_left[gl_LocalInvocationID.x], samples_right[gl_LocalInvocationID.x]);
 }
-
 // Peak-following dynamics compressor.  The per-sample envelope feeds back into the
 // next sample's gain, so lane 0 runs the whole step serially; other lanes idle.
 vec2 apply_compressor(in EffectParams eff)
@@ -357,9 +354,12 @@ vec2 apply_compressor(in EffectParams eff)
 vec2 apply_fir(in EffectParams eff, const bool bypass)
 {
     const uint fir_ring     = eff.state_offs + num_taps;
+    // The ring length is a power of two.  The host assertion pins this invariant.
     const uint fir_ring_len = num_taps - 1u;
     const uint fir_pos_offs = eff.state_offs + num_taps + 2u * fir_ring_len;
     const uint fir_base_pos = uint(data[fir_pos_offs]);
+    const uint lo           = eff.bypass & 2047u;
+    const uint hi           = min((eff.bypass >> 11u) & 2047u, num_taps);
 
     float acc_left  = 0.0;
     float acc_right = 0.0;
@@ -374,19 +374,19 @@ vec2 apply_fir(in EffectParams eff, const bool bypass)
     }
     else {
         // Taps whose input[n - k] lies in this step: read from shared.
-        for (uint tap = 0u; tap <= gl_LocalInvocationID.x; tap++) {
+        for (uint tap = lo; tap < min(hi, gl_LocalInvocationID.x + 1u); tap++) {
             const float coeff = data[eff.state_offs + tap];
             acc_left += coeff * samples_left[gl_LocalInvocationID.x - tap];
             acc_right += coeff * samples_right[gl_LocalInvocationID.x - tap];
         }
 
         // Taps whose input[n - k] lies in a prior step: read from the history ring.
-        for (uint tap = gl_LocalInvocationID.x + 1u; tap < num_taps; tap++) {
+        for (uint tap = max(lo, gl_LocalInvocationID.x + 1u); tap < hi; tap++) {
             const float coeff = data[eff.state_offs + tap];
 
             // Adding fir_ring_len keeps the frame non-negative before the modulo without
             // shifting the position (it is a whole number of ring wraps).
-            const uint read_frame = (fir_base_pos + gl_LocalInvocationID.x + fir_ring_len - tap) % fir_ring_len;
+            const uint read_frame = (fir_base_pos + gl_LocalInvocationID.x + fir_ring_len - tap) & (fir_ring_len - 1u);
             acc_left += coeff * data[fir_ring + read_frame * 2];
             acc_right += coeff * data[fir_ring + read_frame * 2 + 1];
         }
@@ -395,11 +395,11 @@ vec2 apply_fir(in EffectParams eff, const bool bypass)
     barrier();
 
     // Save input in history for next step
-    const uint write_frame = (fir_base_pos + gl_LocalInvocationID.x) % fir_ring_len;
+    const uint write_frame               = (fir_base_pos + gl_LocalInvocationID.x) & (fir_ring_len - 1u);
     data[fir_ring + write_frame * 2]     = samples_left[gl_LocalInvocationID.x];
     data[fir_ring + write_frame * 2 + 1] = samples_right[gl_LocalInvocationID.x];
     if (gl_LocalInvocationID.x == 0u) {
-        data[fir_pos_offs] = float((fir_base_pos + work_group_size) % fir_ring_len);
+        data[fir_pos_offs] = float((fir_base_pos + work_group_size) & (fir_ring_len - 1u));
     }
 
     return vec2(acc_left, acc_right);
@@ -463,7 +463,7 @@ void main()
         result = apply_compressor(eff);
     }
     else if (eff.type == effect_fir) {
-        result = apply_fir(eff, false);
+        result = apply_fir(eff, (eff.bypass & 0x80000000u) != 0u);
     }
     else if (eff.type == effect_ring_mod) {
         result = apply_ring_mod(eff);
@@ -473,7 +473,7 @@ void main()
         // multiband type runs the same filter engine.  When no band staged,
         // the host sets bypass and the dry input passes through while the
         // history keeps advancing.
-        result = apply_fir(eff, eff.bypass != 0u);
+        result = apply_fir(eff, (eff.bypass & 0x80000000u) != 0u);
     }
 
     data[eff.sound_offs + gl_LocalInvocationID.x * 2]     = result.x;

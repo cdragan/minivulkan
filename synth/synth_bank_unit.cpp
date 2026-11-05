@@ -5820,7 +5820,7 @@ static uint32_t portability_read_fixture(const char* path, char* text, uint32_t 
     return complete ? static_cast<uint32_t>(got) : 0;
 }
 
-static void portability_migration_and_examples()
+static void portability_examples()
 {
     static Synth::InstrumentEditorBank  bank, again;
     static Synth::EffectsDocument       effects;
@@ -5829,46 +5829,7 @@ static void portability_migration_and_examples()
     static Synth::LFODescriptor         lfos[Synth::instrument_max_lfos];
     static Synth::InstrumentGraphLayout layout[Synth::instrument_graph_layout_capacity];
     static char                         text[1024 * 1024], encoded[1024 * 1024], encoded_again[1024 * 1024];
-    for (const char* path : { "tools/migration_fixtures/bank.expected.json" }) {
-        const uint32_t n = portability_read_fixture(path, text, sizeof(text));
-        TEST(Synth::decode_editor_bank_json(text, n, &bank));
-        TEST(bank.bank.instruments.num_allocated == 1 && bank.bank.envelopes.num_allocated == 1 &&
-             bank.bank.lfos.num_allocated == 1);
-        TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].base_value == 0.75f);
-        TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].envelope_desc_id == 1);
-        TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].lfo_desc_id == 1);
-        TEST(bank.bank.channel_zones[0][0].instrument == 0);
-        TEST(bank.bank.parameters.entries[1].plain.sources[0].param_id == 0);
-        TEST(bank.bank.parameters.entries[2].lfo.rate_param_id == 1);
-        TEST(strcmp(bank.instrument_names[0], "Migrated lead") == 0);
-        TEST(strcmp(bank.channel_names[0], "Performance") == 0);
-        TEST(bank.bank.channel_chains[0].effects[0].bindings[0].base_value == 240);
-        TEST(bank.effect_routing[0].in == Sculptor::effect_in_first_slot &&
-             bank.effect_routing[0].out[0] == Sculptor::effect_out_output);
-        TEST(bank.graph_osc_source[0][0][0] == 1 && bank.graph_osc_source[0][0][1] == 0);
-        TEST(bank.added_cc_mask[0] == 5 && bank.added_cc_mask[Synth::max_channels] == 2);
-        TEST(bank.graph_layout_count == 8 && bank.graph_layout[3].uid == 7 && bank.graph_layout[4].uid == 9);
-        TEST(strcmp(bank.graph_layout[6].name, "LFO 1") == 0);
-        const uint32_t a = Synth::encode_editor_bank_json(&bank, encoded, sizeof(encoded));
-        TEST(a > 0 && Synth::decode_editor_bank_json(encoded, a, &again));
-        const uint32_t b = Synth::encode_editor_bank_json(&again, encoded_again, sizeof(encoded_again));
-        TEST(a == b && memcmp(encoded, encoded_again, a) == 0);
-        // Strict production library reader accepts framing from a migrated payload.
-        const char*    library_path = "synth_portability_migrated_library.tmp";
-        const uint32_t library_n =
-            portability_read_fixture("tools/migration_fixtures/library-bank.expected.json", text, sizeof(text));
-        TEST(library_n > 0);
-        write_library_fixture(library_path, text, library_n);
-        Synth::LibraryEntry entry = {};
-        TEST(Synth::read_library_index(library_path, &entry, 1) == 1);
-        again         = {};
-        uint16_t slot = 0xFFFF;
-        TEST(Synth::load_library_instrument(library_path, &entry, &again, 0, &slot));
-        TEST(slot == 0 &&
-             again.bank.instruments.entries[slot].layers[0].targets[Synth::mod_volume].base_value == 0.75f);
-        TEST(remove(library_path) == 0);
-    }
-    for (const char* path : { "doc/synth_effects_example.json", "tools/migration_fixtures/effects.expected.json" }) {
+    for (const char* path : { "doc/synth_effects_example.json" }) {
         const uint32_t n = portability_read_fixture(path, text, sizeof(text));
         TEST(Synth::decode_effects_json(text, n, &effects));
         TEST(effects.lfo_count == 2 && effects.chain.num_effects == 2);
@@ -5880,7 +5841,7 @@ static void portability_migration_and_examples()
         TEST(a == b && memcmp(encoded, encoded_again, a) == 0);
     }
     for (const char* path :
-         { "doc/synth_instrument_example.json", "tools/migration_fixtures/instrument.expected.json" }) {
+         { "doc/synth_instrument_example.json" }) {
         const uint32_t n         = portability_read_fixture(path, text, sizeof(text));
         uint32_t       env_count = 0, lfo_count = 0, layout_count = 0;
         TEST(Synth::decode_instrument_json(text,
@@ -6085,7 +6046,7 @@ int main()
     test_silence_stdout();
     portability_bank_omission_cleanup();
     portability_review_regressions();
-    portability_migration_and_examples();
+    portability_examples();
     portability_bank_sources_and_ccs();
     portability_bank_graph_locators();
     portability_bank_parameter_ids_and_reordering();

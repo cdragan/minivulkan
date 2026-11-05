@@ -302,3 +302,8 @@ static_assert(max_portable_records == Synth::instrument_graph_layout_capacity);
 static_assert(max_portable_records == 443);
 int  test_exit_code();
 void test_silence_stdout();
+
+// Test-declared M1 contract.  IMPLEMENT must use the production declaration instead.
+namespace Synth {
+uint32_t fir_window_from_entry(const uint32_t* entry);
+}
