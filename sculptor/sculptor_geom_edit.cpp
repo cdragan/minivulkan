@@ -1399,8 +1399,8 @@ void Sculptor::GeometryEditor::handle_mouse_actions(const UserInput& input, bool
 
 void Sculptor::GeometryEditor::handle_keyboard_actions()
 {
-    // Keys typed in a text box in any window, e.g. the Synth tab, are not shortcuts
-    if (ImGui::GetIO().WantTextInput) {
+    // Keys typed in a text box, or in another window such as the Synth tab, are not shortcuts
+    if (ImGui::GetIO().WantTextInput || ! window_focused) {
         return;
     }
 
@@ -1879,7 +1879,9 @@ bool Sculptor::GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_r
 
     ImGui::PopStyleVar();
 
+    window_visible = window_ok;
     if (! window_ok) {
+        window_focused = false;
         ImGui::End();
         return true;
     }
@@ -2005,7 +2007,7 @@ bool Sculptor::GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_r
         ImGui::EndPopup();
     }
 
-    window_focused = ImGui::IsWindowFocused();
+    window_focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
 
     ImGui::End();
 
@@ -2014,6 +2016,11 @@ bool Sculptor::GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_r
 
 bool Sculptor::GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
 {
+    // The window is hidden when another dock tab is active, so nobody sees the result
+    if ( ! window_visible) {
+        return true;
+    }
+
     if (! toolbar_image.send_to_gpu(cmdbuf))
         return false;
 
