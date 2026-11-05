@@ -344,6 +344,26 @@ static ImGuiKey map_key(xcb_keycode_t key)
     return ImGuiKey_None;
 }
 
+static constexpr xcb_keysym_t ascii_printable_first  = 0x20;
+static constexpr xcb_keysym_t ascii_printable_last   = 0x7E;
+static constexpr xcb_keysym_t latin1_printable_first = 0xA0;
+static constexpr xcb_keysym_t latin1_printable_last  = 0xFF;
+
+static void add_text_character(xcb_keycode_t key_code, uint16_t shift)
+{
+    if ( ! xcb_keysyms || (key_code < min_keycode) || (key_code > max_keycode))
+        return;
+
+    const uint32_t     idx = (key_code - min_keycode) * xcb_keysyms_per_code;
+    const xcb_keysym_t sym = xcb_keysyms[idx + shift];
+
+    const bool printable = (sym >= ascii_printable_first && sym <= ascii_printable_last)
+                           || (sym >= latin1_printable_first && sym <= latin1_printable_last);
+
+    if (printable)
+        ImGui::GetIO().AddInputCharacter(sym);
+}
+
 static void handle_key_event(xcb_keycode_t key_code, uint16_t state, bool down)
 {
     ImGuiIO& io = ImGui::GetIO();
@@ -363,13 +383,9 @@ static void handle_key_event(xcb_keycode_t key_code, uint16_t state, bool down)
         io.AddKeyEvent(key, down);
         io.SetKeyEventNativeData(key, key_code, -1);
     }
-    else if ( ! down && xcb_keysyms &&
-             (key_code >= min_keycode) && (key_code <= max_keycode)) {
 
-        const uint32_t idx = (key_code - min_keycode) * xcb_keysyms_per_code;
-        const xcb_keysym_t sym = xcb_keysyms[idx + shift];
-        io.AddInputCharacterUTF16(static_cast<ImWchar16>(sym));
-    }
+    if (down)
+        add_text_character(key_code, shift);
 }
 
 void handle_key_press(void* event)

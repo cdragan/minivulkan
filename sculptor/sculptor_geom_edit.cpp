@@ -1399,6 +1399,11 @@ void Sculptor::GeometryEditor::handle_mouse_actions(const UserInput& input, bool
 
 void Sculptor::GeometryEditor::handle_keyboard_actions()
 {
+    // Keys typed in a text box in any window, e.g. the Synth tab, are not shortcuts
+    if (ImGui::GetIO().WantTextInput) {
+        return;
+    }
+
     Mode new_mode = mode;
 
     const bool no_modifier = ! is_ctrl_down() && ! is_shift_down() && ! is_alt_down();
