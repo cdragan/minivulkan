@@ -10,6 +10,8 @@
 
 #include <assert.h>
 #include <stdlib.h>
+#include <string.h>
+#include <xcb/randr.h>
 #include <xcb/xcb.h>
 
 const uint32_t* get_window_events()
@@ -30,28 +32,95 @@ const uint32_t* get_window_events()
     return events;
 }
 
-void set_dpi_scale(void* void_conn, unsigned int root)
-{
-    xcb_connection_t* const conn = static_cast<xcb_connection_t*>(void_conn);
+static constexpr float    base_dpi     = 96.0f;
+static constexpr float    mm_per_inch  = 25.4f;
+static constexpr float    min_ui_scale = 1.0f;
+static constexpr float    max_ui_scale = 4.0f;
+static constexpr uint32_t randr_major  = 1;
+static constexpr uint32_t randr_minor  = 5;
 
+static float physical_scale(float pixels, float millimeters)
+{
+    if (pixels <= 0.0f || millimeters <= 0.0f)
+        return 0.0f;
+
+    return pixels * mm_per_inch / (millimeters * base_dpi);
+}
+
+static float get_randr_scale(xcb_connection_t* conn, xcb_window_t root)
+{
+    const xcb_query_extension_reply_t* const extension = xcb_get_extension_data(conn, &xcb_randr_id);
+    if ( ! extension || ! extension->present)
+        return 0.0f;
+
+    xcb_randr_query_version_reply_t* const version =
+        xcb_randr_query_version_reply(conn, xcb_randr_query_version(conn, randr_major, randr_minor), nullptr);
+    if ( ! version)
+        return 0.0f;
+
+    const bool supported = version->major_version > randr_major
+                           || (version->major_version == randr_major && version->minor_version >= randr_minor);
+    free(version);
+    if ( ! supported)
+        return 0.0f;
+
+    xcb_randr_get_monitors_reply_t* const monitors =
+        xcb_randr_get_monitors_reply(conn, xcb_randr_get_monitors(conn, root, true), nullptr);
+    if ( ! monitors)
+        return 0.0f;
+
+    const xcb_randr_monitor_info_t* chosen = nullptr;
+    for (xcb_randr_monitor_info_iterator_t iter = xcb_randr_get_monitors_monitors_iterator(monitors);
+         iter.rem;
+         xcb_randr_monitor_info_next(&iter)) {
+
+        if ( ! chosen || iter.data->primary)
+            chosen = iter.data;
+    }
+
+    float scale = 0.0f;
+    if (chosen)
+        scale = physical_scale(chosen->width, static_cast<float>(chosen->width_in_millimeters));
+
+    free(monitors);
+
+    return scale;
+}
+
+static float get_core_scale(xcb_connection_t* conn, xcb_window_t root)
+{
+    for (xcb_screen_iterator_t iter = xcb_setup_roots_iterator(xcb_get_setup(conn));
+         iter.rem;
+         xcb_screen_next(&iter)) {
+
+        if (iter.data->root == root)
+            return physical_scale(iter.data->width_in_pixels, iter.data->width_in_millimeters);
+    }
+
+    return 0.0f;
+}
+
+static float get_xft_scale(xcb_connection_t* conn, xcb_window_t root)
+{
     const xcb_get_property_cookie_t cookie =
         xcb_get_property(conn,
                          false,
-                         static_cast<xcb_window_t>(root),
+                         root,
                          XCB_ATOM_RESOURCE_MANAGER,
                          XCB_ATOM_ANY,
                          0,
                          16384);
 
     xcb_get_property_reply_t* const reply = xcb_get_property_reply(conn, cookie, nullptr);
-    if ( ! reply)
-        return;
+    if ( ! reply) {
+        return 0.0f;
+    }
 
     const char* const data   = static_cast<const char*>(xcb_get_property_value(reply));
     const int         length = static_cast<int>(xcb_get_property_value_length(reply));
     const char* const end    = data + length;
 
-    float scale = 1.0f;
+    float scale = 0.0f;
 
     for (const char* entry = data; entry + 8 <= end; ++entry) {
         if (strncmp(entry, "Xft.dpi:", 8) != 0)
@@ -65,13 +134,40 @@ void set_dpi_scale(void* void_conn, unsigned int root)
         while (value < end && *value >= '0' && *value <= '9')
             dpi = dpi * 10 + (*value++ - '0');
 
-        if (dpi > 0)
-            scale = static_cast<float>(dpi) / 96.0f;
+        scale = static_cast<float>(dpi) / base_dpi;
 
         break;
     }
 
     free(reply);
+
+    return scale;
+}
+
+void set_dpi_scale(void* void_conn, unsigned int root)
+{
+    xcb_connection_t* const conn        = static_cast<xcb_connection_t*>(void_conn);
+    const xcb_window_t      root_window = static_cast<xcb_window_t>(root);
+
+    float scale = get_randr_scale(conn, root_window);
+
+    if (scale <= 0.0f) {
+        scale = get_core_scale(conn, root_window);
+    }
+
+    const float xft_scale = get_xft_scale(conn, root_window);
+    if (xft_scale > scale) {
+        scale = xft_scale;
+    }
+
+    if (scale < min_ui_scale) {
+        scale = min_ui_scale;
+    }
+    if (scale > max_ui_scale) {
+        scale = max_ui_scale;
+    }
+
+    d_printf("UI scale %.2f\n", static_cast<double>(scale));
 
     vk_surface_scale = scale;
 }

@@ -445,12 +445,13 @@ ifeq ($(UNAME), Linux)
         LDFLAGS     += -lwayland-client
         LDFLAGS_gui += -lwayland-cursor
         ifeq ($(libdecor), 1)
-            CFLAGS += -DHAVE_LIBDECOR
+            CFLAGS      += -DHAVE_LIBDECOR
             LDFLAGS_gui += -ldecor-0
         endif
     else
-        LDFLAGS += -lxcb -lxcb-xfixes
-        CFLAGS  += -DLINUX_USE_XCB
+        CFLAGS      += -DLINUX_USE_XCB
+        LDFLAGS     += -lxcb -lxcb-xfixes
+        LDFLAGS_gui += -lxcb-randr
     endif
 
     # Disable assertions in C++ library to avoid pulling in libstdc++
