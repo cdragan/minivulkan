@@ -279,6 +279,7 @@ static void check_fir_slope_helpers()
 {
     // Law table: the odd span grows exponentially from 11 taps at 1 percent to the
     // full 1025-tap kernel at 100 (11 * (1025 / 11) ^ ((slope - 1) / 99)).
+    // At 75 percent the exact law gives 326.15047, rounded to the odd span 327.
     {
         static const struct {
             float    percent;
@@ -288,7 +289,7 @@ static void check_fir_slope_helpers()
             { 10.0f, 17 },
             { 25.0f, 33 },
             { 50.0f, 103 },
-            { 75.0f, 325 },
+            { 75.0f, 327 },
             { 99.0f, 979 },
             { 100.0f, Synth::num_fir_taps },
         };

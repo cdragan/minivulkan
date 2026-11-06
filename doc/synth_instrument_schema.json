@@ -42,7 +42,7 @@
         "single"
       ],
       "default": "multiple",
-      "description": "Voice allocation.  multiple: every note-on takes new voices.  reuse per-note: a repeated note on the same instrument restarts its own voices in place and keeps their current loudness, so a quick re-press does not dip to silence.  single: the instrument plays one note at a time across all MIDI channels, and any new note takes over the sounding voices with the same restart; other notes of the instrument fade out."
+      "description": "Voice allocation.  multiple: every note-on takes new voices.  reuse per-note: a repeated note on the same instrument restarts its own voices in place and keeps their current loudness (never below the envelope's own start level), so a quick re-press does not dip to silence.  single: the instrument plays one note at a time across all MIDI channels, and any new note takes over the sounding voices with the same restart; other notes of the instrument fade out."
     },
     "graph_layout": {
       "type": "array",

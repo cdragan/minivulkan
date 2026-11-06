@@ -1390,8 +1390,8 @@ static void writer_configure_lfo(const void*     ctx,
 // generator (per lfo_op), then each routed input source; absent generators contribute no source.
 // Each layer instantiates its own generators, so layers with the same descriptor id evaluate the
 // same value in phase without sharing nodes.  Every route is data, not code here.
-// An in-place restart passes the level of the previous envelope node in env_seed.  The restarted
-// envelope ramps from that level through its first segment.  Zero means no seed (a new note).
+// An in-place restart passes the previous envelope level in env_seed.  In the first segment,
+// it applies only above the envelope's own first-point value.  Zero means no seed (a new note).
 static void configure_target_modulation(const Instrument& instrument,
                                         ModTarget         target,
                                         uint32_t          dest_role,

@@ -218,11 +218,12 @@ static float envelope_value_at(const EnvelopeDescriptor& envelope, const Envelop
     const uint32_t env_tick  = state.tick;
 
     const EnvelopeDescriptor::Point pt1 = envelope.points[env_point];
+    const float first_value             = envelope.min_value + static_cast<float>(pt1.value) * envelope.min_max_delta;
 
-    // An in-place restart carries the previous level in old_value.  While the state is in the first
-    // segment, that level replaces the first point's value as the segment start, so the segment ramps
-    // from the carried level to the next point.  Zero means no seed.
-    if (env_point == 0 && state.old_value != 0.0f && envelope.num_points > 1) {
+    // An in-place restart carries the previous level in old_value.  In the first segment,
+    // use it only above the envelope's own start value: avoid a dip without lowering a
+    // percussive restart peak.  The segment ramps to the next point.  Zero means no seed.
+    if (env_point == 0 && state.old_value != 0.0f && state.old_value > first_value && envelope.num_points > 1) {
         float start_value = state.old_value;
         if (env_tick > pt1.position) {
             assert(env_point + 1 < envelope.num_points);

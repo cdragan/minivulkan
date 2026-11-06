@@ -61,6 +61,35 @@ static float lfo_reference_normalized(const Synth::WaveType wave,
     return (fall > 0.0f) ? (1.0f - frac_phase) / fall : 0.0f;
 }
 
+// Pins the exp2 cliff on detuned A notes 33/45/57 and checks every MIDI note.
+// The reference is the double-precision equal-temperament law, not mstd::exp2.
+static void check_pitch_detune_accuracy()
+{
+    for (uint32_t note = 0; note < 128; note++) {
+        const float  pitch0 = static_cast<float>(note);
+        const float  pitch1 = pitch0 + 0.001f;
+        const float  f0     = Synth::pitch_to_frequency(pitch0, 1);
+        const float  f1     = Synth::pitch_to_frequency(pitch1, 1);
+        const double detune = 1200.0 * std::log2(static_cast<double>(f1) / static_cast<double>(f0));
+        const double ref0   = 440.0 * std::pow(2.0, (static_cast<double>(pitch0) - 69.0) / 12.0);
+        const double ref1   = 440.0 * std::pow(2.0, (static_cast<double>(pitch1) - 69.0) / 12.0);
+        const double error0 = 1200.0 * std::log2(static_cast<double>(f0) / ref0);
+        const double error1 = 1200.0 * std::log2(static_cast<double>(f1) / ref1);
+
+        if (std::fabs(detune - 0.1) >= 0.05 || std::fabs(error0) >= 0.5 || std::fabs(error1) >= 0.5) {
+            fprintf(stderr,
+                    "MIDI %u: detune %.6f cents, absolute errors %.6f / %.6f cents\n",
+                    note,
+                    detune,
+                    error0,
+                    error1);
+        }
+        TEST(std::fabs(detune - 0.1) < 0.05);
+        TEST(std::fabs(error0) < 0.5);
+        TEST(std::fabs(error1) < 0.5);
+    }
+}
+
 static void check_core_inline_0()
 {
 
@@ -68,8 +97,8 @@ static void check_core_inline_0()
     TEST(approx(Synth::note_to_frequency(69, 0.0f, 1), 440.0f, 0.01f));
     // One octave up = 880 Hz
     TEST(approx(Synth::note_to_frequency(81, 0.0f, 1), 880.0f, 0.02f));
-    // One semitone up via pitch offset ~ 466.16 Hz
-    TEST(approx(Synth::note_to_frequency(69, 1.0f, 1), 466.16f, 0.05f));
+    // One semitone up: exact 440 * 2^(1/12), rounded to 466.164 Hz.
+    TEST(approx(Synth::note_to_frequency(69, 1.0f, 1), 466.164f, 0.05f));
     // freq_mult doubles the frequency
     TEST(approx(Synth::note_to_frequency(69, 0.0f, 2), 880.0f, 0.02f));
 
@@ -2787,6 +2816,7 @@ int main()
     test_silence_stdout();
     check_note_name_formats_midi_notes();
     check_core_inline_0();
+    check_pitch_detune_accuracy();
     check_core_inline_1();
     check_core_inline_2();
     return test_exit_code();

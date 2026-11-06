@@ -960,8 +960,8 @@ static void check_envelope_note_off_regressions()
 }
 
 // The in-place restart seed (EnvelopeState::old_value).  A restarted envelope continues from
-// the level of the previous envelope instead of dropping to its first point.  Zero means no
-// seed, so a fresh note keeps the exact stored evaluation.
+// the previous level only when it is above its own first point, avoiding a dip without
+// lowering a percussive restart peak.  Zero means no seed, preserving fresh-note evaluation.
 static void check_envelope_restart_seed_regressions()
 {
     // Three points, no sustain span: 0 -> 1 over four ticks -> 0 over four ticks.
@@ -1061,9 +1061,9 @@ static void check_envelope_restart_seed_regressions()
         TEST(approx(Synth::param_onset_value(fresh, descs, 2), 0.125f, 1.0e-6f));
     }
 
-    // The carried level applies to every envelope at its start, including one which sustains
-    // on its first point.  Release such an envelope into its tail, then restart it in place
-    // with the captured level: the restart reports that level, not the stored first point.
+    // A carried level below the envelope's own start must not lower its restart peak,
+    // including when it sustains on the first point.  A seed above that point still avoids
+    // a dip.  Release into the tail and capture the level to check both restart cases.
     {
         Synth::EnvelopeDescriptor hold = env;
         hold.sustain_first_point       = 0;
@@ -1085,9 +1085,47 @@ static void check_envelope_restart_seed_regressions()
         // Takeover: the state restarts at the envelope start with the captured level.
         Synth::EnvelopeState restarted = {};
         restarted.old_value            = captured;
+        TEST(Synth::eval_envelope_at(hold, restarted) == 0.5f);
+        TEST(Synth::eval_envelope(hold, &restarted, true) == 0.5f);
+        TEST(restarted.point == 0 && restarted.tick == 0);
+
+        hold.points[0]      = { 0, 0x1000 }; // 0.0625, below the captured 0.125
+        restarted           = {};
+        restarted.old_value = captured;
         TEST(Synth::eval_envelope_at(hold, restarted) == captured);
         TEST(Synth::eval_envelope(hold, &restarted, true) == captured);
         TEST(restarted.point == 0 && restarted.tick == 0);
+    }
+
+    // Percussive volume (base 0, depth 1) must restart at its own peak, not a stale
+    // mid-decay seed.  Both configure-time onset and the first engine step see the peak.
+    {
+        Synth::EnvelopeDescriptor percussion = {};
+        percussion.num_points                = 2;
+        percussion.sustain_first_point       = 1;
+        percussion.sustain_last_point        = 1;
+        percussion.min_value                 = 0.0f;
+        percussion.min_max_delta             = 1.0f / 65535.0f;
+        percussion.points[0]                 = { 0, 0xFFFF };
+        percussion.points[1]                 = { 10, 0 };
+
+        Synth::EnvelopeState decayed = {};
+        for (uint32_t step = 0; step < 6; step++) {
+            Synth::eval_envelope(percussion, &decayed, true);
+        }
+        TEST(approx(Synth::eval_envelope_at(percussion, decayed), 0.4f, 2.0e-5f));
+
+        Synth::ParamDescriptor descs[3]  = {};
+        Synth::Parameter       params[3] = {};
+        descs[1].kind                    = Synth::ParamKind::envelope;
+        descs[1].envelope                = percussion;
+        params[1].envelope.old_value     = 0.4f;
+        Synth::configure_plain(&descs[2], 0.0f, 1, 1.0f, 0, Synth::SourceOp::add, nullptr, 0);
+
+        TEST(approx(Synth::eval_envelope_at(percussion, params[1].envelope), 1.0f, 1.0e-6f));
+        TEST(approx(Synth::param_onset_value(params, descs, 2), 1.0f, 1.0e-6f));
+        TEST(approx(Synth::eval_envelope(percussion, &params[1].envelope, true), 1.0f, 1.0e-6f));
+        TEST(params[1].envelope.point == 0 && params[1].envelope.tick == 1);
     }
 
     // A quick-release jump drops the seed.

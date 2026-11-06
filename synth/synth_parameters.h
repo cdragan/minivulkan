@@ -78,8 +78,8 @@ struct EnvelopeState {
     uint16_t tick;
     uint16_t point;
     uint8_t  reverse;   // Ping-pong direction: 0 = forward, 1 = backward
-    float    old_value; // Carried level for an in-place restart: replaces the first point's value while the state is
-                        // in the first segment.  Zero means no seed (a fresh note).
+    float    old_value; // Carried level for an in-place restart: applies in the first segment only when above
+                        // the envelope's own first-point value.  Zero means no seed (a fresh note).
 };
 
 enum class SourceOp : uint8_t {

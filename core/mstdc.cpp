@@ -47,14 +47,14 @@ float mstd::exp2(float x)
         x = 127.0f;
     }
 
-    // modff()
-    const float integral = truncf(x);
+    // Keep the polynomial fraction in [0, 1), including for negative inputs.
+    const float integral = mstd::floorf(x);
     const float frac     = x - integral;
 
     constexpr float c0 = 1.0f;
-    constexpr float c1 = 0.6931468f;
-    constexpr float c2 = 0.2402293f;
-    constexpr float c3 = 0.0555039f;
+    constexpr float c1 = 0.6955f;
+    constexpr float c2 = 0.2260f;
+    constexpr float c3 = 0.0785f;
 
     const float poly = c0 + frac * (c1 + frac * (c2 + frac * c3));
 
