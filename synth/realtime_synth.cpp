@@ -24,6 +24,8 @@
 
 #include "../core/shaders.h"
 
+static constexpr uint32_t color_compute = 0xA8D808;
+
 enum BufferTypes : uint8_t {
     data_buf,   // Device buffer which is used by effects etc.
     param_buf,  // Dynamic device buffer with parameters for compute shaders etc.
@@ -1999,7 +2001,7 @@ struct EffectTarget {
 // Runs the targets as dependency-depth waves: wave d = the d-th enabled effect of
 // every target, packed into one dispatch; a barrier precedes each wave.  Chains are
 // sequential per buffer, but the buffers are distinct, so one wave has no conflicts.
-static void apply_effects(const EffectTarget* targets, uint32_t num_targets)
+static void apply_effects(const char* label, const EffectTarget* targets, uint32_t num_targets)
 {
     for (uint32_t depth = 0;; depth++) {
 
@@ -2050,6 +2052,9 @@ static void apply_effects(const EffectTarget* targets, uint32_t num_targets)
             }
             memcpy(param.params, wave_instances[wave_idx]->params, sizeof(param.params));
         }
+
+        begin_debug_label(audio_cmd_buf, color_compute, "%s_effects_depth_%u", label, depth);
+        DEFER { end_debug_label(audio_cmd_buf); };
 
         memory_barrier(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
@@ -2582,6 +2587,9 @@ static void compute_fir_coefficients()
     const uint32_t param_size = num_active_filters * static_cast<uint32_t>(sizeof(ShaderParams::FIRCoeff));
     const uint32_t param_offs = static_cast<uint32_t>(param_allocator.allocate(param_size, synth_alignment).offset);
 
+    begin_debug_label(audio_cmd_buf, color_compute, "fir_coefficients");
+    DEFER { end_debug_label(audio_cmd_buf); };
+
     // The staging array is copied synchronously into the allocated parameter-buffer region before
     // dispatch: the GPU descriptors reference the parameter buffer, never this reusable array.
     memcpy(buffers[param_buf].get_ptr<uint8_t>(param_offs), fir_coeff_stage, param_size);
@@ -2803,6 +2811,8 @@ static void render_audio_step()
         cur_param_offs += static_cast<uint32_t>(sizeof(ShaderParams::Oscillator));
     }
 
+    begin_debug_label(audio_cmd_buf, color_compute, "oscillators");
+
     memory_barrier(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                    VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -2823,6 +2833,8 @@ static void render_audio_step()
     if (num_oscillators) {
         vkCmdDispatch(audio_cmd_buf, num_oscillators, 1, 1);
     }
+
+    end_debug_label(audio_cmd_buf);
 
     // ======================================================================
 
@@ -2886,6 +2898,8 @@ static void render_audio_step()
         param.num_inputs        = channel_osc_count[chan_idx];
     }
 
+    begin_debug_label(audio_cmd_buf, color_compute, "combine_oscillators");
+
     memory_barrier(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
     vkCmdBindPipeline(audio_cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[chan_combine_pipe]);
@@ -2909,6 +2923,8 @@ static void render_audio_step()
 
     vkCmdDispatch(audio_cmd_buf, num_mix_channels, 1, 1);
 
+    end_debug_label(audio_cmd_buf);
+
     // ======================================================================
 
     // Apply each active channel's effect chain in place, before the master mix sums
@@ -2919,7 +2935,7 @@ static void render_audio_step()
         channel_effect_targets[used_chan_idx].chain      = &channel_chains[chan_idx];
         channel_effect_targets[used_chan_idx].sound_offs = mix_channels[chan_idx].chan_output_offs / 4;
     }
-    apply_effects(channel_effect_targets, num_mix_channels);
+    apply_effects("channel", channel_effect_targets, num_mix_channels);
 
     // ======================================================================
 
@@ -2966,6 +2982,8 @@ static void render_audio_step()
     master_param.input_params_offs             = 0;
     master_param.num_inputs                    = num_mix_channels;
 
+    begin_debug_label(audio_cmd_buf, color_compute, "master_mix");
+
     memory_barrier(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
     vkCmdBindPipeline(audio_cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[master_mix_pipe]);
@@ -2989,11 +3007,13 @@ static void render_audio_step()
 
     vkCmdDispatch(audio_cmd_buf, 1, 1, 1);
 
+    end_debug_label(audio_cmd_buf);
+
     // ======================================================================
 
     // Apply the master effect chain in place on the master buffer, after the mix.
     const EffectTarget master_effect_target = { &master_chain, master_output_offs / 4 };
-    apply_effects(&master_effect_target, 1);
+    apply_effects("master", &master_effect_target, 1);
 
     memory_barrier(VK_ACCESS_HOST_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT);
 }
@@ -3072,6 +3092,9 @@ template <typename T, bool interleaved> static bool render_audio(uint32_t num_sa
 
     for (uint32_t offset = 0; offset < num_samples; offset += Synth::rt_step_samples) {
         render_audio_step();
+
+        begin_debug_label(audio_cmd_buf, color_compute, "output_audio");
+        DEFER { end_debug_label(audio_cmd_buf); };
 
         memory_barrier(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 

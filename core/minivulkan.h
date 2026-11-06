@@ -62,6 +62,19 @@ inline constexpr void set_vk_object_name(VkObjectType type, uint64_t handle, Des
 void set_vk_object_name(VkObjectType type, uint64_t handle, Description desc);
 #endif
 
+[[gnu::format(printf, 3, 4)]]
+#ifdef NDEBUG
+inline constexpr void begin_debug_label(VkCommandBuffer cmd_buf, uint32_t color, const char* labelFormat, ...) { }
+#else
+void begin_debug_label(VkCommandBuffer cmd_buf, uint32_t color, const char* labelFormat, ...);
+#endif
+
+#ifdef NDEBUG
+inline constexpr void end_debug_label(VkCommandBuffer cmd_buf) { }
+#else
+void end_debug_label(VkCommandBuffer cmd_buf);
+#endif
+
 #if !defined(_MSC_VER) || !defined(_M_IX86)
 template<typename T>
 void set_vk_object_name(VkObjectType type, T handle, Description desc)
@@ -86,14 +99,26 @@ uint32_t check_feature_str(const char* name, const VkBool32* feature);
 
 PFN_vkVoidFunction load_vk_function(const char* name);
 
-#define VK_FUNCTION(name) static_load_vk_function<PFN_##name>(#name)
+#define VK_FUNCTION(name) static_load_vk_function<#name, PFN_##name>()
 
-template<typename T>
-T static_load_vk_function(const char* name)
+template<size_t size>
+struct VkFunctionName {
+    char chars[size];
+
+    constexpr VkFunctionName(const char (&literal)[size])
+    {
+        for (size_t index = 0; index < size; index++) {
+            chars[index] = literal[index];
+        }
+    }
+};
+
+template<VkFunctionName name, typename T>
+T static_load_vk_function()
 {
     static T func;
     if ( ! func)
-        func = reinterpret_cast<T>(load_vk_function(name));
+        func = reinterpret_cast<T>(load_vk_function(name.chars));
     return func;
 }
 

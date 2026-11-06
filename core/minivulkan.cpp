@@ -13,6 +13,8 @@
 
 #include <algorithm>
 #include <iterator>
+#include <stdarg.h>
+#include <stdio.h>
 
 #ifndef NDEBUG
 #   include <stdlib.h>
@@ -882,6 +884,37 @@ void set_vk_object_name(VkObjectType type, uint64_t handle, Description desc)
 
     if (vkSetDebugUtilsObjectNameEXT)
         CHK(vkSetDebugUtilsObjectNameEXT(vk_dev, &object_name_info));
+}
+
+void begin_debug_label(VkCommandBuffer cmd_buf, uint32_t color, const char* labelFormat, ...)
+{
+    char labelBuf[128];
+
+    va_list arguments;
+    va_start(arguments, labelFormat);
+    vsnprintf(labelBuf, sizeof labelBuf, labelFormat, arguments);
+    va_end(arguments);
+
+    VkDebugUtilsLabelEXT labelDesc = {};
+    labelDesc.sType      = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+    labelDesc.pLabelName = labelBuf;
+    labelDesc.color[0]   = ((color >> 16) & 0xFFU) / 255.0f;
+    labelDesc.color[1]   = ((color >> 8) & 0xFFU) / 255.0f;
+    labelDesc.color[2]   = (color & 0xFFU) / 255.0f;
+    labelDesc.color[3]   = 1.0f;
+
+    const auto vkCmdBeginDebugUtilsLabelEXT = VK_FUNCTION(vkCmdBeginDebugUtilsLabelEXT);
+
+    if (vkCmdBeginDebugUtilsLabelEXT)
+        vkCmdBeginDebugUtilsLabelEXT(cmd_buf, &labelDesc);
+}
+
+void end_debug_label(VkCommandBuffer cmd_buf)
+{
+    const auto vkCmdEndDebugUtilsLabelEXT = VK_FUNCTION(vkCmdEndDebugUtilsLabelEXT);
+
+    if (vkCmdEndDebugUtilsLabelEXT)
+        vkCmdEndDebugUtilsLabelEXT(cmd_buf);
 }
 #endif
 
