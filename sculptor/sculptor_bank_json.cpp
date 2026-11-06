@@ -1095,6 +1095,9 @@ static bool channel_has_category(const Synth::InstrumentEditorBank& bank, uint32
 
 static bool channel_is_default(const Synth::InstrumentEditorBank& bank, uint32_t channel)
 {
+    if (! bank.bank.channel_enabled[channel])
+        return true;
+
     return ! bank.bank.channel_zones[channel][0].start_note &&
            chain_is_empty(bank.bank.channel_chains[channel], bank.effect_routing[channel]) &&
            ! channel_has_custom_name(bank, channel) && ! channel_has_category(bank, channel);
@@ -3545,16 +3548,31 @@ static void decode_zone(Walker& w, uint32_t obj, Synth::Zone& zone, uint16_t& in
 
 static void canonicalize_name(char* name);
 
+static bool chain_object_has_effects(Walker& w, uint32_t obj)
+{
+    bool has_effects = false;
+    walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
+        const jsmntok_t& token = w.toks[val_idx];
+        if (key_eq(w, key_idx, "effects") && token.type == JSMN_ARRAY && token.size > 0)
+            has_effects = true;
+    });
+    return has_effects;
+}
+
 static void decode_channel(Walker& w, uint32_t obj, Synth::InstrumentEditorBank* out, uint32_t channel)
 {
-    // Category metadata alone must not enable an otherwise empty channel.
     int content_pairs = w.toks[obj].type == JSMN_OBJECT ? w.toks[obj].size : 0;
+
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "category"))
             --content_pairs;
+        else if (key_eq(w, key_idx, "chain") && ! chain_object_has_effects(w, val_idx))
+            --content_pairs;
     });
+
     if (content_pairs > 0)
         out->bank.channel_enabled[channel] = 1;
+
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         // An explicit empty name is stored as-is but is not custom.  The next
         // encode omits it, so the factory name returns on the next decode.

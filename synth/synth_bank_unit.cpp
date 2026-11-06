@@ -1082,7 +1082,6 @@ static void check_library_metadata_transactions()
     const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
     Synth::InstrumentEditorBank&                       source         = *source_storage;
     build_named_fm_fixture(&source);
-    source.bank.channel_enabled[0] = 0;
     const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
         std::make_unique<FixedArray<char, Synth::library_payload_max>>();
     char (&payload)[Synth::library_payload_max] = payload_storage->elements;
@@ -2106,7 +2105,6 @@ static void check_stored_library_numeric_domains()
             const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> stored_payload_storage =
                 std::make_unique<FixedArray<char, Synth::library_payload_max>>();
             char (&stored_payload)[Synth::library_payload_max] = stored_payload_storage->elements;
-            source.bank.channel_enabled[0]                     = 0;
             const uint32_t stored_length =
                 Synth::encode_editor_bank_json(&source, stored_payload, sizeof(stored_payload));
             TEST(stored_length > 0);
@@ -2125,7 +2123,6 @@ static void check_stored_library_numeric_domains()
                     TEST(destination.graph_layout_count == source.graph_layout_count);
                 }
             }
-            source.bank.channel_enabled[0] = 1;
             remove(path);
             // The library save path verifies its own encode-decode round
             // trip against the shared decode validation.
@@ -2893,8 +2890,6 @@ static void check_bank_inline_0()
         Synth::InstrumentEditorBank& src = *src_storage;
         make_valid_bank(src.bank);
         Sculptor::set_identity_osc_sources(&src, 0, 0);
-        src.bank.channel_enabled[0]                                                      = 0;
-        src.bank.channel_enabled[1]                                                      = 0;
         src.bank.channel_chains[0].num_effects                                           = 1;
         src.bank.channel_chains[0].effects[0].type                                       = Synth::EffectType::delay;
         src.bank.channel_chains[0].effects[0].bindings[0].lfo_desc_id                    = 1;
@@ -4713,6 +4708,7 @@ static void check_bank_inline_1()
         set_default_dispersion_sections(bank.bank.instruments.entries[1]);
         bank.bank.channel_zones[1][0].start_note = 1;
         bank.bank.channel_zones[1][0].instrument = 1;
+        bank.bank.channel_enabled[1]             = 1;
         bank.graph_osc_source[1][0][0]           = 1;
         bank.graph_osc_source[1][0][1]           = 2;
 
@@ -5524,7 +5520,8 @@ static void portability_bank_omission_cleanup()
     uint32_t m = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
     TEST(m == n && memcmp(text, again, n) == 0);
 
-    // Empty names and factory names both mean no custom channel name.
+    // Disabled channels store no name: empty and factory names are both
+    // non-custom, and editor state never disables a custom-named channel.
     for (uint32_t names = 0; names < 2; ++names) {
         for (uint32_t c = 0; c < Synth::max_channels; ++c) {
             if (names == 0)
@@ -5536,19 +5533,12 @@ static void portability_bank_omission_cleanup()
             memcpy(source.channel_names[last], "Last", 5);
             const uint32_t length = Synth::encode_editor_bank_json(&source, text, sizeof(text));
             TEST(length > 0);
-            text[length]         = 0;
-            const char* channels = strstr(text, "\"channels\":[");
-            TEST(channels != nullptr);
-            if (channels) {
-                channels += strlen("\"channels\":[");
-                for (uint32_t c = 0; c < last; ++c) {
-                    TEST(strncmp(channels, "{},", 3) == 0);
-                    channels += 3;
-                }
-                TEST(strncmp(channels, "{\"name\":\"Last\"}]", 16) == 0);
-            }
+            text[length] = 0;
+            TEST(strstr(text, "\"channels\"") == nullptr);
             TEST(Synth::decode_editor_bank_json(text, length, &decoded));
-            TEST(strcmp(decoded.channel_names[last], "Last") == 0);
+            char default_name[Synth::max_name_len];
+            Synth::get_default_channel_name(last, default_name, sizeof(default_name));
+            TEST(strcmp(decoded.channel_names[last], default_name) == 0);
             m = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
             TEST(m == length && memcmp(text, again, length) == 0);
             if (names == 0)
@@ -5562,17 +5552,26 @@ static void portability_bank_omission_cleanup()
         TEST(Synth::decode_editor_bank_json(text, length, &decoded));
         m = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
         TEST(m == length && memcmp(text, again, length) == 0);
-        source.effect_routing[2].in = Sculptor::effect_in_output;
-        length                      = Synth::encode_editor_bank_json(&source, text, sizeof(text));
-        text[length]                = 0;
+        // An enabled empty channel still stores its fresh-default routing
+        // wire.  This is also the exact document shape that older saves
+        // wrote for a deleted channel.
+        source.bank.channel_enabled[2] = 1;
+        source.effect_routing[2].in    = Sculptor::effect_in_output;
+        length                         = Synth::encode_editor_bank_json(&source, text, sizeof(text));
+        text[length]                   = 0;
         TEST(strstr(text, "\"channels\":[{},{},{\"chain\":{\"input\":\"output\"}}]") != nullptr);
         TEST(Synth::decode_editor_bank_json(text, length, &decoded));
+        // A chain without effects is inert metadata: decode keeps the
+        // channel disabled and the next encode stores it empty.
+        for (uint32_t c = 0; c < Synth::max_channels; ++c)
+            TEST(decoded.bank.channel_enabled[c] == 0);
         char default_name[Synth::max_name_len];
         Synth::get_default_channel_name(2, default_name, sizeof(default_name));
         TEST(strcmp(decoded.channel_names[2], default_name) == 0);
         m = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
-        TEST(m == length && memcmp(text, again, length) == 0);
-        source.effect_routing[2] = {};
+        TEST(m == n);
+        source.bank.channel_enabled[2] = 0;
+        source.effect_routing[2]       = {};
     }
 
     // Enabled empty channels have no representable playback state.
@@ -5604,7 +5603,9 @@ static void portability_bank_omission_cleanup()
         TEST(decoded.bank.channel_enabled[3] == 0);
         m        = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
         again[m] = 0;
-        TEST(strstr(again, "\"name\":\"Custom\"") != nullptr);
+        // The disabled channel stores no name, so the custom name is gone
+        // from the canonical form as well.
+        TEST(strstr(again, "\"name\":\"Custom\"") == nullptr);
         TEST(Synth::decode_editor_bank_json(again, m, &decoded));
         length = Synth::encode_editor_bank_json(&decoded, text, sizeof(text));
         TEST(length == m && memcmp(text, again, m) == 0);
@@ -5621,21 +5622,20 @@ static void portability_bank_omission_cleanup()
         TEST(m == length && memcmp(text, again, length) == 0);
     }
     // The enabled flag is not part of the format; present content decodes enabled.
-    for (uint32_t enabled = 0; enabled < 2; ++enabled) {
-        for (uint32_t c = 0; c < Synth::max_channels; ++c)
-            source.bank.channel_enabled[c] = 0;
-        source.bank.channel_enabled[2]             = static_cast<uint8_t>(enabled);
-        source.bank.channel_zones[2][0].start_note = 1;
-        source.bank.channel_zones[2][0].instrument = 0;
-        const uint32_t length                      = Synth::encode_editor_bank_json(&source, text, sizeof(text));
-        text[length]                               = 0;
-        TEST(strstr(text, "\"enabled\"") == nullptr);
-        TEST(Synth::decode_editor_bank_json(text, length, &decoded));
-        TEST(decoded.bank.channel_enabled[2] == 1);
-        TEST(decoded.bank.channel_zones[2][0].start_note == 1);
-        m = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
-        TEST(m == length && memcmp(text, again, length) == 0);
-    }
+    for (uint32_t c = 0; c < Synth::max_channels; ++c)
+        source.bank.channel_enabled[c] = 1;
+    source.bank.channel_zones[2][0].start_note = 1;
+    source.bank.channel_zones[2][0].instrument = 0;
+    const uint32_t content_length              = Synth::encode_editor_bank_json(&source, text, sizeof(text));
+    text[content_length]                       = 0;
+    TEST(strstr(text, "\"enabled\"") == nullptr);
+    TEST(Synth::decode_editor_bank_json(text, content_length, &decoded));
+    TEST(decoded.bank.channel_enabled[2] == 1);
+    TEST(decoded.bank.channel_zones[2][0].start_note == 1);
+    m = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
+    TEST(m == content_length && memcmp(text, again, content_length) == 0);
+    for (uint32_t c = 0; c < Synth::max_channels; ++c)
+        source.bank.channel_enabled[c] = 0;
     const char* implicit_enabled =
         "{\"instrument_editor_bank\":{\"format\":\"synth-bank-v2\",\"instruments\":[{\"id\":1,\"layers\":[{\"wave_a\":\"sine\"}]}],"
         "\"channels\":[{},{\"zones\":[{\"start\":0,\"instrument\":1}]},{\"zones\":[{\"start\":0,\"instrument\":1}]}]}}";
@@ -5721,13 +5721,17 @@ static void portability_bank_omission_cleanup()
     TEST(Synth::decode_editor_bank_json(absent, static_cast<uint32_t>(strlen(absent)), &decoded));
     TEST(decoded.bank.instruments.entries[0].layer_count == 0);
 
-    // A custom name, disabled zone, disconnected effects and bypass are authored state.
+    // A custom name, zones, disconnected effects and the bypass wire are
+    // authored state on enabled channels.
+    source.bank.channel_enabled[0] = 1;
+    source.bank.channel_enabled[1] = 1;
+    source.bank.channel_enabled[2] = 1;
     memcpy(source.channel_names[0], "Custom", 7);
     source.bank.channel_zones[1][0].start_note = 1;
     source.bank.channel_zones[1][0].instrument = 0;
     source.bank.channel_chains[2].num_effects  = 1;
     Sculptor::fx_init_slot(&source.bank.channel_chains[2], 0, Synth::EffectType::delay);
-    source.effect_routing[3].in = Sculptor::effect_in_output;
+    source.effect_routing[1].in = Sculptor::effect_in_output;
     for (uint32_t master = 0; master < 3; ++master) {
         source.bank.master_chain                   = {};
         source.effect_routing[Synth::max_channels] = {};

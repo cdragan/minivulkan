@@ -685,6 +685,9 @@ static void effects_structural_regressions()
     remove(library_path);
     loaded = source;
     memset(static_cast<void*>(loaded.bank.channel_enabled), 0, sizeof(loaded.bank.channel_enabled));
+    // The entry lives on channel 0: content implies enabled, so the record
+    // payload keeps the zones and chain.
+    loaded.bank.channel_enabled[0] = 1;
     for (uint32_t owner = 1; owner < Synth::max_channels; ++owner) {
         memset(static_cast<void*>(loaded.bank.channel_zones[owner]), 0, sizeof(loaded.bank.channel_zones[owner]));
     }

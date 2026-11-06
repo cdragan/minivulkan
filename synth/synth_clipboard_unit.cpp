@@ -5252,15 +5252,28 @@ static void check_channel_category_persistence()
     Synth::channel_categories_from_bank(&categories, source);
     TEST(categories.names[3][Synth::library_category_len - 1] == 0);
 
-    // Interior and trailing category-only channels retain their positions.
+    // Interior and trailing category-only channels retain their positions in
+    // the document.  The category key is not content, so decode keeps the
+    // channel disabled; the next encode then stores the channel as empty.
     reset();
+    source.bank.channel_enabled[3]                   = 1;
+    source.bank.channel_enabled[Synth::max_channels - 1] = 1;
     strcpy(source.channel_category[3], "Strings");
     strcpy(source.channel_category[Synth::max_channels - 1], "12345678901234567890123");
-    round_trip();
+    const uint32_t category_count = Synth::encode_editor_bank_json(&source, text.elements, capacity);
+    TEST(category_count > 0);
+    text.elements[category_count] = 0;
+    TEST(strstr(text.elements, "\"category\":\"Strings\"") != nullptr);
+    TEST(strstr(text.elements, "\"category\":\"12345678901234567890123\"") != nullptr);
+    TEST(Synth::decode_editor_bank_json(text.elements, category_count, &decoded));
     TEST(strcmp(decoded.channel_category[3], "Strings") == 0);
     TEST(strcmp(decoded.channel_category[Synth::max_channels - 1], "12345678901234567890123") == 0);
     TEST(decoded.bank.channel_enabled[3] == 0);
     TEST(decoded.bank.channel_enabled[Synth::max_channels - 1] == 0);
+    const uint32_t category_again = Synth::encode_editor_bank_json(&decoded, text.elements + capacity, capacity);
+    TEST(category_again > 0);
+    text.elements[capacity + category_again] = 0;
+    TEST(strstr(text.elements + capacity, "\"category\"") == nullptr);
 
     // A channel with a zone stays enabled.
     reset();
@@ -5273,6 +5286,7 @@ static void check_channel_category_persistence()
 
     // The encoder escapes usable text and canonicalizes its padding.
     reset();
+    Synth::init_default_bank(&source.bank);
     strcpy(source.channel_category[0], "Quote\" slash\\ tab\t");
     memset(source.channel_category[0] + strlen(source.channel_category[0]) + 1,
            'x',
@@ -5284,6 +5298,7 @@ static void check_channel_category_persistence()
     // Unencodable category bytes must not refuse a whole-bank save.
     for (uint32_t bad = 0; bad < 2; ++bad) {
         reset();
+        Synth::init_default_bank(&source.bank);
         if (bad == 0) {
             source.channel_category[0][0] = static_cast<char>(0xc3);
             source.channel_category[0][1] = '(';
@@ -5329,6 +5344,7 @@ static void check_channel_category_persistence()
     // Save and reload the category through the file API.
     reset();
     strcpy(source.channel_category[3], "Strings");
+    source.bank.channel_enabled[3] = 1;
     const char* path = "Out/synth_channel_category_persistence.tmp";
     TEST(Synth::save_editor_bank_file(path, &source) == 0);
     TEST(Synth::load_editor_bank_file(path, &decoded) == Synth::BankFileStatus::ok);

@@ -943,6 +943,9 @@ int Synth::save_library_record(const char* const                        path,
         if (! transfer_zone_layout(*src_editor_bank, channel, zone, env_ids, lfo_ids, 0, &reduced))
             return EINVAL;
     }
+
+    reduced.bank.channel_enabled[0] = 1;
+
     if (! Sculptor::transfer_effect_layout(src_editor_bank, channel, lfo_ids, 0, &reduced) ||
         ! Synth::validate_instrument_bank(&reduced.bank) || ! Sculptor::validate_editor_metadata(reduced))
         return EINVAL;
