@@ -26,9 +26,12 @@ public:
     // Per-frame work that must run even when the editor is disabled: publish
     // pumping.  Called before the editors loop.
     void delayed_updates();
+
     bool allocate_resources() override;
 
     void free_resources() override;
+
+    void shutdown() override;
 
     bool draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx) override;
 

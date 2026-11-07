@@ -11,6 +11,15 @@
 #include "../core/d_printf.h"
 #include <time.h>
 
+#if __MAC_OS_X_VERSION_MIN_REQUIRED < 150000
+#   include <dispatch/dispatch.h>
+#   include <atomic>
+#   include <sched.h>
+
+static CVDisplayLinkRef display_link;
+static std::atomic_flag draw_active = ATOMIC_FLAG_INIT;
+#endif
+
 struct Window {
     CAMetalLayer* layer;
 };
@@ -55,8 +64,6 @@ uint64_t get_current_time_ms()
         NSSize           m_size;
 #if __MAC_OS_X_VERSION_MIN_REQUIRED >= 150000
         CADisplayLink   *m_display_link;
-#else
-        CVDisplayLinkRef m_display_link;
 #endif
     }
 
@@ -96,8 +103,8 @@ uint64_t get_current_time_ms()
         init_os_gui(self.view);
 
 #if __MAC_OS_X_VERSION_MIN_REQUIRED < 150000
-        CVDisplayLinkCreateWithActiveCGDisplays(&m_display_link);
-        CVDisplayLinkSetOutputCallback(m_display_link, &display_link_callback, (__bridge void *)self.view);
+        CVDisplayLinkCreateWithActiveCGDisplays(&display_link);
+        CVDisplayLinkSetOutputCallback(display_link, &display_link_callback, (__bridge void *)self.view);
 #endif
     }
 
@@ -109,7 +116,11 @@ uint64_t get_current_time_ms()
         init_os_gui_frame(view);
 
         if ( ! draw_frame()) {
+#if __MAC_OS_X_VERSION_MIN_REQUIRED >= 150000
             [NSApp terminate: nil];
+#else
+            dispatch_async(dispatch_get_main_queue(), ^{ [NSApp terminate: nil]; });
+#endif
             return false;
         }
 
@@ -147,18 +158,19 @@ uint64_t get_current_time_ms()
 #else
     - (void)dealloc
     {
-        CVDisplayLinkRelease(m_display_link);
+        CVDisplayLinkRelease(display_link);
+        display_link = nullptr;
         [super dealloc];
     }
 
     - (void)viewDidAppear
     {
-        CVDisplayLinkStart(m_display_link);
+        CVDisplayLinkStart(display_link);
     }
 
     - (void)viewWillDisappear
     {
-        CVDisplayLinkStop(m_display_link);
+        CVDisplayLinkStop(display_link);
     }
 
     static CVReturn display_link_callback(CVDisplayLinkRef   displayLink,
@@ -168,7 +180,12 @@ uint64_t get_current_time_ms()
                                           CVOptionFlags     *flagsOut,
                                           void              *target)
     {
-        return draw_callback((__bridge NSView *)target) ? kCVReturnSuccess : kCVReturnError;
+        if (draw_active.test_and_set(std::memory_order_acquire))
+            return kCVReturnSuccess;
+
+        const bool drawn = draw_callback((__bridge NSView *)target);
+        draw_active.clear(std::memory_order_release);
+        return drawn ? kCVReturnSuccess : kCVReturnError;
     }
 #endif
 
@@ -286,6 +303,14 @@ uint64_t get_current_time_ms()
 
     - (void)applicationWillTerminate: (NSNotification *)notification
     {
+#if __MAC_OS_X_VERSION_MIN_REQUIRED < 150000
+        if (display_link)
+            CVDisplayLinkStop(display_link);
+
+        // Wait for drawing to finish
+        while (draw_active.test_and_set(std::memory_order_acquire))
+            sched_yield();
+#endif
         deinit_vulkan();
     }
 

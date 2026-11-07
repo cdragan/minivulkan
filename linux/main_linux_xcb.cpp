@@ -159,7 +159,7 @@ static bool create_window(Window* w)
 
 static int event_loop(Window* w)
 {
-    bool quit = false;
+    int quit = 0;
 
     while ( ! quit) {
 
@@ -177,7 +177,7 @@ static int event_loop(Window* w)
 
                     constexpr uint8_t keycode_esc = 9;
                     if (key_event->detail == keycode_esc)
-                        quit = true;
+                        quit = 1;
 
                     handle_key_press(event);
                     break;
@@ -187,7 +187,7 @@ static int event_loop(Window* w)
                     xcb_client_message_event_t* const client_event =
                         reinterpret_cast<xcb_client_message_event_t*>(event);
                     if (client_event->data.data32[0] == atom_wm_delete_window->atom)
-                        quit = true;
+                        quit = 1;
                     break;
                 }
 
@@ -201,12 +201,13 @@ static int event_loop(Window* w)
             continue;
 
         if ( ! draw_frame())
-            return 1;
+            quit = 2;
     }
 
     deinit_vulkan();
 
-    return 0;
+    assert(quit > 0);
+    return quit - 1;
 }
 
 int main()

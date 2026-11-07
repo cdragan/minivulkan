@@ -163,6 +163,7 @@ bool Sculptor::derive_generator_title(const char* const* labels,
 
 #    include "../core/d_printf.h"
 #    include "../core/gui_imgui.h"
+#    include "../core/minivulkan.h"
 #    include "../core/vmath.h"
 #    include "../thirdparty/imgui/src/imgui_internal.h"
 #    include <math.h>
@@ -273,17 +274,15 @@ static Synth::BankUpdateQueue bank_queue;
 static bool                  bank_changes_pending = false;
 static Synth::InstrumentBank pending_bank;
 
-// The disk save follows the audible publish a couple of frames behind, so a
-// mid-drag stream of publishes never queues file writes.  A crash can lose
-// the unsaved tail of an unfinished gesture; the next full save after the
-// gesture recovers the file.
-// A good load, an explicit save, or an absent file arms auto-save.  With no
-// user state on disk to protect, the first frames save the default bank.
-// A present-but-invalid or oversized file keeps auto-save disarmed so the
-// default bank never silently overwrites it.
-static bool     save_pending         = false;
-static bool     bank_auto_save_armed = false;
-static uint32_t frames_since_publish = 0;
+// The first edit arms a 30 s checkpoint.  Later edits do not reset it.
+// The timer uses get_current_time_ms(), independent of the GUI frame clock.
+// Dirty bank content saves at the checkpoint or at quit.  Startup never saves.
+// Only a good load or an absent file arms auto-save.  An invalid or oversized
+// file stays protected for the whole session, including after a library save.
+constexpr uint64_t bank_save_checkpoint_delay_ms = 30000;
+static bool        save_pending                  = false;
+static bool        bank_auto_save_armed          = false;
+static uint64_t    save_arm_time_ms              = 0;
 
 // The oscillator graph editor: one widget instance plus its mapping, kept in
 // step with the committed bank by re-projection (selection change, undo/redo,
@@ -461,6 +460,46 @@ static float       projected_height[Sculptor::max_nodes];
 
 static const char bank_state_path[] = "assets/instrument_bank.synth";
 
+// GUI-thread-only serialized baselines.  Match the writer's staging capacity.
+constexpr uint32_t bank_text_capacity = 1024 * 1024;
+static char        saved_json[bank_text_capacity];
+static char        probe_json[bank_text_capacity];
+static uint32_t    saved_json_len = 0;
+
+enum class BankBaseline {
+    unknown_file,
+    absent_file,
+    snapshot
+};
+
+static BankBaseline bank_baseline = BankBaseline::unknown_file;
+
+static void save_bank_if_dirty()
+{
+    if (! bank_auto_save_armed || bank_baseline == BankBaseline::unknown_file)
+        return;
+
+    const uint32_t len = Synth::encode_editor_bank_json(&instr_bank, probe_json, sizeof(probe_json));
+    if (bank_baseline == BankBaseline::snapshot && len != 0 && saved_json_len != 0 && len == saved_json_len &&
+        memcmp(probe_json, saved_json, len) == 0)
+        return;
+
+    const int save_error = Synth::save_editor_bank_file(bank_state_path, &instr_bank);
+    if (save_error) {
+        Sculptor::notify_error("Synth: cannot write %s: %s", bank_state_path, strerror(save_error));
+        return;
+    }
+
+    if (len != 0) {
+        memcpy(saved_json, probe_json, len);
+        saved_json_len = len;
+        bank_baseline  = BankBaseline::snapshot;
+    }
+    else {
+        saved_json_len = 0;
+    }
+}
+
 static_assert(sizeof(Synth::BankUpdateQueue) <= 2 * sizeof(Synth::InstrumentBank) + 32);
 
 // Transactional command scratch: structural commands mutate this candidate, validate it,
@@ -482,12 +521,14 @@ static uint8_t                      undo_buf[(sizeof(Synth::InstrumentEditorBank
 static_assert(sizeof(undo_buf) <= undo_depth * (sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)));
 
 // Banks: ten undo snapshots, editable/candidate/undo scratch, library record/candidate/save,
-// JSON decode and clipboard candidate.  Runtime, pending publish and clipboard
+// JSON decode and clipboard candidate, plus two 1 MiB save-comparison buffers.
+// Runtime, pending publish and clipboard
 // model validation each own a distinct InstrumentBank; the queue owns two more.
 constexpr size_t editor_resident_state_bytes =
     sizeof(effect_publish_failure) + 2 * sizeof(Synth::InstrumentEditorBank) + 3 * sizeof(Synth::EffectsDocument) +
     (undo_depth + 8) * sizeof(Synth::InstrumentEditorBank) + 3 * sizeof(Synth::InstrumentBank) + sizeof(bank_queue) +
     Synth::bank_json_parser_bytes +                            // JSON text, tokens and keys
+    2 * bank_text_capacity +                                   // loaded/last-written text and live dirty probe
     bank_json_id_scratch_bytes +                               // private codec file-id tables and raw locators
     sizeof(Sculptor::SynthEditor) +                            // includes the browser's entry/category arrays
     Synth::library_max_records * sizeof(Synth::LibraryEntry) + // library rewrite index
@@ -513,14 +554,12 @@ constexpr size_t editor_resident_state_bytes =
     2 * Synth::instrument_max_lfos * sizeof(Synth::LFODescriptor) +
     4 * Synth::instrument_graph_layout_capacity * sizeof(Synth::InstrumentGraphLayout) +
     4096; // remaining editor scalar flags, constants and alignment
-static_assert(editor_resident_state_bytes <=
-              130 * 1024 * 1024); // per-bank driver: the oscillator graph pre-provisions thirty-one
-                                  // 12-slot target blocks per node (max_node_slots 397), which
-                                  // grows sizeof(Graph); the resident total stays below the
-                                  // 130 MiB assert.  The per-zone source rows contribute 20 live
-                                  // InstrumentEditorBank copies x max_channels x
-                                  // max_instr_per_channel x Synth::max_layers bytes; the assert
-                                  // tracks it through sizeof(InstrumentEditorBank).
+// The two 1 MiB serialized-text dirty-tracking buffers exceed the old 130 MiB
+// bound.  The user-approved 140 MiB cap leaves about 9.16 MiB of headroom.
+// The oscillator graph pre-provisions thirty-one 12-slot target blocks per
+// node (max_node_slots 397).  The twenty live InstrumentEditorBank copies
+// include per-zone source rows; sizeof(InstrumentEditorBank) accounts for them.
+static_assert(editor_resident_state_bytes <= 140 * 1024 * 1024);
 
 // Synth info panel data. The declaration in sculptor_instr_edit.h describes
 // what the panel shows; the synth runtime only exposes raw data.
@@ -1950,9 +1989,11 @@ static bool publish_edited_bank()
 
     // The queue push is the last step on the sound path: the audio thread
     // consumes this bank at its next step, mid-drag frames included.  The
-    // file save trails in delayed_updates, off this path.
-    save_pending         = true;
-    frames_since_publish = 0;
+    // file save waits for the 30 s checkpoint, off this path.
+    if (! save_pending) {
+        save_pending     = true;
+        save_arm_time_ms = get_current_time_ms();
+    }
 
     return pump_bank_publish();
 }
@@ -2091,6 +2132,7 @@ static bool load_editor_bank(const char* path)
 
     if (status == Synth::BankFileStatus::absent) {
         bank_auto_save_armed = true;
+        bank_baseline        = BankBaseline::absent_file;
         return false;
     }
 
@@ -2117,7 +2159,10 @@ static bool load_editor_bank(const char* path)
     osc_graph_reproject  = true;
     fx_graph_reproject   = true;
     bank_auto_save_armed = true;
-    return publish_edited_bank();
+    bank_baseline        = BankBaseline::snapshot;
+    const bool published = publish_edited_bank();
+    save_pending         = false;
+    return published;
 }
 
 static void init_editor()
@@ -2144,6 +2189,7 @@ static void init_editor()
         Synth::get_default_channel_name(channel, instr_bank.channel_names[channel], Synth::max_name_len);
 
     publish_edited_bank();
+    save_pending = false;
 }
 
 static uint32_t zone_count(const Synth::InstrumentBank& bank, uint32_t channel)
@@ -2516,8 +2562,20 @@ bool Sculptor::SynthEditor::allocate_resources()
         editor_bank_initialized = true;
         init_editor();
         Synth::channel_categories_from_bank(&channel_categories, instr_bank);
+        Synth::channel_categories_to_bank(channel_categories, &instr_bank);
+        if (bank_baseline == BankBaseline::snapshot)
+            saved_json_len = Synth::encode_editor_bank_json(&instr_bank, saved_json, sizeof(saved_json));
     }
     return true;
+}
+
+void Sculptor::SynthEditor::shutdown()
+{
+    if (! editor_bank_initialized || ! bank_auto_save_armed)
+        return;
+
+    Synth::channel_categories_to_bank(channel_categories, &instr_bank);
+    save_bank_if_dirty();
 }
 
 void Sculptor::SynthEditor::delayed_updates()
@@ -2526,21 +2584,17 @@ void Sculptor::SynthEditor::delayed_updates()
     // enabled flag: a disabled editor must still publish pending banks.
     pump_bank_publish();
 
-    if (editor_bank_initialized && Synth::channel_categories_to_bank(channel_categories, &instr_bank)) {
-        save_pending         = true;
-        frames_since_publish = 0;
+    if (editor_bank_initialized && Synth::channel_categories_to_bank(channel_categories, &instr_bank) &&
+        ! save_pending) {
+        save_pending     = true;
+        save_arm_time_ms = get_current_time_ms();
     }
 
-    if (save_pending && bank_auto_save_armed) {
-        // Publishes happen during the GUI frame; two passes without a new
-        // publish mean the edit gesture ended, and the bank goes to disk.
-        ++frames_since_publish;
-        if (frames_since_publish >= 2) {
-            save_pending         = false;
-            const int save_error = Synth::save_editor_bank_file(bank_state_path, &instr_bank);
-            if (save_error)
-                Sculptor::notify_error("Synth: cannot write %s: %s", bank_state_path, strerror(save_error));
-        }
+    // Check once, 30 s after the first edit, using the real clock.
+    // An unchanged bank writes nothing.  The next edit starts a new window.
+    if (save_pending && get_current_time_ms() - save_arm_time_ms >= bank_save_checkpoint_delay_ms) {
+        save_bank_if_dirty();
+        save_pending = false;
     }
 }
 
@@ -4813,8 +4867,6 @@ bool Sculptor::SynthEditor::finish_library_save(const char* category, const char
                                    library_path);
         return false;
     }
-    bank_auto_save_armed = true;
-
     snprintf(save_category, sizeof(save_category), "%s", category);
     Synth::channel_category_set(&channel_categories, library_channel, category);
 

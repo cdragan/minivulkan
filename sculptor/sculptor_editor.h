@@ -40,6 +40,8 @@ class Editor {
         virtual bool create_gui_frame(uint32_t image_idx, bool* need_realloc, const UserInput& input) = 0;
         virtual bool allocate_resources() = 0;
         virtual void free_resources() = 0;
+        virtual void shutdown() { }
+
         virtual bool draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx) = 0;
 
         void capture_mouse();

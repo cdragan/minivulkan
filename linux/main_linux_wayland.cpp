@@ -103,7 +103,7 @@ static void handle_toplevel_configure(void*         data,
 static void handle_toplevel_close(void*         data,
                                   xdg_toplevel* toplevel)
 {
-    static_cast<Window*>(data)->quit = true;
+    static_cast<Window*>(data)->quit = 1;
 }
 
 static void handle_keymap(void*        data,
@@ -138,11 +138,9 @@ static void handle_key(void*        data,
                        uint32_t     key,
                        uint32_t     state)
 {
-    Window* const w = static_cast<Window*>(data);
-
     if (state == WL_KEYBOARD_KEY_STATE_PRESSED) {
         if (key == 1) // Esc
-            w->quit = true;
+            handle_toplevel_close(data, nullptr);
         else
             handle_wl_key_press(key);
     }
@@ -394,12 +392,12 @@ static int event_loop(Window* w)
             continue;
 
         if ( ! draw_frame())
-            return 1;
+            break;
     }
 
     deinit_vulkan();
 
-    return 0;
+    return 1 - w->quit;
 }
 
 int main()

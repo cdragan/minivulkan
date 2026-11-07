@@ -26,7 +26,7 @@ struct Window {
     wl_keyboard*   keyboard;
     xdg_wm_base*   wm_base;
     WaylandCursors cursors;
-    bool           quit;
+    int            quit;
 };
 
 bool init_wl_gui(Window* w);

@@ -136,6 +136,9 @@ bool init_assets()
 
 void deinit_assets()
 {
+    for (Sculptor::Editor* editor : editors)
+        editor->shutdown();
+
     Synth::stop_synth();
 }
 

@@ -57,7 +57,7 @@ static void decor_configure(libdecor_frame*         frame,
 static void decor_close(libdecor_frame* frame,
                         void*           user_data)
 {
-    *static_cast<bool*>(user_data) = true;
+    *static_cast<int*>(user_data) = 1;
 }
 
 static void decor_commit(libdecor_frame* frame,
