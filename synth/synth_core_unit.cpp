@@ -342,18 +342,35 @@ static void check_core_inline_0()
             TEST(! Synth::sustain_decay_owns_termination(true, 0.0f));
             TEST(! Synth::sustain_decay_owns_termination(false, 0.5f));
             TEST(! Synth::sustain_decay_owns_termination(false, 0.0f));
+
+            // Nonzero dest values below -90 dB use the completion rule.
+            TEST(! Synth::sustain_decay_owns_termination(true, 1e-6f));
+            TEST(! Synth::sustain_decay_owns_termination(true, -1e-6f));
+            TEST(! Synth::sustain_decay_owns_termination(true, 1e-8f));
+            TEST(! Synth::sustain_decay_owns_termination(true, 3.0e-5f));
+
+            // Audible dest values include both exclusive band boundaries.
+            TEST(Synth::sustain_decay_owns_termination(true, 0.15f));
+            TEST(Synth::sustain_decay_owns_termination(true, 1e-3f));
+            TEST(Synth::sustain_decay_owns_termination(true, -0.5f));
+            TEST(Synth::sustain_decay_owns_termination(true, 3.2e-5f));
+            TEST(Synth::sustain_decay_owns_termination(true, Synth::sustain_decay_inaudible_level));
+            TEST(Synth::sustain_decay_owns_termination(true, -Synth::sustain_decay_inaudible_level));
+
+            TEST(! Synth::sustain_decay_owns_termination(true, -0.0f));
+            TEST(! Synth::sustain_decay_owns_termination(false, 0.15f));
+            TEST(! Synth::sustain_decay_owns_termination(false, 1e-6f));
+            TEST(! Synth::sustain_decay_owns_termination(false, -0.5f));
+
+            // NaN keeps ownership to avoid an unsafe completion fade.
+            TEST(Synth::sustain_decay_owns_termination(true, NAN));
         }
 
-        // Instrument release without a volume envelope: decay-decision
-        // tests over a mirror of the engine's decision policy.
-        // realtime_synth.cpp is not linked into this unit, so these tests
-        // exercise only the modeled decision policy. These are NOT proof of
-        // the runtime fade or free behavior itself: the real fade block and
-        // voice freeing run in realtime_synth.cpp and are covered by the
-        // manual audio smoke.  The held-cutoff free path is also
-        // un-mirrored: volume_termination_due is release-only, so a held
-        // voice reaching the cutoff frees through the cutoff disjunct in
-        // the free condition, which this release-only model does not exercise.
+        // These tests model the engine's decay and termination decisions.
+        // realtime_synth.cpp is not linked into this unit.
+        // The model covers the releasing guard and the independent cutoff.
+        // It does not prove the runtime fade or slot-free behavior.
+        // The manual audio check covers those runtime operations.
         {
             struct MirrorOsc {
                 bool     decaying;
@@ -380,19 +397,37 @@ static void check_core_inline_0()
                     osc->decay_factor *= osc->decay_mult;
                 }
             };
-            // Mirrors volume_termination_due's gate order: the decay gate
-            // precedes the no-envelope early return, so a mid-decay note-off
-            // keeps decaying while the dest level is audible.
-            auto termination_due = [](const MirrorOsc& osc, float dest_value, uint32_t release_ticks) {
+
+            // Mirrors the free condition of the real caller, in the real condition order.
+            // The completion path is guarded by the releasing flag.
+            // The cutoff disjunct is independent of the releasing flag.
+            auto termination_due = [](const MirrorOsc& osc,
+                                      float            dest_value,
+                                      uint32_t         release_ticks,
+                                      bool             releasing        = true,
+                                      bool             has_envelope     = false,
+                                      uint32_t         last_point_ticks = 0) {
+                const bool cutoff_reached = osc.decaying && osc.decay_tick >= release_ticks;
+
+                if (cutoff_reached) {
+                    return true;
+                }
+
+                if (! releasing) {
+                    return false;
+                }
+
                 if (release_ticks && osc.decaying) {
-                    if (osc.decay_tick >= release_ticks) {
-                        return true;
-                    }
                     if (Synth::sustain_decay_owns_termination(osc.decaying, dest_value)) {
                         return false;
                     }
                 }
-                return true; // no envelope: the early return owns the rest
+
+                if (! has_envelope) {
+                    return true;
+                }
+
+                return last_point_ticks >= 2;
             };
 
             // (a) Hold a note with no envelope and release > 0: the volume
@@ -459,6 +494,60 @@ static void check_core_inline_0()
                 }
                 TEST(osc.decaying && osc.decay_tick == 9);
                 TEST(termination_due(osc, 0.0f, total_ticks));
+            }
+
+            // A held voice cannot enter the completion path before the cutoff.
+            {
+                const MirrorOsc osc                   = { true, total_ticks - 1, 1.0f, mult };
+                const float     audible_dest_values[] = { 0.8f, 0.15f, 1e-3f, -0.5f };
+
+                for (const float dest_value : audible_dest_values) {
+                    TEST(! termination_due(osc, dest_value, total_ticks, false, true, 2));
+                    TEST(! termination_due(osc, dest_value, total_ticks, false));
+                }
+
+                const float inaudible_dest_values[] = { 0.0f, 1e-6f, -1e-6f };
+
+                for (const float dest_value : inaudible_dest_values) {
+                    TEST(! termination_due(osc, dest_value, total_ticks, false, true, 2));
+                    TEST(! termination_due(osc, dest_value, total_ticks, false));
+                }
+            }
+
+            // A released dest below -90 dB uses the envelope-completion rule.
+            {
+                const MirrorOsc osc = { true, total_ticks - 1, 1.0f, mult };
+
+                TEST(termination_due(osc, 1e-6f, total_ticks, true, true, 2));
+                TEST(termination_due(osc, -1e-6f, total_ticks, true, true, 2));
+                TEST(termination_due(osc, 0.0f, total_ticks, true, true, 2));
+                TEST(termination_due(osc, 1e-6f, total_ticks, true));
+
+                // A mid-envelope dip must not end the envelope before it parks.
+                TEST(! termination_due(osc, 1e-6f, total_ticks, true, true, 0));
+                TEST(! termination_due(osc, 1e-6f, total_ticks, true, true, 1));
+            }
+
+            // Audible released dest values obey the decay, with or without an envelope.
+            {
+                const MirrorOsc osc                   = { true, total_ticks - 1, 1.0f, mult };
+                const float     audible_dest_values[] = { 0.8f, 0.15f, 1e-3f, -0.5f, 3.2e-5f };
+
+                for (const float dest_value : audible_dest_values) {
+                    TEST(! termination_due(osc, dest_value, total_ticks, true, true, 2));
+                }
+
+                TEST(! termination_due(osc, 0.15f, total_ticks, true));
+            }
+
+            // The cutoff ends held and released voices independently of completion.
+            {
+                const MirrorOsc osc = { true, total_ticks, Synth::sustain_decay_cutoff, mult };
+
+                TEST(termination_due(osc, 0.8f, total_ticks, false));
+                TEST(termination_due(osc, 0.8f, total_ticks, false, true, 0));
+                TEST(termination_due(osc, 0.15f, total_ticks, true));
+                TEST(termination_due(osc, 0.15f, total_ticks, true, true, 0));
             }
         }
     }

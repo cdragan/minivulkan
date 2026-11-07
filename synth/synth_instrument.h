@@ -74,11 +74,19 @@ struct ModInput {
 
 static_assert(sizeof(ModInput) == 8);
 
-// One layer's complete binding for a single modulation target: a base value plus the MIDI input
-// sources combined onto it (each added or multiplied per its op), then this layer's own envelope and
-// LFO generators (with sourceable depth and rate) combining on top.  Each layer instantiates its own
-// generators, so layers that name the same descriptor id evaluate identically and in phase (the
-// generators are deterministic in the tick).  No runtime state.
+// One layer's complete binding for a single modulation target.
+// The base value comes first.
+// This layer's envelope contribution is added next, scaled by envelope_depth.
+// The LFO is combined next, per lfo_op.
+// For volume the LFO is a tremolo multiply.
+// The MIDI input sources are applied last.
+// Each source is added or multiplied per its op.
+// An example is (base + envelope) * tremolo * velocity.
+// The envelope and LFO generators have sourceable depth and rate.
+// Each layer instantiates its own generators.
+// Layers that name the same descriptor id evaluate identically and in phase.
+// The generators are deterministic in the tick.
+// There is no runtime state.
 struct TargetBinding {
     float    base_value;
     float    lfo_depth;

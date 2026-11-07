@@ -336,6 +336,12 @@ float random_pitch_skew(RNG* rng, float amount_semitones);
 // -60 dB (log2 == -10 exactly).
 constexpr float sustain_decay_cutoff = 1.0f / 1024.0f;
 
+// Volume magnitude below which an oscillator counts as inaudible.
+// This is about -90 dB (10^(-90/20)).
+// A decaying oscillator with a completed dest value inside
+// (-level, +level) does not own its termination.
+constexpr float sustain_decay_inaudible_level = 3.1622777e-5f;
+
 // Converts an instrument release in seconds to control-step ticks
 // (rt_step_samples * 1000 / rt_sampling_rate per step).  Values > 0 round to
 // at least 1 tick; 0 (and negative or NaN input, which no decoded bank can
@@ -357,11 +363,15 @@ float sustain_decay_per_tick(uint32_t total_ticks);
 // uses it only as pow(10, -value * 3 * loop_length / (sample_rate * 0.05)).
 float string_release_damping_curve(float x);
 
-// Sustain-decay termination gate: true when the decay owns this
-// oscillator's termination and the envelope-completion fade must be
-// skipped (the completed dest level is still audible).  `decaying` is only
-// ever true for release-set oscillators, so a release of 0 never skips.
-// Exists as a pure predicate so the termination gating is unit-testable.
+// Sustain-decay termination gate.
+// True when the decay owns this oscillator's termination.
+// Then the envelope-completion fade is skipped.
+// The decay owns termination while the completed dest level is audible.
+// The completed dest combines base, envelope, LFO and routed inputs.
+// Audible means the magnitude is at least sustain_decay_inaudible_level.
+// A dest inside (-level, +level), zero included, frees through the envelope-completion rule.
+// `decaying` is only ever true for release-set oscillators, so a release of 0 never skips.
+// This is a pure predicate so the termination gating is unit-testable.
 bool sustain_decay_owns_termination(bool decaying, float dest_value);
 
 // Resolves an LFO beat division to a period in ms at the current runtime tempo.

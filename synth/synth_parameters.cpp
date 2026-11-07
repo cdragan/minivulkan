@@ -584,10 +584,12 @@ float Synth::string_release_damping_curve(const float x)
 
 bool Synth::sustain_decay_owns_termination(const bool decaying, const float dest_value)
 {
-    // The decay owns termination only while the completed dest level is still
-    // audible; a silent dest frees through the existing completion rule
-    // (the factor times 0 is 0).
-    return decaying && dest_value != 0.0f;
+    // The decay owns termination only while the completed dest level is audible.
+    // A dest inside (-level, +level) is inaudible, and zero is included.
+    // It frees through the envelope-completion rule.
+    // NaN fails both comparisons, so it counts as audible.
+    // That keeps the decay in charge, which is the safe direction.
+    return decaying && ! (dest_value > -sustain_decay_inaudible_level && dest_value < sustain_decay_inaudible_level);
 }
 
 float Synth::oscillator_final_pitch(const int midi_note, const int octave_offset, const float pitch_value)
