@@ -3811,7 +3811,7 @@ static void decode_channel(Walker& w, uint32_t obj, Synth::InstrumentEditorBank*
         }
         else if (key_eq(w, key_idx, "zones"))
             walk_entries(w, val_idx, Synth::max_instr_per_channel, "zone", [&](uint32_t elem, uint32_t pos) {
-                DamageScope scope(damaged_zones[channel][pos]);
+                DamageScope zone_scope(damaged_zones[channel][pos]);
                 zone_present[channel][pos] = true;
                 decode_zone(w, elem, out->bank.channel_zones[channel][pos], file_zone_ids[channel][pos]);
                 if (w.lenient && ! out->bank.channel_zones[channel][pos].start_note)

@@ -6940,7 +6940,7 @@ static void resilience_legacy_rejected()
 
 static void resilience_read_source(const char* path, char* text, size_t capacity)
 {
-    FILE* const file = fopen(path, "rb");
+    FILE* const file = fopen(path, "r");
     TEST(file != nullptr);
     if (! file) {
         text[0] = 0;
