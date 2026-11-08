@@ -2543,8 +2543,8 @@ static void fir_effect_bands_regressions()
         TEST(entry.bands[2].gain == 0.0f); // the negative gain stages a zero-gain band
         TEST(entry.bands[2].window_span == Synth::fir_effective_span(33.0f));
         // A NaN gain reads as a zero gain, mirroring the oscillator's band loop.
-        band_params[11] = 0.0f;
-        band_params[11] = band_params[11] / band_params[11];
+        band_params[11] = NAN;
+
         TEST(Synth::stage_fir_effect_coeff_entry(9, 4, 8000.0f, 0.0f, 100.0f, band_params, &entry));
         TEST(entry.bands[2].gain == 0.0f);
         // Every band inactive: the entry drops so the taps keep their last kernel.

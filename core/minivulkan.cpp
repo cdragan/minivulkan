@@ -898,9 +898,9 @@ void begin_debug_label(VkCommandBuffer cmd_buf, uint32_t color, const char* labe
     VkDebugUtilsLabelEXT labelDesc = {};
     labelDesc.sType      = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
     labelDesc.pLabelName = labelBuf;
-    labelDesc.color[0]   = ((color >> 16) & 0xFFU) / 255.0f;
-    labelDesc.color[1]   = ((color >> 8) & 0xFFU) / 255.0f;
-    labelDesc.color[2]   = (color & 0xFFU) / 255.0f;
+    labelDesc.color[0]   = static_cast<float>((color >> 16) & 0xFFU) / 255.0f;
+    labelDesc.color[1]   = static_cast<float>((color >> 8) & 0xFFU) / 255.0f;
+    labelDesc.color[2]   = static_cast<float>(color & 0xFFU) / 255.0f;
     labelDesc.color[3]   = 1.0f;
 
     const auto vkCmdBeginDebugUtilsLabelEXT = VK_FUNCTION(vkCmdBeginDebugUtilsLabelEXT);
