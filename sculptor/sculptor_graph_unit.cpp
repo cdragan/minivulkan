@@ -456,13 +456,6 @@ static bool validator_rejects_all(void* user_data, Sculptor::Graph& graph, EndPo
     return false;
 }
 
-// sizeof(Graph) exceeds the 8 MiB main-thread stack under AddressSanitizer,
-// so the fixture graph lives in heap storage rooted at these globals.  The
-// pristine copy restores the value-initialized state that the former
-// inline member provided on every fixture construction.
-static Graph& fixture_graph  = *new Graph{};
-static Graph& pristine_graph = *new Graph{};
-
 struct TwoNodeFixture {
     Graph&   graph;
     uint32_t node_a;
@@ -472,9 +465,8 @@ struct TwoNodeFixture {
     EndPoint output_end;
     EndPoint input_end;
 
-    TwoNodeFixture() : graph(fixture_graph)
+    TwoNodeFixture() : graph(reset_unit_graph(0))
     {
-        graph               = pristine_graph;
         node_a              = graph.create_node("a", vmath::vec2(0.0f, 0.0f));
         node_b              = graph.create_node("b", vmath::vec2(0.0f, 0.0f));
         Slot out_slot       = {};
