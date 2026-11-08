@@ -10,3 +10,12 @@
 std::variant<FILE*, int> atomic_write_begin(const char* file_path, char* staging_path, uint32_t staging_capacity);
 
 int atomic_write_commit(const char* file_path, const char* staging_path, FILE* staging_file);
+
+// Never replaces a destination.  A partial rename leaves two names for the
+// original inode, so callers must prohibit writes through either name.
+enum class RenameResult {
+    renamed,
+    failed,
+    renamed_partial
+};
+RenameResult rename_no_replace(const char* from, const char* to);

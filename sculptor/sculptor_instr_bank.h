@@ -193,6 +193,17 @@ void get_default_channel_name(uint32_t channel, char* out, uint32_t out_size);
 // while the editor's load path revalidates strictly, so unsupported waves
 // are still refused before anything reaches the runtime.
 bool validate_instrument_bank(const InstrumentBank* bank, bool check_lfo_waves = true);
+// Bank-independent entry checks used before salvage allocates a pool slot.
+bool salvage_envelope_valid(const EnvelopeDescriptor& envelope);
+bool salvage_lfo_valid(const LFODescriptor& lfo);
+bool salvage_instrument_valid(const Instrument& instrument);
+bool salvage_effect_chain_valid(const EffectChainBinding& chain, uint32_t num_lfos);
+void salvage_compact(InstrumentEditorBank* bank,
+                     const bool*           drop_instr,
+                     const bool*           drop_env,
+                     const bool*           drop_lfo,
+                     const bool*           drop_param,
+                     bool*                 layout_damage = nullptr);
 
 // Reclaims pool slots no live reference can reach: instruments referenced by no enabled
 // channel's zone table are removed, then descriptors referenced by no surviving instrument

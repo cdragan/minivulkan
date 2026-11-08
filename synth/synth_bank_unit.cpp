@@ -2,6 +2,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
 #include "synth_test_common.h"
+#include <errno.h>
+#include <sys/stat.h>
+#ifdef _WIN32
+#    include <process.h>
+#    define lstat stat
+#else
+#    include <dlfcn.h>
+#    include <fcntl.h>
+#    include <unistd.h>
+#endif
 
 // Exercise the editor helpers without linking the GUI-only editor dependencies.
 #define SCULPTOR_INSTR_EDIT_UNIT
@@ -5347,7 +5357,6 @@ static void portability_bank_graph_locators()
     }
     for (const char* record : { "{\"channel\":255,\"zone\":0,\"kind\":\"input\"}",
                                 "{\"channel\":0,\"zone\":0,\"kind\":\"input\",\"uid\":7}",
-                                "{\"channel\":0,\"zone\":0,\"kind\":\"lfo\",\"lfo_id\":23,\"uid\":0}",
                                 "{\"channel\":0,\"zone\":0,\"kind\":\"envelope\",\"envelope_id\":999,\"uid\":1}" }) {
         snprintf(editor, sizeof(editor), "{\"layouts\":[%s]}", record);
         TEST(! portability_decode_bank("", editor, &decoded));
@@ -5844,8 +5853,7 @@ static void portability_examples()
         const uint32_t b = Synth::encode_effects_json(&effects, encoded_again, sizeof(encoded_again));
         TEST(a == b && memcmp(encoded, encoded_again, a) == 0);
     }
-    for (const char* path :
-         { "doc/synth_instrument_example.json" }) {
+    for (const char* path : { "doc/synth_instrument_example.json" }) {
         const uint32_t n         = portability_read_fixture(path, text, sizeof(text));
         uint32_t       env_count = 0, lfo_count = 0, layout_count = 0;
         TEST(Synth::decode_instrument_json(text,
@@ -5864,12 +5872,10 @@ static void portability_examples()
     char        ignored[32][48];
     const char* missing = "{\"instrument_editor_bank\":{\"format\":\"synth-bank-v2\",\"lfos\":[{\"period_ms\":100}]}}";
     Synth::take_ignored_fields(ignored, 32);
-    TEST(Synth::decode_editor_bank_json(missing, static_cast<uint32_t>(strlen(missing)), &bank));
-    TEST(bank.bank.lfos.num_allocated == 0 && Synth::take_ignored_fields(ignored, 32) > 0);
+    TEST(! Synth::decode_editor_bank_json(missing, static_cast<uint32_t>(strlen(missing)), &bank));
     const char* dangling =
         "{\"instrument_editor_bank\":{\"lfos\":[{\"period_ms\":100}],\"master_chain\":{\"effects\":[{\"type\":\"delay\",\"params\":{\"time\":{\"lfo_desc_id\":1}}}]}}}";
-    TEST(Synth::decode_editor_bank_json(dangling, static_cast<uint32_t>(strlen(dangling)), &bank));
-    TEST(bank.bank.master_chain.effects[0].bindings[0].lfo_desc_id == 0);
+    TEST(! Synth::decode_editor_bank_json(dangling, static_cast<uint32_t>(strlen(dangling)), &bank));
     const char* high_id =
         "{\"instrument_editor_bank\":{\"instruments\":[{\"id\":65535,\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\",\"generators\":{\"volume\":{\"lfo_desc_id\":65535}}}]}],\"lfos\":[{\"id\":65535,\"wave\":\"sine\",\"period_ms\":100}],\"channels\":[{\"zones\":[{\"start\":0,\"instrument\":65535}]}],\"editor\":{\"layouts\":[{\"channel\":0,\"zone\":0,\"kind\":\"lfo\",\"lfo_id\":65535,\"uid\":1}]}}}";
     TEST(Synth::decode_editor_bank_json(high_id, static_cast<uint32_t>(strlen(high_id)), &bank));
@@ -6027,15 +6033,10 @@ static void portability_review_regressions()
     }
     const char* legacy =
         "{\"instrument_editor_bank\":{\"instruments\":[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\"}]}],\"lfos\":[{\"period_ms\":100}],\"channels\":[{\"enabled\":true,\"zones\":[{\"start\":0,\"instrument\":0}]}],\"master_chain\":{\"effects\":[{\"type\":\"delay\",\"params\":{\"time\":{\"lfo_desc_id\":1}}}]},\"editor\":{\"layouts\":[{\"kind\":\"lfo\",\"channel\":0,\"zone\":0,\"lfo_id\":1,\"uid\":1}]}}}";
-    TEST(Synth::decode_editor_bank_json(legacy, static_cast<uint32_t>(strlen(legacy)), &bank));
-    TEST(bank.bank.instruments.num_allocated == 0 && bank.bank.channel_zones[0][0].start_note == 0 &&
-         bank.bank.channel_enabled[0] == 0);
-    TEST(bank.graph_layout_count == 0 && bank.bank.master_chain.effects[0].bindings[0].lfo_desc_id == 0);
+    TEST(! Synth::decode_editor_bank_json(legacy, static_cast<uint32_t>(strlen(legacy)), &bank));
     const char* legacy_fx =
         "{\"format\":\"synth-effects-v3\",\"lfos\":[{\"period_ms\":100}],\"effects\":[{\"type\":\"fir\",\"fir_bands\":2,\"fir_band1\":{\"gain\":{\"lfo_desc_id\":1}}}],\"graph_layout\":[{\"kind\":\"lfo\",\"lfo_desc_id\":1,\"x\":0,\"y\":0}]}";
-    TEST(Synth::decode_effects_json(legacy_fx, static_cast<uint32_t>(strlen(legacy_fx)), &effects));
-    TEST(effects.lfo_count == 0 && effects.graph_layout_count == 0 &&
-         effects.chain.effects[0].fir_bands.bands[3].lfo_desc_id == 0);
+    TEST(! Synth::decode_effects_json(legacy_fx, static_cast<uint32_t>(strlen(legacy_fx)), &effects));
     const char* missing_zone_ref =
         "{\"instrument_editor_bank\":{\"instruments\":[{\"id\":1,\"layers\":[{\"wave_a\":\"sine\"}]}],\"channels\":[{\"enabled\":true,\"zones\":[{\"start\":0}]}]}}";
     TEST(Synth::decode_editor_bank_json(missing_zone_ref, static_cast<uint32_t>(strlen(missing_zone_ref)), &bank));
@@ -6045,9 +6046,1478 @@ static void portability_review_regressions()
                                    &bank));
 }
 
+// Damaged loads rename the original to .bak, then allow normal saves.  An
+// existing backup latches quit-only lockout; successful loads do not unlock it.
+static const char* const resilience_pools =
+    "\"instruments\":[{\"id\":41,\"name\":\"Lead\",\"layers\":[{\"wave_a\":\"sine\"},{\"wave_a\":\"sine\"}]}],"
+    "\"envelopes\":[{\"id\":19,\"num_points\":2,\"sustain_last\":1,\"points\":[{},{\"position\":100,\"value\":65535}]}],"
+    "\"lfos\":[{\"id\":23,\"wave\":\"sine\",\"period_ms\":300}],"
+    "\"channels\":[{\"name\":\"Performance\",\"zones\":[{\"start\":0,\"instrument\":41}]}]";
+
+struct ResilienceFiles {
+    char path[256];
+    char backup[272];
+
+    ResilienceFiles()
+    {
+        static uint32_t sequence = 0;
+#ifdef _WIN32
+        const int pid = _getpid();
+#else
+        const int pid = static_cast<int>(getpid());
+#endif
+        snprintf(path, sizeof(path), "synth_resilience_%d_%u.tmp", pid, sequence++);
+        snprintf(backup, sizeof(backup), "%s.bak", path);
+        Synth::BankGuard::reset();
+    }
+
+    ~ResilienceFiles()
+    {
+        remove(path);
+        remove(backup);
+        Synth::BankGuard::reset();
+    }
+};
+
+static void resilience_write(const char* path, const char* bytes, size_t size)
+{
+    FILE* const file = fopen(path, "wb");
+    TEST(file != nullptr);
+    if (! file)
+        return;
+    TEST(fwrite(bytes, 1, size, file) == size);
+    TEST(fclose(file) == 0);
+}
+
+static bool resilience_exists(const char* path)
+{
+    struct stat info;
+    return lstat(path, &info) == 0;
+}
+
+static bool resilience_bytes(const char* path, const char* bytes, size_t size)
+{
+    FILE* const file = fopen(path, "rb");
+    if (! file)
+        return false;
+    size_t pos   = 0;
+    bool   equal = true;
+    char   chunk[4096];
+    while (pos < size) {
+        const size_t count = size - pos < sizeof(chunk) ? size - pos : sizeof(chunk);
+        if (fread(chunk, 1, count, file) != count || memcmp(chunk, bytes + pos, count)) {
+            equal = false;
+            break;
+        }
+        pos += count;
+    }
+    equal = equal && fgetc(file) == EOF && ! ferror(file);
+    TEST(fclose(file) == 0);
+    return equal;
+}
+
+// Fixture fields are an object-body overlay.  Pool entries merge, structural
+// fields replace, and capacity fixtures replace their entire sized pool.
+static size_t resilience_value_end(const char* text, size_t pos)
+{
+    bool string = false;
+    bool escape = false;
+    int  depth  = 0;
+    for (; text[pos]; ++pos) {
+        const char c = text[pos];
+        if (string) {
+            if (escape)
+                escape = false;
+            else if (c == '\\')
+                escape = true;
+            else if (c == '"')
+                string = false;
+        }
+        else if (c == '"')
+            string = true;
+        else if (c == '[' || c == '{')
+            ++depth;
+        else if (c == ']' || c == '}') {
+            if (--depth == 0)
+                return pos + 1;
+        }
+        else if (c == ',' && depth == 0)
+            return pos;
+    }
+    return pos;
+}
+
+static const char* resilience_document(const char* fields,
+                                       const char* editor        = "{}",
+                                       bool        base          = true,
+                                       bool        replace_pools = false)
+{
+    static char text[1024 * 1024];
+    static char merged[1024 * 1024];
+
+    struct Field {
+        char        key[32];
+        const char* value;
+        size_t      length;
+    };
+
+    Field defaults[16] = {};
+    Field overlays[16] = {};
+    auto  parse        = [](const char* body, Field* dest) {
+        uint32_t count = 0;
+        size_t   pos   = 0;
+        while (body[pos] && count < 16) {
+            if (body[pos] == ',')
+                ++pos;
+            TEST(body[pos] == '"');
+            const size_t start = ++pos;
+            while (body[pos] && body[pos] != '"')
+                ++pos;
+            const size_t len = pos - start;
+            TEST(len < sizeof(dest[count].key));
+            memcpy(dest[count].key, body + start, len);
+            ++pos;
+            TEST(body[pos] == ':');
+            const size_t value = ++pos;
+            pos                = resilience_value_end(body, pos);
+            dest[count].value  = body + value;
+            dest[count].length = pos - value;
+            ++count;
+        }
+        return count;
+    };
+    const uint32_t a   = parse(base ? resilience_pools : "\"format\":\"synth-bank-v2\"", defaults);
+    const uint32_t b   = parse(fields, overlays);
+    size_t         pos = 0;
+    merged[0]          = 0;
+    for (uint32_t i = 0; i < a; ++i) {
+        const Field* replacement = nullptr;
+        for (uint32_t j = 0; j < b; ++j)
+            if (strcmp(defaults[i].key, overlays[j].key) == 0)
+                replacement = &overlays[j];
+        const bool pool = strcmp(defaults[i].key, "instruments") == 0 || strcmp(defaults[i].key, "envelopes") == 0 ||
+                          strcmp(defaults[i].key, "lfos") == 0 || strcmp(defaults[i].key, "parameters") == 0;
+        // A capacity fixture and a named remap fixture intentionally define the
+        // pool image, whereas invalid sibling fixtures append only their entry.
+        if (replacement && pool && ! replace_pools) {
+            pos += static_cast<size_t>(snprintf(merged + pos,
+                                                sizeof(merged) - pos,
+                                                "%s\"%s\":[%.*s,%.*s]",
+                                                pos ? "," : "",
+                                                defaults[i].key,
+                                                static_cast<int>(defaults[i].length - 2),
+                                                defaults[i].value + 1,
+                                                static_cast<int>(replacement->length - 2),
+                                                replacement->value + 1));
+        }
+        else {
+            const Field& f = replacement ? *replacement : defaults[i];
+            pos += static_cast<size_t>(snprintf(merged + pos,
+                                                sizeof(merged) - pos,
+                                                "%s\"%s\":%.*s",
+                                                pos ? "," : "",
+                                                f.key,
+                                                static_cast<int>(f.length),
+                                                f.value));
+        }
+    }
+    for (uint32_t j = 0; j < b; ++j) {
+        bool present = false;
+        for (uint32_t i = 0; i < a; ++i)
+            present |= strcmp(defaults[i].key, overlays[j].key) == 0;
+        if (! present)
+            pos += static_cast<size_t>(snprintf(merged + pos,
+                                                sizeof(merged) - pos,
+                                                "%s\"%s\":%.*s",
+                                                pos ? "," : "",
+                                                overlays[j].key,
+                                                static_cast<int>(overlays[j].length),
+                                                overlays[j].value));
+    }
+    const int n = snprintf(text, sizeof(text), "{\"instrument_editor_bank\":{%s,\"editor\":%s}}", merged, editor);
+    TEST(n > 0 && static_cast<size_t>(n) < sizeof(text));
+    return text;
+}
+
+// Every damaged-document case tests the failsafe and the next damaged launch,
+// not merely a decoder return code. The locked output is a byte sentinel.
+static void resilience_damage(const char*                  text,
+                              Synth::InstrumentEditorBank* out,
+                              Synth::BankLoadStatus        expected    = Synth::BankLoadStatus::salvaged,
+                              uint32_t                     exact_skips = 1)
+{
+    ResilienceFiles files;
+    const size_t    size = strlen(text);
+    resilience_write(files.path, text, size);
+    const Synth::BankLoadResult result = Synth::load_editor_bank_guarded(files.path, files.backup, out);
+    TEST(result.status == expected);
+    if (result.skipped != exact_skips)
+        fprintf(stderr, "Skip mismatch: expected %u got %u: %s\n", exact_skips, result.skipped, text);
+    TEST(result.skipped == exact_skips);
+    TEST(result.backup == Synth::BankBackupStatus::renamed);
+    TEST(! resilience_exists(files.path));
+    TEST(resilience_bytes(files.backup, text, size));
+    TEST(Synth::bank_save_allowed());
+    if (expected == Synth::BankLoadStatus::salvaged)
+        TEST(Synth::validate_instrument_bank(&out->bank, true));
+    char kinds[8][48] = {};
+    TEST(Synth::take_skipped_entries(kinds, 8) == exact_skips);
+    TEST(kinds[0][0] != 0);                           // identifying context, not just a total
+    TEST(Synth::take_skipped_entries(kinds, 8) == 0); // consumed/reset
+    struct stat before;
+    struct stat after;
+    TEST(lstat(files.backup, &before) == 0);
+    resilience_write(files.path, text, size);
+    static Synth::InstrumentEditorBank sentinel;
+    static Synth::InstrumentEditorBank snapshot;
+    memset(static_cast<void*>(&sentinel), 0x5a, sizeof(sentinel));
+    memcpy(&snapshot, &sentinel, sizeof(snapshot));
+    Synth::BankGuard::reset();
+    const Synth::BankLoadResult locked = Synth::load_editor_bank_guarded(files.path, files.backup, &sentinel);
+    TEST(locked.status == Synth::BankLoadStatus::locked);
+    TEST(locked.backup == Synth::BankBackupStatus::pre_existing);
+    TEST(memcmp(&sentinel, &snapshot, sizeof(sentinel)) == 0);
+    TEST(! Synth::bank_save_allowed());
+    TEST(Synth::save_editor_bank_file(files.path, out) != 0);
+    TEST(resilience_bytes(files.path, text, size));
+    TEST(resilience_bytes(files.backup, text, size));
+    TEST(lstat(files.backup, &after) == 0);
+    TEST(before.st_mtime == after.st_mtime);
+#ifdef __APPLE__
+    TEST(before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec);
+#elif ! defined(_WIN32)
+    TEST(before.st_mtim.tv_nsec == after.st_mtim.tv_nsec);
+#endif
+}
+
+static void resilience_clean(const char* text)
+{
+    ResilienceFiles                    files;
+    static Synth::InstrumentEditorBank bank;
+    resilience_write(files.path, text, strlen(text));
+    const Synth::BankLoadResult result = Synth::load_editor_bank_guarded(files.path, files.backup, &bank);
+    TEST(result.status == Synth::BankLoadStatus::ok && result.skipped == 0);
+    TEST(result.backup == Synth::BankBackupStatus::none);
+    TEST(resilience_bytes(files.path, text, strlen(text)));
+    TEST(! resilience_exists(files.backup));
+    TEST(Synth::bank_save_allowed());
+}
+
+template <typename P> static void resilience_compact(const P& pool, uint32_t capacity)
+{
+    for (uint32_t i = 0; i < capacity; ++i)
+        TEST(pool.is_occupied(i) == (i < pool.num_allocated));
+}
+
+static void resilience_partial_load()
+{
+    static Synth::InstrumentEditorBank bank;
+    // Each independently invalid entry must leave the healthy base bank intact.
+    for (const char* bad :
+         { "\"envelopes\":[{\"id\":20,\"num_points\":0}]",
+           "\"envelopes\":[{\"id\":20,\"points\":[{\"position\":20},{\"position\":10}]}]",
+           "\"lfos\":[{\"id\":24,\"wave\":\"sine\",\"period_ms\":0}]",
+           "\"lfos\":[{\"id\":24,\"wave\":\"none\",\"period_ms\":100}]",
+           "\"lfos\":[{\"id\":24,\"wave\":\"pulse\",\"period_ms\":100}]",
+           "\"lfos\":[{\"id\":24,\"wave\":\"noise\",\"period_ms\":100}]",
+           "\"instruments\":[{\"id\":42,\"layers\":[{\"wave_a\":\"future\"}]}]",
+           "\"instruments\":[{\"id\":42,\"layers\":[{\"wave_a\":\"sine\",\"string_dispersion_sections\":0}]}]",
+           "\"parameters\":[{\"id\":2,\"kind\":\"future\"}]",
+           "\"lfos\":[{\"period_ms\":100}]",
+           "\"instruments\":[17]",
+           "\"channels\":[17]" }) {
+        resilience_damage(resilience_document(bad), &bank);
+        TEST(bank.bank.instruments.num_allocated == (strstr(bad, "\"id\":42") ? 2u : 1u));
+        TEST(strcmp(bank.instrument_names[0], "Lead") == 0);
+        TEST(bank.bank.envelopes.num_allocated == (strstr(bad, "\"id\":20") ? 2u : 1u) &&
+             bank.bank.lfos.num_allocated == (strstr(bad, "\"id\":24") ? 2u : 1u));
+        if (strcmp(bad, "\"channels\":[17]") != 0)
+            TEST(bank.bank.channel_zones[0][0].start_note == 1);
+    }
+    for (const char* zones :
+         { "[{\"start\":0,\"instrument\":999},{\"start\":40,\"instrument\":41}]",
+           "[{\"start\":0,\"instrument\":41},{\"start\":20,\"instrument\":999},{\"start\":40,\"instrument\":41}]",
+           "[{\"start\":0,\"instrument\":41},{\"start\":40,\"instrument\":41},{\"start\":20,\"instrument\":41}]" }) {
+        char fields[1024];
+        snprintf(fields, sizeof(fields), "\"channels\":[{\"zones\":%s}]", zones);
+        resilience_damage(resilience_document(fields),
+                          &bank,
+                          Synth::BankLoadStatus::salvaged,
+                          strstr(zones, "[{\"start\":0,\"instrument\":999}") == zones ? 2 : 1);
+        TEST(bank.bank.channel_zones[0][0].start_note == 1);
+        TEST(Synth::validate_instrument_bank(&bank.bank));
+    }
+    resilience_damage(resilience_document("\"channels\":[{\"zones\":[{\"start\":0,\"instrument\":999}]}]"),
+                      &bank,
+                      Synth::BankLoadStatus::salvaged,
+                      2);
+    TEST(bank.bank.channel_enabled[0] == 0 && bank.bank.channel_zones[0][0].start_note == 0);
+    TEST(bank.graph_layout_count == 0);
+    resilience_damage(
+        resilience_document("",
+                            "{\"osc_sources\":[{\"channel\":0,\"zone\":0,\"wiring\":[{\"slot\":0,\"layer\":99}]}]}"),
+        &bank);
+    TEST(bank.graph_osc_source[0][0][0] == 1 && bank.graph_osc_source[0][0][1] == 2);
+    resilience_damage(
+        resilience_document(
+            "\"master_chain\":{\"effects\":[{\"type\":\"delay\"},{\"type\":\"delay\",\"enable_input\":{\"source\":\"velocity\"}},{\"type\":\"delay\"}]}"),
+        &bank);
+    TEST(bank.bank.master_chain.num_effects == 3);
+    TEST(bank.bank.master_chain.effects[1].enable_input.source == Synth::ModSource::none);
+    // Repaired LFO cascades into layer targets, effect bindings and FIR bands.
+    resilience_damage(
+        resilience_document(
+            "\"lfos\":[{\"id\":24,\"period_ms\":0}],"
+            "\"instruments\":[{\"id\":42,\"layers\":[{\"wave_a\":\"sine\",\"generators\":{\"volume\":{\"lfo_desc_id\":24}}}]}],"
+            "\"master_chain\":{\"effects\":[{\"type\":\"delay\",\"params\":{\"time\":{\"lfo_desc_id\":24}}},{\"type\":\"fir\",\"fir_bands\":2,\"fir_band1\":{\"gain\":{\"lfo_desc_id\":24}}},{\"type\":\"delay\"}]}"),
+        &bank);
+    TEST(bank.bank.instruments.num_allocated == 2 && bank.bank.master_chain.num_effects == 3);
+    resilience_damage(
+        resilience_document(
+            "\"envelopes\":[{\"id\":20,\"num_points\":0}],\"instruments\":[{\"id\":42,\"layers\":[{\"wave_a\":\"sine\",\"generators\":{\"volume\":{\"envelope_desc_id\":20}}}]}]"),
+        &bank);
+    TEST(bank.bank.instruments.num_allocated == 2 && bank.bank.envelopes.num_allocated == 2);
+    resilience_damage("{\"instrument_editor_bank\":{\"instruments\":[{\"layers\":[]}],\"lfos\":[{\"period_ms\":0}]}}",
+                      &bank,
+                      Synth::BankLoadStatus::unusable,
+                      2);
+    // Unreferenced descriptors and a disabled channel must not be reclaimed.
+    resilience_damage(
+        resilience_document(
+            "\"channels\":[{\"category\":\"idle\",\"zones\":[{\"start\":0,\"instrument\":41}]}],\"parameters\":[{\"id\":2,\"kind\":\"future\"}]"),
+        &bank);
+    TEST(bank.bank.instruments.num_allocated == 1 && bank.bank.envelopes.num_allocated == 1 &&
+         bank.bank.lfos.num_allocated == 1);
+    TEST(bank.bank.channel_zones[0][0].start_note == 1);
+}
+
+static void resilience_over_capacity()
+{
+    static char                        fields[256 * 1024];
+    static Synth::InstrumentEditorBank bank;
+
+    struct ArrayCase {
+        const char* key;
+        uint32_t    capacity;
+    };
+
+    const ArrayCase cases[] = { { "instruments", Synth::max_instruments },
+                                { "envelopes", Synth::max_envelopes },
+                                { "lfos", Synth::max_lfos },
+                                { "parameters", Synth::max_parameters },
+                                { "channels", Synth::max_channels },
+                                { "zones", Synth::max_instr_per_channel },
+                                { "effects", Synth::max_chain_effects } };
+    for (const ArrayCase& c : cases) {
+        size_t pos = static_cast<size_t>(snprintf(fields,
+                                                  sizeof(fields),
+                                                  "%s\"%s\":[",
+                                                  strcmp(c.key, "zones") == 0     ? "\"channels\":[{"
+                                                  : strcmp(c.key, "effects") == 0 ? "\"master_chain\":{"
+                                                                                  : "",
+                                                  c.key));
+        for (uint32_t i = 0; i <= c.capacity; ++i) {
+            if (i)
+                fields[pos++] = ',';
+            // Unique file ids avoid confusing an overflow with duplicate-id loss.
+            char           entry[256];
+            const uint32_t id = i + 1000;
+            if (strcmp(c.key, "instruments") == 0)
+                snprintf(entry, sizeof(entry), "{\"id\":%u,\"layers\":[{\"wave_a\":\"sine\"}]}", id);
+            else if (strcmp(c.key, "envelopes") == 0)
+                snprintf(entry, sizeof(entry), "{\"id\":%u,\"num_points\":1,\"points\":[{}]}", id);
+            else if (strcmp(c.key, "lfos") == 0)
+                snprintf(entry, sizeof(entry), "{\"id\":%u,\"wave\":\"sine\",\"period_ms\":100}", id);
+            else if (strcmp(c.key, "parameters") == 0)
+                snprintf(entry, sizeof(entry), "{\"id\":%u,\"kind\":\"external\"}", id);
+            else if (strcmp(c.key, "channels") == 0)
+                snprintf(entry, sizeof(entry), "{\"category\":\"idle%u\"}", i);
+            else if (strcmp(c.key, "zones") == 0)
+                snprintf(entry, sizeof(entry), "{\"start\":%u,\"instrument\":41}", i);
+            else
+                snprintf(entry, sizeof(entry), "%s", "{\"type\":\"delay\"}");
+            pos += static_cast<size_t>(snprintf(fields + pos, sizeof(fields) - pos, "%s", entry));
+        }
+        snprintf(fields + pos,
+                 sizeof(fields) - pos,
+                 "%s",
+                 strcmp(c.key, "zones") == 0     ? "]}]"
+                 : strcmp(c.key, "effects") == 0 ? "]}"
+                                                 : "]");
+        const char* text = resilience_document(fields, "{}", true, true);
+        {
+            ResilienceFiles files;
+            resilience_write(files.path, text, strlen(text));
+            const Synth::BankLoadResult result = Synth::load_editor_bank_guarded(files.path, files.backup, &bank);
+            TEST(result.status == Synth::BankLoadStatus::salvaged);
+            char labels[8][48];
+            TEST(Synth::take_skipped_entries(labels, 8) > 0);
+            const char* kind = strcmp(c.key, "channels") == 0  ? "channel"
+                               : strcmp(c.key, "zones") == 0   ? "zone"
+                               : strcmp(c.key, "effects") == 0 ? "effect"
+                                                               : nullptr;
+            if (kind)
+                TEST(strncmp(labels[0], kind, strlen(kind)) == 0);
+        }
+        resilience_damage(text, &bank, Synth::BankLoadStatus::salvaged, strcmp(c.key, "instruments") == 0 ? 3 : 1);
+        TEST(Synth::validate_instrument_bank(&bank.bank));
+    }
+    // More than the global 32 modulated-param budget, deterministic master-first
+    // trimming. Each delay contributes one time binding, without state allocation.
+    size_t pos = static_cast<size_t>(snprintf(fields, sizeof(fields), "\"channels\":["));
+    for (uint32_t c = 0; c < Synth::max_channels; ++c) {
+        pos += static_cast<size_t>(snprintf(
+            fields + pos,
+            sizeof(fields) - pos,
+            "%s{\"zones\":[{\"start\":0,\"instrument\":41}],\"chain\":{\"effects\":[{\"type\":\"delay\",\"params\":{\"time\":{\"lfo_desc_id\":23}}},{\"type\":\"delay\",\"params\":{\"time\":{\"lfo_desc_id\":23}}}]}}",
+            c ? "," : ""));
+    }
+    snprintf(fields + pos,
+             sizeof(fields) - pos,
+             "],\"master_chain\":{\"effects\":[{\"type\":\"delay\",\"params\":{\"time\":{\"lfo_desc_id\":23}}}]}");
+    resilience_damage(resilience_document(fields, "{}", true, true), &bank);
+    TEST(bank.bank.master_chain.num_effects == 0);
+    TEST(bank.bank.channel_chains[Synth::max_channels - 1].num_effects == 2);
+}
+
+static void resilience_zero_based_remap()
+{
+    static Synth::InstrumentEditorBank bank;
+    for (bool drop_first : { true, false }) {
+        char fields[4096];
+        snprintf(
+            fields,
+            sizeof(fields),
+            "\"instruments\":[{%s\"name\":\"First\",\"layers\":[{\"wave_a\":\"sine\"}]},{%s\"name\":\"Second\",\"layers\":[{\"wave_a\":\"sine\"}]},{\"id\":3,\"name\":\"Third\",\"layers\":[{\"wave_a\":\"sawtooth\"}]}],"
+            "\"channels\":[{\"zones\":[{\"start\":0,\"instrument\":%u},{\"start\":64,\"instrument\":3}]}]",
+            drop_first ? "" : "\"id\":1,",
+            drop_first ? "\"id\":2," : "",
+            drop_first ? 2u : 1u);
+        resilience_damage(resilience_document(fields, "{}", false), &bank);
+        TEST(bank.bank.instruments.num_allocated == 2);
+        TEST(bank.bank.channel_zones[0][0].instrument == 0 && bank.bank.channel_zones[0][1].instrument == 1);
+        TEST(strcmp(bank.instrument_names[0], drop_first ? "Second" : "First") == 0);
+        TEST(strcmp(bank.instrument_names[1], "Third") == 0);
+        TEST(bank.bank.instruments.entries[0].layers[0].osc_type[0] == Synth::WaveType::sine_wave);
+        TEST(bank.bank.instruments.entries[1].layers[0].osc_type[0] == Synth::WaveType::sawtooth_wave);
+        resilience_compact(bank.bank.instruments, Synth::max_instruments);
+    }
+    resilience_damage(
+        resilience_document(
+            "\"parameters\":[{\"id\":1,\"kind\":\"future\"},{\"id\":2,\"kind\":\"plain\",\"sources\":[{\"param_id\":3,\"scale\":2}]},{\"id\":3,\"kind\":\"plain\",\"sources\":[{\"param_id\":2,\"scale\":3}]}]"),
+        &bank);
+    TEST(bank.bank.parameters.num_allocated == 2);
+    TEST(bank.bank.parameters.entries[0].plain.sources[0].param_id == 1);
+    TEST(bank.bank.parameters.entries[1].plain.sources[0].param_id == 0);
+    resilience_compact(bank.bank.parameters, Synth::max_parameters);
+    resilience_damage(
+        resilience_document(
+            "\"parameters\":[{\"id\":1,\"kind\":\"external\"},{\"id\":2,\"kind\":\"future\"},{\"id\":3,\"kind\":\"plain\",\"sources\":[{\"param_id\":2}]},{\"id\":4,\"kind\":\"plain\",\"sources\":[{\"param_id\":3}]},{\"id\":5,\"kind\":\"plain\",\"sources\":[{\"param_id\":4}]}]"),
+        &bank,
+        Synth::BankLoadStatus::salvaged,
+        4);
+    TEST(bank.bank.parameters.num_allocated == 1 && bank.bank.parameters.entries[0].kind == Synth::ParamKind::external);
+    resilience_compact(bank.bank.parameters, Synth::max_parameters);
+    resilience_damage(
+        resilience_document(
+            "\"parameters\":[{\"id\":1,\"kind\":\"future\"},{\"id\":2,\"kind\":\"external\"},{\"id\":3,\"kind\":\"lfo\",\"lfo\":{\"wave\":\"sine\",\"period_ms\":100}},{\"id\":4,\"kind\":\"plain\",\"sources\":[{\"scale\":2}]}]"),
+        &bank);
+    TEST(bank.bank.parameters.num_allocated == 3);
+    TEST(bank.bank.parameters.entries[1].lfo.depth_param_id == 0 &&
+         bank.bank.parameters.entries[1].lfo.rate_param_id == 0);
+    TEST(bank.bank.parameters.entries[2].plain.sources[0].param_id == 0);
+    resilience_compact(bank.bank.parameters, Synth::max_parameters);
+    TEST(Synth::validate_instrument_bank(&bank.bank));
+}
+
+// salvage_compact test contract: compact only flagged entries. The four
+// fixed-size bool arrays are indexed by old slot; no reclamation by reachability.
+// Tests with explicit/default parameter references use guarded JSON instead.
+static void resilience_disabled_and_detached_survival()
+{
+    static Synth::InstrumentEditorBank bank;
+    TEST(portability_decode_bank("", "{}", &bank));
+    bank.bank.channel_enabled[0] = 0;
+    strcpy(bank.channel_category[0], "disabled");
+    bank.added_cc_mask[0]                       = 0x8001;
+    bank.bank.channel_chains[0].num_effects     = 1;
+    bank.bank.channel_chains[0].effects[0].type = Synth::EffectType::delay;
+    bank.graph_layout_count                     = 1;
+    bank.graph_layout[0]                        = {};
+    bank.graph_layout[0].channel                = 0;
+    bank.graph_layout[0].zone                   = 0;
+    bank.graph_layout[0].kind                   = 2;
+    bank.graph_layout[0].index                  = 1;
+    bank.graph_layout[0].uid                    = 1;
+    bank.graph_layout[0].x                      = 123;
+    static bool drop_instr[Synth::max_instruments];
+    static bool drop_env[Synth::max_envelopes];
+    static bool drop_lfo[Synth::max_lfos];
+    static bool drop_param[Synth::max_parameters];
+    memset(drop_instr, 0, sizeof(drop_instr));
+    memset(drop_env, 0, sizeof(drop_env));
+    memset(drop_lfo, 0, sizeof(drop_lfo));
+    memset(drop_param, 0, sizeof(drop_param));
+    const uint32_t bad = bank.bank.instruments.allocate();
+    TEST(bad != pool_no_slot);
+    if (bad == pool_no_slot)
+        return;
+    bank.bank.instruments.entries[bad] = bank.bank.instruments.entries[0];
+    drop_instr[bad]                    = true;
+    Synth::salvage_compact(&bank, drop_instr, drop_env, drop_lfo, drop_param);
+    TEST(bank.bank.channel_enabled[0] == 0);
+    TEST(bank.bank.channel_zones[0][0].start_note == 1 && bank.bank.channel_zones[0][0].instrument == 0);
+    TEST(bank.bank.channel_chains[0].num_effects == 1 && bank.added_cc_mask[0] == 0x8001);
+    TEST(strcmp(bank.channel_category[0], "disabled") == 0 && strcmp(bank.instrument_names[0], "Lead") == 0);
+    TEST(bank.graph_layout_count == 1 && bank.graph_layout[0].x == 123 && bank.graph_layout[0].index == 1);
+    TEST(bank.bank.envelopes.num_allocated == 1 && bank.bank.lfos.num_allocated == 1);
+    TEST(bank.bank.instruments.num_allocated == 1);
+    resilience_compact(bank.bank.instruments, Synth::max_instruments);
+    TEST(Synth::validate_instrument_bank(&bank.bank));
+    // A valid unreferenced instrument also survives compaction, even with no
+    // enabled channel holding it. No reclaim_unused_slots shortcut is valid.
+    bank.bank.channel_zones[0][0] = {};
+    bank.graph_layout_count       = 0;
+    memset(drop_instr, 0, sizeof(drop_instr));
+    Synth::salvage_compact(&bank, drop_instr, drop_env, drop_lfo, drop_param);
+    TEST(bank.bank.instruments.num_allocated == 1 && bank.bank.envelopes.num_allocated == 1 &&
+         bank.bank.lfos.num_allocated == 1);
+    TEST(Synth::validate_instrument_bank(&bank.bank));
+}
+
+static void resilience_lfo_and_descriptor_remap()
+{
+    static Synth::InstrumentEditorBank bank;
+    resilience_damage(
+        resilience_document(
+            "\"parameters\":[{\"id\":1,\"kind\":\"future\"},{\"id\":2,\"kind\":\"lfo\",\"lfo\":{\"wave\":\"sine\",\"period_ms\":100},\"depth_param_id\":3,\"rate_param_id\":3},{\"id\":3,\"kind\":\"plain\",\"sources\":[{\"param_id\":2}]}]"),
+        &bank);
+    TEST(bank.bank.parameters.num_allocated == 2);
+    TEST(bank.bank.parameters.entries[0].lfo.depth_param_id == 1 &&
+         bank.bank.parameters.entries[0].lfo.rate_param_id == 1);
+    TEST(bank.bank.parameters.entries[1].plain.sources[0].param_id == 0);
+    resilience_compact(bank.bank.parameters, Synth::max_parameters);
+    // Explicit LFO depth and rate refs cascade too, not just plain sources.
+    resilience_damage(
+        resilience_document(
+            "\"parameters\":[{\"id\":1,\"kind\":\"future\"},{\"id\":2,\"kind\":\"lfo\",\"lfo\":{\"wave\":\"sine\",\"period_ms\":100},\"depth_param_id\":1},{\"id\":3,\"kind\":\"lfo\",\"lfo\":{\"wave\":\"sine\",\"period_ms\":100},\"rate_param_id\":2}]"),
+        &bank,
+        Synth::BankLoadStatus::salvaged,
+        3);
+    TEST(bank.bank.parameters.num_allocated == 0);
+    resilience_damage(
+        resilience_document(
+            "\"envelopes\":[{\"num_points\":0},{\"id\":2,\"num_points\":1,\"points\":[{}]}],"
+            "\"lfos\":[{\"wave\":\"sine\",\"period_ms\":0},{\"id\":2,\"wave\":\"sine\",\"period_ms\":100}],"
+            "\"instruments\":[{\"id\":1,\"name\":\"Kept\",\"layers\":[{\"wave_a\":\"sine\",\"generators\":{\"volume\":{\"envelope_desc_id\":2,\"lfo_desc_id\":2}}}]}],"
+            "\"channels\":[{\"zones\":[{\"start\":0,\"instrument\":1}]}],"
+            "\"master_chain\":{\"effects\":[{\"type\":\"delay\",\"params\":{\"time\":{\"lfo_desc_id\":2}}},{\"type\":\"fir\",\"fir_bands\":2,\"fir_band1\":{\"gain\":{\"lfo_desc_id\":2}}}]}",
+            "{\"layouts\":[{\"kind\":\"envelope\",\"channel\":0,\"zone\":0,\"envelope_id\":2,\"uid\":1},{\"kind\":\"lfo\",\"channel\":0,\"zone\":0,\"lfo_id\":2,\"uid\":1}]}",
+            false),
+        &bank,
+        Synth::BankLoadStatus::salvaged,
+        2);
+    TEST(bank.bank.envelopes.num_allocated == 1 && bank.bank.lfos.num_allocated == 1);
+    TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].envelope_desc_id == 1);
+    TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].lfo_desc_id == 1);
+    TEST(bank.bank.master_chain.effects[0].bindings[0].lfo_desc_id == 1);
+    TEST(bank.bank.master_chain.effects[1].fir_bands.bands[3].lfo_desc_id == 1);
+    TEST(bank.graph_layout_count == 2 && bank.graph_layout[0].index == 1 && bank.graph_layout[1].index == 1);
+    resilience_compact(bank.bank.envelopes, Synth::max_envelopes);
+    resilience_compact(bank.bank.lfos, Synth::max_lfos);
+    TEST(Synth::validate_instrument_bank(&bank.bank));
+}
+
+static void resilience_counted_losses()
+{
+    static Synth::InstrumentEditorBank bank;
+    const char*                        losses[] = {
+        "{\"layouts\":[{\"channel\":0,\"zone\":0}]}",
+        "{\"layouts\":[{\"kind\":\"input\"}]}",
+        "{\"layouts\":[{\"kind\":\"lfo\",\"channel\":0,\"zone\":0,\"uid\":1,\"lfo_id\":0}]}",
+        "{\"layouts\":[{\"kind\":\"future\",\"channel\":0,\"zone\":0}]}",
+        "{\"layouts\":[{\"kind\":2,\"channel\":0,\"zone\":0}]}",
+        "{\"layouts\":[{\"kind\":\"lfo\",\"channel\":0,\"zone\":0,\"uid\":1,\"lfo_id\":23,\"depth_source\":\"future\"}]}",
+        "{\"layouts\":[{\"kind\":\"lfo\",\"channel\":0,\"zone\":0,\"uid\":1,\"lfo_id\":23,\"rate_source\":\"future\"}]}",
+        "{\"layouts\":[{\"kind\":\"input\",\"channel\":0,\"zone\":0,\"x\":10},{\"kind\":\"input\",\"channel\":0,\"zone\":0,\"x\":20}]}",
+        "{\"osc_sources\":[{\"channel\":99,\"zone\":0,\"wiring\":[{\"slot\":0,\"layer\":1}]}]}",
+        "{\"osc_sources\":[{\"channel\":0,\"zone\":99,\"wiring\":[{\"slot\":0,\"layer\":1}]}]}",
+        "{\"osc_sources\":[{\"channel\":0,\"zone\":0}]}",
+        "{\"osc_sources\":[{\"channel\":0,\"zone\":0,\"wiring\":[]}]}",
+        "{\"osc_sources\":[{\"channel\":0,\"zone\":0,\"wiring\":[{}]}]}",
+        "{\"osc_sources\":[{\"channel\":0,\"zone\":0,\"wiring\":[{\"slot\":0,\"layer\":1}]},{\"channel\":0,\"zone\":0,\"wiring\":[{\"slot\":0,\"layer\":2}]}]}",
+        "{\"osc_sources\":17}",
+        "{\"added_ccs\":17}",
+        "{\"added_ccs\":[{\"chain\":\"future\",\"ccs\":[16]}]}",
+        "{\"added_ccs\":[{\"chain\":0,\"ccs\":[16]},{\"chain\":0,\"ccs\":[17]}]}",
+        "{\"added_ccs\":[{\"chain\":0,\"ccs\":[15]}]}",
+        "{\"added_ccs\":[{\"chain\":0,\"ccs\":[32]}]}",
+        "{\"added_ccs\":[{\"chain\":0,\"ccs\":17}]}",
+        "{\"added_ccs\":[{\"chain\":0}]}"
+    };
+    for (const char* editor : losses) {
+        const char* text = resilience_document("", editor);
+        TEST(Synth::decode_editor_bank_json(text, static_cast<uint32_t>(strlen(text)), &bank));
+        char skipped[8][48];
+        TEST(Synth::take_skipped_entries(skipped, 8) == 1);
+        resilience_damage(text, &bank);
+        TEST(bank.bank.channel_zones[0][0].start_note == 1);
+    }
+    // Strict-success no-instrument zone + disabled-channel counts, while a
+    // standalone valid pool entry keeps the load salvageable.
+    const char* text = resilience_document(
+        "\"channels\":[{\"zones\":[{\"start\":0}]}],\"lfos\":[{\"id\":1,\"wave\":\"sine\",\"period_ms\":100}]",
+        "{}",
+        false);
+    TEST(Synth::decode_editor_bank_json(text, static_cast<uint32_t>(strlen(text)), &bank));
+    resilience_damage(text, &bank, Synth::BankLoadStatus::salvaged, 2);
+    TEST(bank.bank.channel_enabled[0] == 0);
+    resilience_damage(resilience_document("", "{\"layouts\":[{\"kind\":\"input\",\"channel\":0,\"zone\":1}]}"), &bank);
+    TEST(bank.graph_layout_count == 0);
+    // Valid objects on both sides of a primitive survive, in both editor arrays.
+    resilience_damage(
+        resilience_document(
+            "\"channels\":[{\"zones\":[{\"start\":0,\"instrument\":41},{\"start\":64,\"instrument\":41}]}]",
+            "{\"osc_sources\":[{\"channel\":0,\"zone\":0,\"wiring\":[{\"slot\":0,\"layer\":2}]},17,{\"channel\":0,\"zone\":1,\"wiring\":[{\"slot\":0,\"layer\":1}]}],\"added_ccs\":[{\"chain\":0,\"ccs\":[16]},17,{\"chain\":\"master\",\"ccs\":[31]}]}"),
+        &bank,
+        Synth::BankLoadStatus::salvaged,
+        2);
+    TEST(bank.graph_osc_source[0][0][0] == 2 && bank.graph_osc_source[0][1][0] == 1);
+    TEST(bank.added_cc_mask[0] == 1 && bank.added_cc_mask[Synth::max_channels] == 0x8000);
+    // Same siblings through lenient retry, not just successful strict decode.
+    resilience_damage(
+        resilience_document(
+            "\"parameters\":[{\"id\":1,\"kind\":\"future\"}]",
+            "{\"osc_sources\":[{\"channel\":0,\"zone\":0,\"wiring\":[{\"slot\":0,\"layer\":2}]},17],\"added_ccs\":[{\"chain\":0,\"ccs\":[16]},17,{\"chain\":\"master\",\"ccs\":[31]}]}"),
+        &bank,
+        Synth::BankLoadStatus::salvaged,
+        3);
+    TEST(bank.graph_osc_source[0][0][0] == 2 && bank.added_cc_mask[0] == 1 &&
+         bank.added_cc_mask[Synth::max_channels] == 0x8000);
+    resilience_damage(
+        resilience_document(
+            "\"parameters\":[{\"id\":1,\"kind\":\"future\"}]",
+            "{\"osc_sources\":[{\"channel\":0,\"zone\":0,\"wiring\":[]}],\"added_ccs\":[{\"chain\":0,\"ccs\":[15]}],\"layouts\":[{\"kind\":\"future\"}]}"),
+        &bank,
+        Synth::BankLoadStatus::salvaged,
+        4);
+    TEST(bank.graph_osc_source[0][0][0] == 1 && bank.graph_osc_source[0][0][1] == 2);
+    TEST(bank.added_cc_mask[0] == 0 && bank.graph_layout_count == 0);
+    for (const char* harmless :
+         { "\"future\":42",
+           "\"format\":\"future\"",
+           "\"channels\":[{\"category\":17,\"zones\":[{\"start\":0,\"instrument\":41}]}]",
+           "\"instruments\":[{\"id\":42,\"future\":42,\"layer_count\":7,\"layers\":[{\"wave_a\":\"sine\"}]}]",
+           "\"master_chain\":{\"effects\":[{\"type\":\"delay\",\"params\":{\"time\":{\"base_value_ms\":9999}}}]}" })
+        resilience_clean(resilience_document(harmless));
+    resilience_clean(
+        resilience_document("", "{\"layouts\":[{\"kind\":\"input\",\"channel\":0,\"zone\":0,\"future\":17}]}"));
+}
+
+#ifndef _WIN32
+// Test-only POSIX function-pointer seam. No production setters or runtime
+// machinery. Modes match only the current fixture paths and RAII restores them.
+// macOS dlsym is in libSystem; the Linux makefile already links -ldl.
+enum class ResilienceFault {
+    none,
+    backup_stat,
+    exists_race,
+    link_error,
+    unlink_error
+};
+static ResilienceFault resilience_fault = ResilienceFault::none;
+static const char*     resilience_fault_path;
+static const char*     resilience_fault_backup;
+static uint32_t        resilience_links;
+static uint32_t        resilience_unlinks;
+static bool            resilience_fault_fired;
+
+extern "C" int lstat(const char* path, struct stat* info)
+{
+    using Fn             = int (*)(const char*, struct stat*);
+    static const Fn real = reinterpret_cast<Fn>(dlsym(RTLD_NEXT, "lstat"));
+    if (resilience_fault != ResilienceFault::none && resilience_fault_backup &&
+        strcmp(path, resilience_fault_backup) == 0 && resilience_fault == ResilienceFault::backup_stat) {
+        resilience_fault_fired = true;
+        errno                  = EIO;
+        return -1;
+    }
+    return real(path, info);
+}
+
+extern "C" int link(const char* from, const char* to)
+{
+    using Fn             = int (*)(const char*, const char*);
+    static const Fn real = reinterpret_cast<Fn>(dlsym(RTLD_NEXT, "link"));
+    if (resilience_fault_path && strcmp(from, resilience_fault_path) == 0) {
+        ++resilience_links;
+        if (resilience_fault == ResilienceFault::exists_race) {
+            resilience_write(to, "RACE BACKUP", 11);
+            resilience_fault_fired = true;
+        }
+        if (resilience_fault == ResilienceFault::link_error) {
+            resilience_fault_fired = true;
+            errno                  = EOPNOTSUPP;
+            return -1;
+        }
+    }
+    return real(from, to);
+}
+
+extern "C" int unlink(const char* path)
+{
+    using Fn             = int (*)(const char*);
+    static const Fn real = reinterpret_cast<Fn>(dlsym(RTLD_NEXT, "unlink"));
+    if (resilience_fault_path && strcmp(path, resilience_fault_path) == 0) {
+        ++resilience_unlinks;
+        if (resilience_fault == ResilienceFault::unlink_error) {
+            resilience_fault_fired = true;
+            errno                  = EACCES;
+            return -1;
+        }
+    }
+    return real(path);
+}
+
+struct ResilienceFaultScope {
+    ResilienceFault previous;
+    const char*     previous_path;
+    const char*     previous_backup;
+
+    ResilienceFaultScope(ResilienceFault fault, const ResilienceFiles& files)
+        : previous(resilience_fault), previous_path(resilience_fault_path), previous_backup(resilience_fault_backup)
+    {
+        resilience_fault        = fault;
+        resilience_fault_path   = files.path;
+        resilience_fault_backup = files.backup;
+        resilience_links = resilience_unlinks = 0;
+        resilience_fault_fired                = false;
+    }
+
+    ~ResilienceFaultScope()
+    {
+        resilience_fault        = previous;
+        resilience_fault_path   = previous_path;
+        resilience_fault_backup = previous_backup;
+    }
+};
+
+static void resilience_backup_faults()
+{
+    static Synth::InstrumentEditorBank bank;
+    const char*                        text = resilience_document("\"lfos\":[{\"period_ms\":0}]");
+    for (ResilienceFault fault : { ResilienceFault::backup_stat,
+                                   ResilienceFault::exists_race,
+                                   ResilienceFault::link_error,
+                                   ResilienceFault::unlink_error }) {
+        ResilienceFiles files;
+        resilience_write(files.path, text, strlen(text));
+        {
+            ResilienceFaultScope        scope(fault, files);
+            const Synth::BankLoadResult result = Synth::load_editor_bank_guarded(files.path, files.backup, &bank);
+            TEST(resilience_fault_fired); // don't accidentally pass without exercising seam
+            TEST(! Synth::bank_save_allowed());
+            TEST(resilience_links <= 1);
+            if (fault == ResilienceFault::exists_race) {
+                TEST(result.status == Synth::BankLoadStatus::locked);
+                TEST(result.backup == Synth::BankBackupStatus::pre_existing);
+                TEST(resilience_bytes(files.backup, "RACE BACKUP", 11));
+            }
+            else if (fault == ResilienceFault::unlink_error) {
+                TEST(result.status == Synth::BankLoadStatus::salvaged);
+                TEST(result.backup == Synth::BankBackupStatus::renamed_partial);
+                TEST(resilience_links == 1 && resilience_unlinks == 2);
+                TEST(resilience_bytes(files.backup, text, strlen(text)));
+            }
+            else {
+                TEST(result.backup == Synth::BankBackupStatus::failed);
+                TEST(result.status != Synth::BankLoadStatus::locked);
+                TEST(! resilience_exists(files.backup));
+            }
+            TEST(Synth::save_editor_bank_file(files.path, &bank) != 0);
+        }
+        // Faults are disarmed before checking state and before cleanup, even on return.
+        TEST(resilience_fault == ResilienceFault::none);
+        TEST(resilience_bytes(files.path, text, strlen(text)));
+        if (fault == ResilienceFault::unlink_error) {
+            TEST(resilience_bytes(files.backup, text, strlen(text)));
+            Synth::BankGuard::reset();
+            TEST(Synth::load_editor_bank_guarded(files.path, files.backup, &bank).status ==
+                 Synth::BankLoadStatus::locked);
+            TEST(! Synth::bank_save_allowed());
+        }
+    }
+    ResilienceFiles files;
+    resilience_write(files.path, text, strlen(text));
+    TEST(symlink("missing-resilience-symlink-target", files.backup) == 0);
+    const Synth::BankLoadResult locked = Synth::load_editor_bank_guarded(files.path, files.backup, &bank);
+    TEST(locked.status == Synth::BankLoadStatus::locked);
+    char          target[128] = {};
+    const ssize_t count       = readlink(files.backup, target, sizeof(target));
+    TEST(count == static_cast<ssize_t>(strlen("missing-resilience-symlink-target")));
+    if (count >= 0)
+        TEST(memcmp(target, "missing-resilience-symlink-target", static_cast<size_t>(count)) == 0);
+    TEST(resilience_bytes(files.path, text, strlen(text)));
+    TEST(! Synth::bank_save_allowed());
+}
+#endif
+
+static void resilience_backup_boundaries_and_startup()
+{
+    static Synth::InstrumentEditorBank bank;
+    // The production json_text is private; its documented document component is
+    // 1 MiB. Pin that buffer bound in the source-inspection test below.
+    static char oversized[3 * 1024 * 1024];
+    memset(oversized, 'X', sizeof(oversized));
+    oversized[17] = 0; // embedded NUL must be preserved, not strlen/copy semantics
+    for (size_t size : { size_t{ 31 }, size_t{ 1024 * 1024 }, size_t{ 1024 * 1024 + 1 }, sizeof(oversized) }) {
+        ResilienceFiles files;
+        resilience_write(files.path, oversized, size);
+        const Synth::BankLoadResult result = Synth::load_editor_bank_guarded(files.path, files.backup, &bank);
+        TEST(result.status == Synth::BankLoadStatus::unusable);
+        TEST(result.backup == Synth::BankBackupStatus::renamed);
+        TEST(! resilience_exists(files.path));
+        TEST(resilience_bytes(files.backup, oversized, size));
+        TEST(Synth::bank_save_allowed());
+    }
+    ResilienceFiles files;
+    TEST(Synth::load_editor_bank_guarded(files.path, files.backup, &bank).status == Synth::BankLoadStatus::absent);
+    TEST(Synth::bank_save_allowed());
+    char text[4096];
+    snprintf(text, sizeof(text), "%s", resilience_document("\"lfos\":[{\"period_ms\":0}]"));
+    resilience_write(files.path, text, strlen(text));
+#ifndef _WIN32
+    {
+        ResilienceFaultScope        scope(ResilienceFault::none, files);
+        const Synth::BankLoadResult result = Synth::load_editor_bank_guarded(files.path, files.backup, &bank);
+        TEST(result.status == Synth::BankLoadStatus::salvaged);
+        TEST(resilience_links == 1 && resilience_unlinks == 1);
+    }
+#else
+    TEST(Synth::load_editor_bank_guarded(files.path, files.backup, &bank).status == Synth::BankLoadStatus::salvaged);
+#endif
+    TEST(resilience_bytes(files.backup, text, strlen(text))); // before any save
+    TEST(Synth::save_editor_bank_file(files.path, &bank) == 0);
+    TEST(resilience_bytes(files.backup, text, strlen(text)));
+    TEST(Synth::load_editor_bank_guarded(files.path, files.backup, &bank).status == Synth::BankLoadStatus::ok);
+    resilience_write(files.path, text, strlen(text));
+    TEST(Synth::load_editor_bank_guarded(files.path, files.backup, &bank).status == Synth::BankLoadStatus::locked);
+    TEST(! Synth::bank_save_allowed());
+    // A clean load within this session must not unlatch the lock.
+    ResilienceFiles clean;
+    resilience_write(clean.path, resilience_document(""), strlen(resilience_document("")));
+    resilience_write(files.path, text, strlen(text));
+    TEST(Synth::load_editor_bank_guarded(files.path, files.backup, &bank).status == Synth::BankLoadStatus::locked);
+    TEST(Synth::load_editor_bank_guarded(clean.path, clean.backup, &bank).status == Synth::BankLoadStatus::ok);
+    TEST(! Synth::bank_save_allowed());
+    TEST(Synth::save_editor_bank_file(clean.path, &bank) != 0);
+    TEST(resilience_bytes(files.backup, text, strlen(text)));
+}
+
+static void resilience_legacy_rejected()
+{
+    static Synth::InstrumentEditorBank bank;
+    static Synth::InstrumentEditorBank sentinel;
+    static Synth::EffectsDocument      effects, fx_sentinel;
+    for (const char* entry : { "\"instruments\":[{\"layers\":[{\"wave_a\":\"sine\"}]}]",
+                               "\"envelopes\":[{\"num_points\":1,\"points\":[{}]}]",
+                               "\"lfos\":[{\"wave\":\"sine\",\"period_ms\":100}]",
+                               "\"parameters\":[{\"kind\":\"external\"}]",
+                               "\"lfos\":[17]" }) {
+        const char* text = resilience_document(entry);
+        bank             = {};
+        memcpy(&sentinel, &bank, sizeof(bank));
+        TEST(! Synth::decode_editor_bank_json(text, static_cast<uint32_t>(strlen(text)), &bank));
+        TEST(memcmp(&sentinel, &bank, sizeof(bank)) == 0);
+        resilience_damage(text, &bank);
+    }
+    const char* text = "{\"format\":\"synth-effects-v4\",\"lfos\":[{\"period_ms\":100}],\"effects\":[]}";
+    effects          = {};
+    memcpy(&fx_sentinel, &effects, sizeof(effects));
+    TEST(! Synth::decode_effects_json(text, static_cast<uint32_t>(strlen(text)), &effects));
+    TEST(memcmp(&effects, &fx_sentinel, sizeof(effects)) == 0);
+}
+
+static void resilience_read_source(const char* path, char* text, size_t capacity)
+{
+    FILE* const file = fopen(path, "rb");
+    TEST(file != nullptr);
+    if (! file) {
+        text[0] = 0;
+        return;
+    }
+    const size_t size = fread(text, 1, capacity - 1, file);
+    TEST(feof(file) && ! ferror(file));
+    TEST(fclose(file) == 0);
+    text[size] = 0;
+}
+
+static void resilience_source_guards()
+{
+    static char editor[512 * 1024];
+    static char gui[128 * 1024];
+    static char codec[512 * 1024];
+    static char atomic[32 * 1024];
+    resilience_read_source("sculptor/sculptor_instr_edit.cpp", editor, sizeof(editor));
+    resilience_read_source("sculptor/sculptor.cpp", gui, sizeof(gui));
+    resilience_read_source("sculptor/sculptor_bank_json.cpp", codec, sizeof(codec));
+    resilience_read_source("sculptor/sculptor_atomic_file.cpp", atomic, sizeof(atomic));
+    TEST(strstr(codec, "reference into legacy id-less pool, skipped") == nullptr);
+    TEST(strstr(codec, "table[0]") == nullptr);
+    for (const char* notice : { "zone without decoded instrument, skipped",
+                                "channel without decoded zones, disabled",
+                                "layout reference defaulted, skipped",
+                                "layout without decoded zone, skipped",
+                                "layout missing kind, skipped",
+                                "layout missing locator, skipped",
+                                "layout without valid descriptor reference, skipped",
+                                "duplicate layout record, skipped" }) {
+        const char* message = strstr(codec, notice);
+        TEST(message != nullptr);
+        if (message) {
+            const char* start    = message - codec > 80 ? message - 80 : codec;
+            const char* skipped  = strstr(start, "record_skipped(");
+            const char* repaired = strstr(start, "mark_damage(");
+            TEST((skipped && skipped < message) || (repaired && repaired < message));
+        }
+    }
+    TEST(strstr(codec, "record_lost(") != nullptr);
+
+    TEST(strstr(codec, "file_pool_slots[0][0] == 1") == nullptr);
+    TEST(strstr(codec, "json_text[bank_json_text_size]") != nullptr);
+    TEST(strstr(codec, "bank_json_text_size = 1024 * 1024") != nullptr);
+    // Each arming site must have a nearby actual guard reference. This is a
+    // source regression check, not a substitute for reviewing control flow.
+    for (const char* site = editor; (site = strstr(site, "bank_auto_save_armed = true")); ++site) {
+        const char* start = site - editor > 600 ? site - 600 : editor;
+        const char* guard = strstr(start, "bank_save_allowed()");
+        TEST(guard && guard < site);
+    }
+    for (const char* site = editor; (site = strstr(site, "save_editor_bank_file(bank_state_path")); ++site) {
+        const char* start = site - editor > 1500 ? site - 1500 : editor;
+        const char* guard = strstr(start, "bank_save_allowed()");
+        TEST(guard && guard < site);
+    }
+    const char* startup = strstr(editor, "static void init_editor()");
+    const char* publish = startup ? strstr(startup, "publish_edited_bank()") : nullptr;
+    const char* guard   = startup ? strstr(startup, "bank_save_allowed()") : nullptr;
+    TEST(guard && publish && guard < publish);
+    TEST(strstr(editor, "load_editor_bank_guarded(") != nullptr);
+    TEST(strstr(editor, "atomic_write_begin(") == nullptr);
+    TEST(strstr(editor, "bank_damage_banner") == nullptr);
+    TEST(strstr(editor, "notify_sticky(") != nullptr);
+    const char* lock = strstr(editor, "static void enter_lockout()");
+    TEST(lock != nullptr);
+    if (lock) {
+        const char* end = strstr(lock, "\n}\n");
+        const char* ini = strstr(lock, "IniFilename");
+        TEST(end && (! ini || ini > end));
+    }
+    TEST(strstr(gui, "bank_locked()") == nullptr);
+    TEST(strstr(gui, "draw_bank_lockout()") == nullptr);
+    TEST(strstr(gui, "enter_lockout()") == nullptr);
+    TEST(strstr(editor, "IniFilename = nullptr") == nullptr);
+    const char* frame      = strstr(editor, "bool Sculptor::SynthEditor::create_gui_frame");
+    const char* draw_lock  = frame ? strstr(frame, "draw_bank_lockout()") : nullptr;
+    const char* quit_frame = draw_lock ? strstr(draw_lock, "return true;") : nullptr;
+    const char* locked     = frame ? strstr(frame, "bank_locked()") : nullptr;
+    const char* widgets    = frame ? strstr(frame, "ImGui::BeginChild(") : nullptr;
+    TEST(draw_lock && quit_frame && locked && locked < draw_lock);
+    TEST(! widgets || quit_frame < widgets);
+    TEST(strstr(editor, "static void draw_bank_lockout()") != nullptr);
+    for (const char* call : { "Synth::save_library_record(library_path",
+                              "if (Synth::delete_library_category",
+                              "if (Synth::delete_library_record" })
+        TEST(strstr(editor, call) != nullptr);
+    TEST(strstr(editor, "delete_backup(") == nullptr && strstr(editor, "unlock_bank(") == nullptr);
+    TEST(strstr(atomic, "rename_no_replace(") != nullptr);
+    TEST(strstr(atomic, "MOVEFILE_WRITE_THROUGH") != nullptr);
+    const char* no_replace = strstr(atomic, "rename_no_replace(");
+    if (no_replace) {
+        TEST(strstr(no_replace, "MOVEFILE_REPLACE_EXISTING") == nullptr);
+        TEST(strstr(no_replace, "link(") != nullptr && strstr(no_replace, "unlink(") != nullptr);
+    }
+}
+
+static void resilience_revision10_defaulting()
+{
+    static Synth::InstrumentEditorBank bank;
+    const char*                        layout = resilience_document(
+        "",
+        "{\"layouts\":[{\"kind\":\"lfo\",\"channel\":0,\"zone\":0,\"lfo_id\":23,\"uid\":9,\"depth_source\":\"future\",\"x\":37,\"y\":42}]}");
+    TEST(Synth::decode_editor_bank_json(layout, static_cast<uint32_t>(strlen(layout)), &bank));
+    TEST(bank.graph_layout_count == 0);
+    char names[8][48];
+    TEST(Synth::take_skipped_entries(names, 8) == 1);
+    resilience_damage(layout, &bank);
+    TEST(bank.graph_layout_count == 1);
+    TEST(bank.graph_layout[0].kind == 2 && bank.graph_layout[0].uid == 9);
+    TEST(bank.graph_layout[0].index == 1 && bank.graph_layout[0].depth_source == 0);
+    TEST(bank.graph_layout[0].x == 37 && bank.graph_layout[0].y == 42);
+    {
+        ResilienceFiles files;
+        resilience_write(files.path, layout, strlen(layout));
+        TEST(Synth::load_editor_bank_guarded(files.path, files.backup, &bank).skipped == 1);
+    }
+    {
+        const char* envelope_text = resilience_document(
+            "\"envelopes\":[{\"id\":20,\"num_points\":7,\"points\":[{\"position\":20},{\"position\":10}],\"sustain_last\":7,\"min_value\":3}]");
+        resilience_damage(envelope_text, &bank);
+        TEST(bank.bank.envelopes.num_allocated == 2 && bank.bank.envelopes.entries[1].num_points == 2);
+        TEST(bank.bank.envelopes.entries[1].min_value == 3);
+        ResilienceFiles files;
+        resilience_write(files.path, envelope_text, strlen(envelope_text));
+        TEST(Synth::load_editor_bank_guarded(files.path, files.backup, &bank).skipped == 1);
+    }
+    for (
+        const char* fields :
+        { "\"instruments\":[{\"id\":42,\"voices\":\"future\",\"release_seconds\":2,\"layers\":[{\"wave_a\":\"future\",\"string_dispersion_sections\":0,\"wave_b\":\"sawtooth\",\"string_drive\":5},{\"wave_a\":\"sine\"}]}]",
+          "\"lfos\":[{\"id\":24,\"wave\":\"future\",\"period_ms\":0,\"min_value\":7}]",
+          "\"envelopes\":[{\"id\":20,\"num_points\":0,\"sustain_first\":7,\"min_value\":3}]",
+          "\"parameters\":[{\"id\":2,\"kind\":\"plain\",\"base_value\":\"bad\",\"sources\":[{\"scale\":\"bad\",\"param_id\":2},{\"scale\":5,\"param_id\":2}]}]",
+          "\"master_chain\":{\"effects\":[{\"type\":\"delay\",\"enabled\":\"bad\",\"enable_input\":{\"source\":\"velocity\"},\"params\":{\"mix\":{\"base_value\":0.3}}}]}" }) {
+        const char* text = resilience_document(fields);
+
+        resilience_damage(text, &bank);
+        ResilienceFiles files;
+        resilience_write(files.path, text, strlen(text));
+        TEST(Synth::load_editor_bank_guarded(files.path, files.backup, &bank).skipped == 1);
+        if (strstr(fields, "\"instruments\"")) {
+            const Synth::Instrument& entry = bank.bank.instruments.entries[1];
+            TEST(entry.layer_count == 2 && entry.release_seconds == 2);
+            TEST(entry.layers[0].osc_type[1] == Synth::WaveType::sawtooth_wave);
+            TEST(entry.layers[0].string_dispersion_sections == 4 && entry.layers[0].string_drive == 5);
+            TEST(entry.layers[1].osc_type[0] == Synth::WaveType::sine_wave);
+        }
+        if (strstr(fields, "\"lfos\"")) {
+            TEST(bank.bank.lfos.num_allocated == 2);
+            TEST(bank.bank.lfos.entries[1].wave == Synth::WaveType::sine_wave);
+            TEST(bank.bank.lfos.entries[1].period_ms == 1000 && bank.bank.lfos.entries[1].min_value == 7);
+        }
+        if (strstr(fields, "\"envelopes\"")) {
+            TEST(bank.bank.envelopes.num_allocated == 2);
+            TEST(bank.bank.envelopes.entries[1].num_points == 1 && bank.bank.envelopes.entries[1].min_value == 3);
+        }
+        if (strstr(fields, "\"parameters\"")) {
+            TEST(bank.bank.parameters.num_allocated == 1);
+            TEST(bank.bank.parameters.entries[0].plain.num_sources == 2);
+            TEST(bank.bank.parameters.entries[0].plain.sources[1].scale == 5);
+        }
+        if (strstr(fields, "\"master_chain\"")) {
+            TEST(bank.bank.master_chain.num_effects == 1);
+            TEST(bank.bank.master_chain.effects[0].enable_input.source == Synth::ModSource::none);
+            TEST(bank.bank.master_chain.effects[0].bindings[2].base_value == 0.3f);
+        }
+    }
+    resilience_damage(resilience_document("\"instruments\":[{\"id\":42,\"layers\":[17,{\"wave_a\":\"sine\"}]}]"),
+                      &bank);
+    TEST(bank.bank.instruments.num_allocated == 2 && bank.bank.instruments.entries[1].layer_count == 2);
+    TEST(bank.bank.instruments.entries[1].layers[1].osc_type[0] == Synth::WaveType::sine_wave);
+    resilience_damage(
+        resilience_document(
+            "",
+            "{\"layouts\":[{\"kind\":\"lfo\",\"channel\":0,\"zone\":0,\"lfo_id\":23,\"uid\":9,\"depth_source\":\"future\",\"rate_source\":\"future\",\"x\":\"bad\",\"y\":42}]}"),
+        &bank);
+    TEST(bank.graph_layout_count == 1 && bank.graph_layout[0].depth_source == 0 &&
+         bank.graph_layout[0].rate_source == 0);
+    TEST(bank.graph_layout[0].x == 0 && bank.graph_layout[0].y == 42);
+    resilience_damage(
+        resilience_document(
+            "\"instruments\":[{\"id\":42,\"layers\":[{\"wave_a\":\"sine\",\"generators\":{\"volume\":{\"lfo_desc_id\":999,\"envelope_desc_id\":999}}}]}]"),
+        &bank);
+    TEST(bank.bank.instruments.num_allocated == 2);
+    TEST(bank.bank.instruments.entries[1].layers[0].targets[Synth::mod_volume].lfo_desc_id == 0);
+    TEST(bank.bank.instruments.entries[1].layers[0].targets[Synth::mod_volume].envelope_desc_id == 0);
+}
+
+static void resilience_round2_regressions()
+{
+    static Synth::InstrumentEditorBank bank;
+    for (const char* editor :
+         { "{\"layouts\":17}",
+           "17",
+           "[]",
+           "{\"layouts\":[17]}",
+           "{\"layouts\":[null]}",
+           "{\"layouts\":[\"bad\"]}",
+           "{\"layouts\":[[]]}",
+           "{\"layouts\":[{\"kind\":\"envelope\",\"channel\":0,\"zone\":0,\"envelope_id\":0,\"uid\":1,\"x\":\"bad\"}]}",
+           "{\"layouts\":[{\"kind\":\"envelope\",\"channel\":\"bad\",\"zone\":0,\"envelope_id\":19,\"uid\":1}]}",
+           "{\"layouts\":[{\"kind\":\"envelope\",\"envelope_id\":19,\"channel\":\"bad\",\"zone\":0,\"uid\":1}]}" }) {
+        const char* text = resilience_document("", editor);
+        TEST(! Synth::decode_editor_bank_json(text, static_cast<uint32_t>(strlen(text)), &bank));
+        resilience_damage(text, &bank);
+        TEST(bank.bank.instruments.num_allocated == 1 && bank.bank.envelopes.num_allocated == 1);
+        TEST(bank.bank.lfos.num_allocated == 1);
+        TEST(bank.bank.channel_enabled[0] == 1 && bank.bank.channel_zones[0][0].start_note == 1);
+        ResilienceFiles files;
+        resilience_write(files.path, text, strlen(text));
+        TEST(Synth::load_editor_bank_guarded(files.path, files.backup, &bank).skipped == 1);
+    }
+    {
+        const char* text = resilience_document("\"channels\":17");
+        TEST(! Synth::decode_editor_bank_json(text, static_cast<uint32_t>(strlen(text)), &bank));
+        resilience_damage(text, &bank);
+        TEST(bank.bank.instruments.num_allocated == 1 && bank.bank.envelopes.num_allocated == 1);
+        TEST(bank.bank.lfos.num_allocated == 1);
+        TEST(bank.bank.channel_enabled[0] == 0 && bank.bank.channel_zones[0][0].start_note == 0);
+        ResilienceFiles files;
+        resilience_write(files.path, text, strlen(text));
+        TEST(Synth::load_editor_bank_guarded(files.path, files.backup, &bank).skipped == 1);
+    }
+    // A start-less middle zone is a strict-success loss, not an empty tail.
+    const char* text = resilience_document(
+        "\"channels\":[{\"zones\":[{\"start\":0,\"instrument\":41},{\"instrument\":41},{\"start\":64,\"instrument\":41}]}]",
+        "{\"osc_sources\":[{\"channel\":0,\"zone\":0,\"wiring\":[{\"slot\":0,\"layer\":1}]},{\"channel\":0,\"zone\":1,\"wiring\":[{\"slot\":0,\"layer\":1}]},{\"channel\":0,\"zone\":2,\"wiring\":[{\"slot\":0,\"layer\":2}]}],\"layouts\":[{\"kind\":\"input\",\"channel\":0,\"zone\":0,\"x\":11},{\"kind\":\"input\",\"channel\":0,\"zone\":1,\"x\":51},{\"kind\":\"lfo\",\"channel\":0,\"zone\":2,\"lfo_id\":23,\"uid\":9,\"x\":91}]}");
+    TEST(Synth::decode_editor_bank_json(text, static_cast<uint32_t>(strlen(text)), &bank));
+    char kinds[8][48];
+    TEST(Synth::take_skipped_entries(kinds, 8) == 2);
+    resilience_damage(text, &bank, Synth::BankLoadStatus::salvaged, 2);
+    TEST(bank.bank.channel_zones[0][0].start_note == 1 && bank.bank.channel_zones[0][1].start_note == 65);
+    TEST(bank.bank.channel_zones[0][2].start_note == 0);
+    TEST(bank.graph_osc_source[0][0][0] == 1 && bank.graph_osc_source[0][1][0] == 2);
+    TEST(bank.graph_layout_count == 2);
+    TEST(bank.graph_layout[0].zone == 0 && bank.graph_layout[0].x == 11);
+    TEST(bank.graph_layout[1].zone == 1 && bank.graph_layout[1].x == 91 && bank.graph_layout[1].index == 1);
+    ResilienceFiles files;
+    resilience_write(files.path, text, strlen(text));
+    TEST(Synth::load_editor_bank_guarded(files.path, files.backup, &bank).skipped == 2);
+}
+
+static void resilience_review_regressions()
+{
+    static Synth::InstrumentEditorBank bank;
+    for (
+        const char* fields :
+        { "\"master_chain\":17",
+          "\"master_chain\":{\"effects\":17}",
+          "\"master_chain\":{\"effects\":[17,{\"type\":\"delay\"}]}",
+          "\"channels\":[{\"name\":17,\"zones\":[{\"start\":0,\"instrument\":41}]}]",
+          "\"channels\":[{\"zones\":[{\"start\":0,\"instrument\":41}],\"chain\":17}]",
+          "\"channels\":[{\"zones\":[{\"start\":0,\"instrument\":41}],\"chain\":{\"effects\":17}}]",
+          "\"channels\":[{\"zones\":[{\"start\":0,\"instrument\":41}],\"chain\":{\"effects\":[17,{\"type\":\"delay\"}]}}]" }) {
+        resilience_damage(resilience_document(fields), &bank);
+        TEST(bank.bank.channel_zones[0][0].start_note == 1);
+        TEST(bank.bank.channel_enabled[0] == 1);
+        TEST(strcmp(bank.instrument_names[0], "Lead") == 0);
+    }
+    for (const char* wiring : { "[{\"slot\":0,\"layer\":256}]", "[{\"slot\":{},\"layer\":1}]" }) {
+        char editor[1024];
+        snprintf(
+            editor,
+            sizeof(editor),
+            "{\"osc_sources\":[{\"channel\":0,\"zone\":0,\"wiring\":%s},{\"channel\":0,\"zone\":1,\"wiring\":[{\"slot\":0,\"layer\":2}]}]}",
+            wiring);
+        resilience_damage(
+            resilience_document(
+                "\"channels\":[{\"zones\":[{\"start\":0,\"instrument\":41},{\"start\":64,\"instrument\":41}]}]",
+                editor),
+            &bank);
+        TEST(bank.graph_osc_source[0][0][0] == 1 && bank.graph_osc_source[0][0][1] == 2);
+        TEST(bank.graph_osc_source[0][1][0] == 2);
+    }
+    // A strict failure requiring no dropped entries still makes a backup.
+    {
+        ResilienceFiles files;
+        const char*     text = resilience_document("\"channels\":[{\"zones\":[{\"start\":40,\"instrument\":41}]}]");
+        resilience_write(files.path, text, strlen(text));
+        TEST(! Synth::decode_editor_bank_json(text, static_cast<uint32_t>(strlen(text)), &bank));
+        Synth::BankLoadResult result = Synth::load_editor_bank_guarded(files.path, files.backup, &bank);
+        TEST(result.status == Synth::BankLoadStatus::salvaged && result.skipped == 1);
+        TEST(result.backup == Synth::BankBackupStatus::renamed);
+        TEST(bank.bank.channel_zones[0][0].start_note == 1);
+        TEST(resilience_bytes(files.backup, text, strlen(text)));
+        resilience_write(files.path, text, strlen(text));
+        Synth::BankGuard::reset();
+        TEST(Synth::load_editor_bank_guarded(files.path, files.backup, &bank).status == Synth::BankLoadStatus::locked);
+    }
+    // Real 65535 cannot collide with an invalid-zone flag.  Each bad zone
+    // counts once and later zones carry their original wiring/layout with them.
+    for (const char* bad_zone : { "{\"start\":200,\"instrument\":41}", "{\"instrument\":41}", "17" }) {
+        char fields[1024];
+        snprintf(
+            fields,
+            sizeof(fields),
+            "\"instruments\":[{\"id\":65535,\"name\":\"Hi\",\"layers\":[{\"wave_a\":\"sine\"}]}],\"channels\":[{\"zones\":[%s,{\"start\":64,\"instrument\":65535}]}]",
+            bad_zone);
+        const char* text = resilience_document(
+            fields,
+            "{\"osc_sources\":[{\"channel\":0,\"zone\":1,\"wiring\":[{\"slot\":0,\"layer\":1}]}],\"layouts\":[{\"kind\":\"input\",\"channel\":0,\"zone\":1,\"x\":91}]}");
+        resilience_damage(text, &bank, Synth::BankLoadStatus::salvaged, 2);
+        TEST(bank.bank.channel_zones[0][0].start_note == 1 && bank.bank.channel_zones[0][1].start_note == 0);
+        TEST(strcmp(bank.instrument_names[bank.bank.channel_zones[0][0].instrument], "Hi") == 0);
+        TEST(bank.graph_osc_source[0][0][0] == 1);
+        TEST(bank.graph_layout_count == 1 && bank.graph_layout[0].zone == 0 && bank.graph_layout[0].x == 91);
+        ResilienceFiles files;
+        resilience_write(files.path, text, strlen(text));
+        TEST(Synth::load_editor_bank_guarded(files.path, files.backup, &bank).skipped == 2);
+    }
+    // Inner fixed-capacity arrays invalidate their enclosing entry, not just
+    // the excess tail.  Base pools and other metadata siblings remain intact.
+    for (const char* fields : { "\"instruments\":[{\"id\":42,\"layers\":[{},{},{},{},{},{},{},{}]}]",
+                                "\"envelopes\":[{\"id\":20,\"points\":[{},{},{},{},{},{},{},{},{}]}]",
+                                "\"parameters\":[{\"id\":2,\"kind\":\"plain\",\"sources\":[{},{},{},{},{}]}]" }) {
+        resilience_damage(resilience_document(fields), &bank);
+        TEST(bank.bank.instruments.num_allocated == (strstr(fields, "\"instruments\"") ? 2u : 1u));
+        TEST(bank.bank.envelopes.num_allocated == (strstr(fields, "\"envelopes\"") ? 2u : 1u));
+        TEST(bank.bank.parameters.num_allocated == (strstr(fields, "\"parameters\"") ? 1u : 0u));
+    }
+    resilience_damage(
+        resilience_document(
+            "",
+            "{\"osc_sources\":[{\"channel\":0,\"zone\":0,\"wiring\":[{},{},{},{},{},{},{},{}]}],\"added_ccs\":[{\"chain\":0,\"ccs\":[16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16]}]}"),
+        &bank,
+        Synth::BankLoadStatus::salvaged,
+        2);
+    TEST(bank.graph_osc_source[0][0][0] == 1 && bank.graph_osc_source[0][0][1] == 2);
+    TEST(bank.added_cc_mask[0] == 0);
+    for (const char* record : { "{\"kind\":\"lfo\",\"channel\":0,\"zone\":0,\"lfo_id\":23,\"uid\":0}",
+                                "{\"kind\":\"effect\",\"chain\":\"master\",\"name\":\"\"}" }) {
+        char editor[1024];
+        snprintf(editor, sizeof(editor), "{\"layouts\":[%s]}", record);
+        const char* text = resilience_document("", editor);
+        TEST(Synth::decode_editor_bank_json(text, static_cast<uint32_t>(strlen(text)), &bank));
+        TEST(bank.graph_layout_count == 0);
+        char kinds[8][48];
+        TEST(Synth::take_skipped_entries(kinds, 8) == 1);
+        resilience_damage(text, &bank);
+    }
+    ResilienceFiles files;
+    resilience_write(files.path, "not json", 8);
+    TEST(Synth::load_editor_bank_guarded(files.path, files.backup, &bank).status == Synth::BankLoadStatus::unusable);
+    TEST(bank.effect_routing[0].in == Sculptor::effect_in_output);
+    TEST(bank.effect_routing[Synth::max_channels].in == Sculptor::effect_in_output);
+}
+
+static void resilience_addendum_regressions()
+{
+    static Synth::InstrumentEditorBank bank;
+    // Wrong token types are damage, while future names and keys are extensions.
+    for (const char* token : { "17", "{}", "null" }) {
+        char fields[1024];
+        snprintf(fields, sizeof(fields), "\"master_chain\":{\"input\":%s}", token);
+        resilience_damage(resilience_document(fields), &bank);
+        TEST(bank.effect_routing[Synth::max_channels].in == 0);
+        snprintf(fields, sizeof(fields), "\"master_chain\":{\"effects\":[{\"type\":\"delay\",\"feeds\":%s}]}", token);
+        resilience_damage(resilience_document(fields), &bank);
+        TEST(bank.bank.master_chain.num_effects == 1);
+        if (strcmp(token, "{}") == 0)
+            continue;
+        snprintf(fields,
+                 sizeof(fields),
+                 "\"master_chain\":{\"effects\":[{\"type\":\"delay\",\"params\":{\"time\":%s}}]}",
+                 token);
+        resilience_damage(resilience_document(fields), &bank);
+        TEST(bank.bank.master_chain.num_effects == 1);
+    }
+    for (const char* token : { "17", "[]", "null" }) {
+        char fields[1024];
+        snprintf(fields, sizeof(fields), "\"master_chain\":{\"effects\":[{\"type\":\"delay\",\"params\":%s}]}", token);
+        resilience_damage(resilience_document(fields), &bank);
+        TEST(bank.bank.master_chain.num_effects == 1);
+    }
+    for (const char* harmless : { "\"master_chain\":{\"input\":\"future\"}",
+                                  "\"master_chain\":{\"effects\":[{\"type\":\"delay\",\"feeds\":\"future\"}]}",
+                                  "\"master_chain\":{\"effects\":[{\"type\":\"delay\",\"params\":{\"future\":17}}]}" })
+        resilience_clean(resilience_document(harmless));
+    // These are parameter descriptors, not entries in the envelope/LFO pools.
+    for (const char* fields :
+         { "\"parameters\":[{\"id\":1,\"kind\":\"envelope\",\"num_points\":0}]",
+           "\"parameters\":[{\"id\":1,\"kind\":\"lfo\",\"lfo\":{\"wave\":\"sine\",\"period_ms\":0}}]",
+           "\"parameters\":[{\"id\":1,\"kind\":\"lfo\",\"lfo\":{\"wave\":\"pulse\",\"period_ms\":100}}]" }) {
+        const char* text = resilience_document(fields);
+        TEST(Synth::decode_editor_bank_json(text, static_cast<uint32_t>(strlen(text)), &bank));
+        resilience_damage(text, &bank);
+        TEST(bank.bank.parameters.num_allocated == 1);
+        const Synth::ParamDescriptor& param = bank.bank.parameters.entries[0];
+        if (param.kind == Synth::ParamKind::envelope) {
+            TEST(param.envelope.num_points == 1);
+        }
+        else {
+            TEST(param.lfo.lfo.period_ms != 0);
+            TEST(param.lfo.lfo.wave == Synth::WaveType::sine_wave);
+        }
+    }
+    for (const char* token : { "\"x\"", "0", "65536", "{}", "null" }) {
+        char fields[1024];
+        snprintf(fields, sizeof(fields), "\"channels\":[{\"zones\":[{\"start\":0,\"instrument\":%s}]}]", token);
+        resilience_damage(resilience_document(fields), &bank);
+        TEST(bank.bank.channel_zones[0][0].instrument == 0);
+        snprintf(
+            fields,
+            sizeof(fields),
+            "\"instruments\":[{\"id\":42,\"layers\":[{\"wave_a\":\"sine\",\"generators\":{\"volume\":{\"envelope_desc_id\":%s}}}]}]",
+            token);
+        resilience_damage(resilience_document(fields), &bank);
+        TEST(bank.bank.instruments.entries[1].layers[0].targets[0].envelope_desc_id == 0);
+    }
+    resilience_damage(resilience_document("\"channels\":[{\"name\":17,\"zones\":17}]"), &bank);
+    TEST(bank.bank.channel_enabled[0] == 0);
+    // Deleting a zone counts its dependent layout, including an already repaired one.
+    for (const char* x : { "51", "\"bad\"" }) {
+        char editor[1024];
+        snprintf(editor, sizeof(editor), "{\"layouts\":[{\"kind\":\"input\",\"channel\":0,\"zone\":0,\"x\":%s}]}", x);
+        resilience_damage(
+            resilience_document(
+                "\"channels\":[{\"zones\":[{\"start\":0,\"instrument\":999},{\"start\":64,\"instrument\":41}]}]",
+                editor),
+            &bank,
+            Synth::BankLoadStatus::salvaged,
+            3);
+        TEST(bank.graph_layout_count == 0);
+        // A damaged zero-zone channel deletes its own effect layout as a dependent.
+        snprintf(editor,
+                 sizeof(editor),
+                 "{\"layouts\":[{\"kind\":\"effect\",\"chain\":0,\"name\":\"Channel output\",\"x\":%s}]}",
+                 x);
+        resilience_damage(resilience_document("\"channels\":[{\"name\":17,\"zones\":17}]", editor),
+                          &bank,
+                          Synth::BankLoadStatus::salvaged,
+                          2);
+        TEST(bank.graph_layout_count == 0);
+    }
+    // A valid disabled channel's chain-wide layout survives a separate pool repair.
+    const char* text =
+        resilience_document("\"channels\":[{\"chain\":{\"effects\":[{\"type\":\"delay\"}]}}]",
+                            "{\"layouts\":[{\"kind\":\"effect\",\"chain\":0,\"name\":\"Channel output\",\"x\":77}]}");
+    resilience_clean(text);
+    text = resilience_document(
+        "\"channels\":[{\"chain\":{\"effects\":[{\"type\":\"delay\"}]}}],\"parameters\":[{\"id\":1,\"kind\":\"future\"}]",
+        "{\"layouts\":[{\"kind\":\"effect\",\"chain\":0,\"name\":\"Channel output\",\"x\":77}]}");
+    resilience_damage(text, &bank);
+    TEST(bank.bank.channel_enabled[0] == 0 && bank.bank.channel_chains[0].num_effects == 1);
+    TEST(bank.graph_layout_count == 1 && bank.graph_layout[0].x == 77);
+    // Only the producing pass contributes ignored-field diagnostics.  Check
+    // before the helper's second locked launch, which is a separate decode.
+    {
+        ResilienceFiles files;
+        Synth::take_ignored_fields(nullptr, 0);
+        text = resilience_document("\"master_chain\":{\"input\":17,\"future\":42}");
+        resilience_write(files.path, text, strlen(text));
+        const Synth::BankLoadResult result = Synth::load_editor_bank_guarded(files.path, files.backup, &bank);
+        TEST(result.status == Synth::BankLoadStatus::salvaged && result.skipped == 1);
+        const uint32_t count = Synth::take_ignored_fields(nullptr, 0);
+        // Missing format, input key, repaired routing value and future key.
+        TEST(count == 4);
+    }
+    // Several recognized bad fields still count one effect entry on retry.
+    resilience_damage(
+        resilience_document(
+            "\"master_chain\":{\"effects\":[{\"type\":\"delay\",\"feeds\":17,\"params\":{\"time\":17,\"mix\":null}}]}"),
+        &bank);
+    TEST(bank.bank.master_chain.num_effects == 1);
+    // The first removed layout must not donate its damage flag to the next
+    // record.  Both records are damaged, and the second is then a dependent.
+    resilience_damage(
+        resilience_document(
+            "\"channels\":[{\"zones\":[{\"start\":0,\"instrument\":999},{\"start\":64,\"instrument\":41}]}]",
+            "{\"layouts\":[{\"kind\":\"input\",\"channel\":0,\"zone\":1,\"x\":\"bad\"},{\"kind\":\"input\",\"channel\":0,\"zone\":0,\"x\":\"bad\"}]}"),
+        &bank,
+        Synth::BankLoadStatus::salvaged,
+        4);
+    TEST(bank.graph_layout_count == 1 && bank.graph_layout[0].zone == 0);
+    // Compaction remaps flags with retained layouts, without adding counts.
+    {
+        static bool drop_instr[Synth::max_instruments];
+        static bool drop_env[Synth::max_envelopes];
+        static bool drop_lfo[Synth::max_lfos];
+        static bool drop_param[Synth::max_parameters];
+        static bool flags[Synth::max_graph_records];
+        Synth::init_default_bank(&bank.bank);
+        bank.graph_layout_count    = 2;
+        bank.graph_layout[0]       = {};
+        bank.graph_layout[0].kind  = 1;
+        bank.graph_layout[0].index = 1;
+        bank.graph_layout[1]       = {};
+        bank.graph_layout[1].kind  = 4;
+        snprintf(bank.graph_layout[1].name, sizeof(bank.graph_layout[1].name), "Channel output");
+        flags[0]    = false;
+        flags[1]    = true;
+        drop_env[0] = true;
+        Synth::salvage_compact(&bank, drop_instr, drop_env, drop_lfo, drop_param, flags);
+        TEST(bank.graph_layout_count == 1 && flags[0]);
+        drop_env[0] = false;
+    }
+}
+
+static void resilience_instrument_drop_layout_damage()
+{
+    static Synth::InstrumentEditorBank bank;
+    static Synth::InstrumentEditorBank without_flags;
+    static bool                        drop_instr[Synth::max_instruments];
+    static bool                        drop_env[Synth::max_envelopes];
+    static bool                        drop_lfo[Synth::max_lfos];
+    static bool                        drop_param[Synth::max_parameters];
+    static bool                        flags[Synth::max_graph_records];
+    for (uint32_t drops : { 1u, 2u }) {
+        for (bool surviving_damage : { false, true }) {
+            bank = {};
+            Synth::init_default_bank(&bank.bank);
+            memset(drop_instr, 0, sizeof(drop_instr));
+            memset(flags, 0, sizeof(flags));
+            for (uint32_t i = 0; i < drops; ++i) {
+                if (i != 0) {
+                    const uint32_t slot = bank.bank.instruments.allocate();
+                    TEST(slot == i);
+                    if (slot != i)
+                        return;
+                    bank.bank.instruments.entries[slot] = bank.bank.instruments.entries[0];
+                }
+                drop_instr[i]                            = true;
+                bank.bank.channel_zones[0][i].start_note = static_cast<uint8_t>(1 + i * 64);
+                bank.bank.channel_zones[0][i].instrument = static_cast<uint8_t>(i);
+                bank.graph_layout[i]                     = {};
+                bank.graph_layout[i].zone                = static_cast<uint8_t>(i);
+                flags[i]                                 = ! surviving_damage;
+            }
+            bank.graph_layout_count       = drops + 1;
+            bank.graph_layout[drops]      = {};
+            bank.graph_layout[drops].kind = 4;
+            bank.graph_layout[drops].x    = 77;
+            strcpy(bank.graph_layout[drops].name, "Channel output");
+            flags[drops]  = surviving_damage;
+            without_flags = bank;
+            Synth::salvage_compact(&bank, drop_instr, drop_env, drop_lfo, drop_param, flags);
+            Synth::salvage_compact(&without_flags, drop_instr, drop_env, drop_lfo, drop_param);
+            TEST(memcmp(&bank, &without_flags, sizeof(bank)) == 0);
+            TEST(bank.bank.instruments.num_allocated == 0);
+            TEST(bank.bank.channel_zones[0][0].start_note == 0);
+            TEST(bank.graph_layout_count == 1);
+            TEST(bank.graph_layout[0].kind == 4 && bank.graph_layout[0].x == 77);
+            TEST(strcmp(bank.graph_layout[0].name, "Channel output") == 0);
+            TEST(flags[0] == surviving_damage);
+            uint32_t damaged_count = 0;
+            for (uint32_t i = 0; i < bank.graph_layout_count; ++i)
+                damaged_count += flags[i] ? 1 : 0;
+            TEST(damaged_count == (surviving_damage ? 1u : 0u));
+            // A later first repair counts a healthy survivor once, not a second
+            // time for one already damaged before the instrument was dropped.
+            const uint32_t first_repair_count = flags[0] ? 0 : 1;
+            TEST(first_repair_count == (surviving_damage ? 0u : 1u));
+        }
+    }
+}
+
 int main()
 {
     test_silence_stdout();
+    resilience_instrument_drop_layout_damage();
+    resilience_addendum_regressions();
+    resilience_revision10_defaulting();
+    resilience_round2_regressions();
+    resilience_review_regressions();
+    resilience_partial_load();
+    resilience_over_capacity();
+    resilience_zero_based_remap();
+    resilience_disabled_and_detached_survival();
+    resilience_lfo_and_descriptor_remap();
+    resilience_counted_losses();
+#ifndef _WIN32
+    resilience_backup_faults();
+#endif
+    resilience_backup_boundaries_and_startup();
+    resilience_legacy_rejected();
+    resilience_source_guards();
     portability_bank_omission_cleanup();
     portability_review_regressions();
     portability_examples();

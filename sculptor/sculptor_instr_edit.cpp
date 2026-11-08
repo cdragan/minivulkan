@@ -476,8 +476,9 @@ static BankBaseline bank_baseline = BankBaseline::unknown_file;
 
 static void save_bank_if_dirty()
 {
-    if (! bank_auto_save_armed || bank_baseline == BankBaseline::unknown_file)
+    if (! bank_auto_save_armed || ! Synth::bank_save_allowed() || bank_baseline == BankBaseline::unknown_file) {
         return;
+    }
 
     const uint32_t len = Synth::encode_editor_bank_json(&instr_bank, probe_json, sizeof(probe_json));
     if (bank_baseline == BankBaseline::snapshot && len != 0 && saved_json_len != 0 && len == saved_json_len &&
@@ -2123,43 +2124,94 @@ static void report_ignored_fields(const char* context)
         Sculptor::notify_error("Synth: and %u more ignored fields in %s", count - 4, context);
 }
 
+static bool bank_locked()
+{
+    return Synth::BankGuard::state() == Synth::BankGuard::State::locked;
+}
+
+static void enter_lockout()
+{
+    static bool entered = false;
+    if (entered)
+        return;
+    entered = true;
+    Sculptor::notify_sticky(
+        Sculptor::NotificationSeverity::error,
+        "The instrument bank is corrupt and a backup already exists (assets/instrument_bank.synth.bak).\nThe bank will not be saved.\nQuit, then move or delete the backup.");
+}
+
+static void draw_bank_lockout()
+{
+    ImGui::TextWrapped(
+        "The instrument bank is locked because a backup already exists.\nThe bank will not be saved.\nQuit, then move or delete assets/instrument_bank.synth.bak.");
+}
+
 static bool load_editor_bank(const char* path)
 {
     static Synth::InstrumentEditorBank scratch;
-
-    const Synth::BankFileStatus status = Synth::load_editor_bank_file(path, &scratch);
+    char                               backup_path[512];
+    snprintf(backup_path, sizeof(backup_path), "%s.bak", path);
+    const Synth::BankLoadResult result = Synth::load_editor_bank_guarded(path, backup_path, &scratch);
     report_ignored_fields(path);
 
-    if (status == Synth::BankFileStatus::absent) {
-        bank_auto_save_armed = true;
-        bank_baseline        = BankBaseline::absent_file;
+    char           skipped[8][48];
+    const uint32_t skipped_total = Synth::take_skipped_entries(skipped, 8);
+    for (uint32_t skipped_index = 0; skipped_index < skipped_total && skipped_index < 4; ++skipped_index) {
+        Sculptor::notify_error("Bank: %s", skipped[skipped_index]);
+    }
+
+    if (result.status == Synth::BankLoadStatus::locked) {
+        enter_lockout();
         return false;
     }
 
-    if (status == Synth::BankFileStatus::too_large) {
-        Sculptor::notify_error("Synth: bank file too large to parse: %s", path);
+    if (result.status == Synth::BankLoadStatus::absent) {
+        if (Synth::bank_save_allowed()) {
+            bank_auto_save_armed = true;
+            bank_baseline        = BankBaseline::absent_file;
+        }
+
         return false;
     }
 
-    if (status == Synth::BankFileStatus::invalid) {
-        Sculptor::notify_error("Synth: bank load failed: %s", path);
-        return false;
+    if (result.status != Synth::BankLoadStatus::ok) {
+        if (result.backup == Synth::BankBackupStatus::renamed_partial)
+            Sculptor::notify_sticky(
+                Sculptor::NotificationSeverity::error,
+                "Bank had %u invalid entries.\nA backup exists at %s, but the damaged original could not be removed.\nSaving is disabled. Quit and remove it.",
+                result.skipped,
+                backup_path);
+        else if (result.backup == Synth::BankBackupStatus::failed)
+            Sculptor::notify_sticky(Sculptor::NotificationSeverity::error,
+                                    "Bank had %u invalid entries but could not be backed up.\nSaving is disabled.",
+                                    result.skipped);
+        else if (result.status == Synth::BankLoadStatus::unusable)
+            Sculptor::notify_sticky(Sculptor::NotificationSeverity::error,
+                                    "Bank could not be loaded.\nOriginal saved to %s.",
+                                    backup_path);
+        else
+            Sculptor::notify_sticky(Sculptor::NotificationSeverity::error,
+                                    "Bank had %u invalid entries.\nOriginal saved to %s.",
+                                    result.skipped,
+                                    backup_path);
     }
-
-    if (! Synth::validate_instrument_bank(&scratch.bank)) {
-        Sculptor::notify_error("Synth: refusing to load an invalid instrument bank");
+    if (! Synth::validate_instrument_bank(&scratch.bank))
         return false;
-    }
-
     save_widget_view();
     clear_view_entries(&osc_views[0][0], Synth::max_channels * Synth::max_instr_per_channel);
     clear_view_entries(fx_views, Synth::max_channels + 1);
-    widget_key           = nullptr;
-    instr_bank           = scratch; // names ride in the bank file
-    osc_graph_reproject  = true;
-    fx_graph_reproject   = true;
+    widget_key          = nullptr;
+    instr_bank          = scratch;
+    osc_graph_reproject = true;
+    fx_graph_reproject  = true;
+    if (! Synth::bank_save_allowed())
+        return true;
     bank_auto_save_armed = true;
-    bank_baseline        = BankBaseline::snapshot;
+
+    // A successful backup removes the original.  Quit must save the recovered bank even without edits.
+    bank_baseline =
+        result.backup == Synth::BankBackupStatus::renamed ? BankBaseline::absent_file : BankBaseline::snapshot;
+
     const bool published = publish_edited_bank();
     save_pending         = false;
     return published;
@@ -2175,7 +2227,10 @@ static void init_editor()
 
     if (load_editor_bank(bank_state_path))
         return;
+    if (! Synth::bank_save_allowed())
+        return;
 
+    instr_bank = {};
     Synth::init_default_bank(&instr_bank.bank);
     instr_bank.effect_routing[0].in                   = Sculptor::effect_in_output;
     instr_bank.effect_routing[Synth::max_channels].in = Sculptor::effect_in_output;
@@ -2796,6 +2851,11 @@ bool Sculptor::SynthEditor::create_gui_frame(uint32_t image_idx, bool* need_real
         return true;
     }
 
+    if (bank_locked()) {
+        draw_bank_lockout();
+        ImGui::End();
+        return true;
+    }
     // Focus queries must run inside the Synth window's Begin scope: outside it
     // they compare against whatever window is current, not Synth. The ChildWindows
     // flag is required: the bare query compares NavWindow against the Synth root,
@@ -5435,7 +5495,8 @@ void Sculptor::gui_synth_info_panel(uint32_t current_channel)
     const bool route_prev = route_to_current_channel;
     ImGui::Checkbox("Route to Current Channel", &route_to_current_channel);
     if (route_to_current_channel != route_prev)
-        ImGui::SaveIniSettingsToDisk(ImGui::GetIO().IniFilename);
+        if (ImGui::GetIO().IniFilename)
+            ImGui::SaveIniSettingsToDisk(ImGui::GetIO().IniFilename);
     Synth::set_midi_route_target(route_to_current_channel ? static_cast<int32_t>(current_channel) : -1);
 
     ImGui::Separator();

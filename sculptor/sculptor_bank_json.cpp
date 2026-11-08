@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 #include "sculptor_bank_json.h"
+#include "../synth/synth_effect_expansion.h"
+#include "sculptor_atomic_file.h"
+#include <sys/stat.h>
+#ifdef _WIN32
+#    include <windows.h>
+#else
+#    include <unistd.h>
+#endif
 #include "../core/d_printf.h"
 #include "../core/vmath.h"
 #include "sculptor_effect_graph.h"
@@ -184,6 +192,8 @@ struct Walker {
     uint32_t         num_toks;
     bool             failed;
     bool             strict_editor_metadata;
+    bool             lenient;
+    bool             guarded;
 };
 
 // A key's decoded stream: every literal byte sequence and every \u escape
@@ -1960,6 +1970,60 @@ static void record_ignored(const char* name)
     ++ignored_count;
 }
 
+static char     skipped_names[8][48];
+static uint32_t skipped_count;
+
+static void record_skipped(const char* what)
+{
+    record_ignored(what);
+    if (skipped_count < 8)
+        snprintf(skipped_names[skipped_count], 48, "%s", what);
+    ++skipped_count;
+}
+
+static bool* damaged_entry;
+static bool  damaged_instruments[Synth::max_instruments];
+static bool  damaged_envelopes[Synth::max_envelopes];
+static bool  damaged_lfos[Synth::max_lfos];
+static bool  damaged_parameters[Synth::max_parameters];
+static bool  damaged_channels[Synth::max_channels];
+static bool  damaged_zones[Synth::max_channels][Synth::max_instr_per_channel];
+static bool  damaged_effects[Synth::max_channels + 1][Synth::max_chain_effects];
+static bool  damaged_layouts[Synth::max_graph_records];
+
+static void mark_damage(const char* what)
+{
+    if (damaged_entry && *damaged_entry)
+        record_ignored(what);
+    else {
+        record_skipped(what);
+        if (damaged_entry)
+            *damaged_entry = true;
+    }
+}
+
+struct DamageScope {
+    bool* previous;
+
+    DamageScope(bool& flag) : previous(damaged_entry) { damaged_entry = &flag; }
+
+    ~DamageScope() { damaged_entry = previous; }
+};
+
+static void record_lost(const char* what)
+{
+    mark_damage(what);
+}
+
+uint32_t Synth::take_skipped_entries(char (*names)[48], uint32_t capacity)
+{
+    const uint32_t count = skipped_count;
+    for (uint32_t i = 0; i < count && i < capacity && i < 8; ++i)
+        memcpy(names[i], skipped_names[i], 48);
+    skipped_count = 0;
+    return count;
+}
+
 uint32_t Synth::take_ignored_fields(char (*names)[48], uint32_t capacity)
 {
     const uint32_t count = ignored_count;
@@ -2202,10 +2266,12 @@ static void want_bool(Walker& w, uint32_t i, bool* out)
 // decoder's range policy (finite, 0..3600).  Both JSON forms share the policy.
 static void want_release_seconds(Walker& w, uint32_t val_idx, float* value)
 {
-    want_float(w, val_idx, value);
-    if (! w.failed && (! std::isfinite(*value) || *value < 0.0f || *value > 3600.0f)) {
+    float parsed = *value;
+    want_float(w, val_idx, &parsed);
+    if (! w.failed && (parsed < 0.0f || parsed > 3600.0f))
         w.failed = true;
-    }
+    if (! w.failed)
+        *value = parsed;
 }
 
 // Reads a STRING token into out (NUL-terminated), unescaping JSON escapes.  Rejects
@@ -2220,8 +2286,11 @@ static void want_text(Walker& w, uint32_t i, char* out, uint32_t out_size)
         return;
     }
 
-    if (! unescape_string(w.doc + t.start, static_cast<uint32_t>(t.end - t.start), out, out_size))
+    if (! unescape_string(w.doc + t.start, static_cast<uint32_t>(t.end - t.start), out, out_size)) {
+        if (w.lenient)
+            memset(out, 0, out_size);
         w.failed = true;
+    }
 }
 
 static void want_enum(Walker& w, uint32_t i, const char* const* names, uint32_t num_names, uint32_t* out)
@@ -2254,6 +2323,8 @@ static void want_routing_name(Walker&            w,
             return;
         }
     unknown_field(w, key);
+    if (w.toks[token].type != JSMN_STRING)
+        mark_damage("routing value, defaulted");
 }
 
 static bool unsigned_literal(Walker& w, uint32_t token, uint32_t maximum, uint32_t* out)
@@ -2280,6 +2351,7 @@ static uint16_t reference_id(Walker& w, uint32_t key, uint32_t token)
     uint32_t value = 0;
     if (! unsigned_literal(w, token, 0xFFFF, &value) || ! value) {
         unknown_field(w, key);
+        mark_damage("invalid reference, defaulted");
         return 0;
     }
     return static_cast<uint16_t>(value);
@@ -2330,32 +2402,51 @@ template <typename F> static void walk_object(Walker& w, uint32_t obj, F handle)
             return;
         }
         handle(key_idx, val_idx);
+        if (w.failed && w.lenient && damaged_entry) {
+            w.failed = false;
+            unknown_field(w, key_idx);
+            mark_damage("invalid entry field, defaulted");
+        }
     }
 }
 
 // Walks one array token, invoking handle(element_index, element_position) for every
-// element; more elements than max_len is malformed input, fewer is fine (the missing
-// tail keeps the default fill).
-template <typename F> static void walk_array(Walker& w, uint32_t arr, uint32_t max_len, F handle)
+// element. Strict mode treats overflow as malformed; lenient named collections
+// count each element beyond max_len as skipped. A missing tail keeps the default fill.
+template <typename F> static void walk_array_impl(Walker& w, uint32_t arr, uint32_t max_len, const char* kind, F handle)
 {
-    const jsmntok_t& t = w.toks[arr];
-    if (t.type != JSMN_ARRAY || static_cast<uint32_t>(t.size) > max_len) {
+    const auto& token = w.toks[arr];
+    if (token.type != JSMN_ARRAY || (static_cast<uint32_t>(token.size) > max_len && (! w.lenient || ! kind))) {
         w.failed = true;
         return;
     }
-
-    uint32_t  idx   = arr + 1;
-    const int elems = t.size;
-
-    for (int e = 0; e < elems && ! w.failed; e++) {
-        const uint32_t elem = idx;
-        idx                 = skip_value(w, elem);
-        if (idx == invalid_index) {
+    uint32_t next = arr + 1;
+    for (uint32_t e = 0; e < static_cast<uint32_t>(token.size) && ! w.failed; ++e) {
+        const uint32_t element = next;
+        next                   = skip_value(w, element);
+        if (next == invalid_index) {
             w.failed = true;
             return;
         }
-        handle(elem, static_cast<uint32_t>(e));
+        if (e >= max_len) {
+            char context[48];
+            snprintf(context, sizeof(context), "%s %u, skipped", kind, e);
+            record_skipped(context);
+        }
+        else
+            handle(element, e);
     }
+}
+
+template <typename F> static void walk_array(Walker& w, uint32_t arr, uint32_t max_len, F handle)
+{
+    // Inner arrays belong to one entry: overflow invalidates that entry.
+    walk_array_impl(w, arr, max_len, nullptr, handle);
+}
+
+template <typename F> static void walk_entries(Walker& w, uint32_t arr, uint32_t max_len, const char* kind, F handle)
+{
+    walk_array_impl(w, arr, max_len, kind, handle);
 }
 
 // Field walk shared by the bank and document decoders; unknown_field carries
@@ -2595,6 +2686,45 @@ static void apply_fir_band_absent_defaults(Synth::Oscillator&      osc,
     }
 }
 
+static void repair_mod_input(Synth::ModInput& input, bool effect = false, bool enable = false)
+{
+    const bool valid = effect ? (enable ? Synth::is_valid_effect_mod_input(input) : Synth::is_valid_effect_input(input))
+                              : (input.source == Synth::ModSource::cc
+                                     ? Synth::cc_is_assignable(input.cc_number)
+                                     : input.source <= Synth::ModSource::pressure_combine && ! input.cc_number);
+    if (! valid || (enable && input.source != Synth::ModSource::none && input.source != Synth::ModSource::cc)) {
+        input.source    = Synth::ModSource::none;
+        input.cc_number = 0;
+        mark_damage("modulation input source, defaulted");
+    }
+}
+
+static bool effect_source_valid(Synth::ModSource source)
+{
+    return source == Synth::ModSource::none || source == Synth::ModSource::pitch_bend ||
+           source == Synth::ModSource::mod_wheel || source == Synth::ModSource::channel_pressure;
+}
+
+static void repair_oscillator(Synth::Oscillator& osc)
+{
+    if (osc.osc_type[1] > Synth::WaveType::pad_wave) {
+        osc.osc_type[1] = Synth::WaveType::no_wave;
+        mark_damage("wave B, defaulted");
+    }
+    for (auto& binding : osc.targets) {
+        if (binding.lfo_depth_source >= Synth::ModSource::cc) {
+            binding.lfo_depth_source = Synth::ModSource::none;
+            mark_damage("LFO depth source, defaulted");
+        }
+        if (binding.lfo_rate_source >= Synth::ModSource::cc) {
+            binding.lfo_rate_source = Synth::ModSource::none;
+            mark_damage("LFO rate source, defaulted");
+        }
+        for (uint32_t i = 0; i < binding.num_inputs; ++i)
+            repair_mod_input(binding.inputs[i]);
+    }
+}
+
 static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
 {
     bool     fm_ratio_routed                      = false;
@@ -2610,6 +2740,16 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
     float string_dispersion_sections = 4.0f;
     osc.string_drive                 = 3.0f;
     osc.string_spectrum              = 2.0f;
+    if (w.lenient && w.toks[obj].type != JSMN_OBJECT) {
+        osc.string_brightness                             = 1.0f;
+        osc.string_dispersion_sections                    = 4.0f;
+        osc.fir_slope_percent                             = 100;
+        osc.fir_type                                      = Synth::fir_bandpass;
+        osc.fir_band_count                                = 1;
+        osc.targets[Synth::mod_fir_band0_gain].base_value = 1.0f;
+        mark_damage("oscillator field, defaulted");
+        return;
+    }
     const Synth::FilterType fir_type = prescan_fir_type(w, obj);
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
@@ -2714,7 +2854,16 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
     // want_int rejects negative spellings and out-of-range magnitudes
     // outright; this explicit range check stays as defense in depth.
     if (fir_slope < 1 || fir_slope > 100) {
-        w.failed = true;
+        if (w.lenient) {
+            fir_slope = 100;
+            mark_damage("FIR slope, defaulted");
+        }
+        else
+            w.failed = true;
+    }
+    if (w.lenient && band_count < 1) {
+        band_count = 1;
+        mark_damage("FIR bands, defaulted");
     }
     osc.fir_slope_percent = static_cast<uint8_t>(fir_slope);
     osc.string_brightness = string_brightness;
@@ -2743,7 +2892,12 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
     // combined static trim must stay inside the pitch editing range.
     if (! w.failed &&
         (pitch_offset < Sculptor::osc_pitch_offset_min || pitch_offset > Sculptor::osc_pitch_offset_max)) {
-        w.failed = true;
+        if (w.lenient) {
+            pitch_offset = 0.0f;
+            mark_damage("pitch offset, defaulted");
+        }
+        else
+            w.failed = true;
     }
     if (! w.failed) {
         const Sculptor::OscTargetView pitch_view = Sculptor::osc_target_view(Synth::mod_pitch, fir_type);
@@ -2758,6 +2912,8 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
     if (! fm_ratio_routed) {
         osc.targets[Synth::mod_fm_ratio].base_value = clamp_stored_mod_ratio(osc.mod_ratio);
     }
+    if (w.lenient)
+        repair_oscillator(osc);
 }
 
 static void decode_instrument(Walker& w, uint32_t obj, Synth::Instrument& instr)
@@ -2887,11 +3043,14 @@ static void envelope_finish(Walker& w, Synth::EnvelopeDescriptor& env, const Env
         return;
 
     if (fields.have_count && fields.have_points && fields.num_points != fields.num_point_entries) {
-        w.failed = true;
-        return;
+        if (! w.lenient) {
+            w.failed = true;
+            return;
+        }
+        mark_damage("envelope point count, defaulted");
     }
 
-    env.num_points = static_cast<uint8_t>(fields.have_count ? fields.num_points : fields.num_point_entries);
+    env.num_points = static_cast<uint8_t>(fields.have_points ? fields.num_point_entries : fields.num_points);
 
     if (! fields.have_points) {
         // Default contour for a point count given without points: one tick per point.
@@ -2972,6 +3131,8 @@ static void decode_param(Walker& w, uint32_t obj, Synth::ParamDescriptor& param)
     uint32_t kind      = 0;
     bool     have_kind = false;
 
+    bool* saved_damage = damaged_entry;
+    damaged_entry      = nullptr;
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "kind")) {
             want_enum(w, val_idx, param_kind_names, num_param_kinds, &kind);
@@ -2979,6 +3140,7 @@ static void decode_param(Walker& w, uint32_t obj, Synth::ParamDescriptor& param)
         }
     });
 
+    damaged_entry = saved_damage;
     if (w.failed || ! have_kind) {
         w.failed = true;
         return;
@@ -3276,7 +3438,7 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
         }
         else if (key_eq(w, key_idx, "params")) {
             if (w.toks[val_idx].type != JSMN_OBJECT) {
-                unknown_field(w, key_idx);
+                mark_damage("effect params, defaulted");
                 return;
             }
             walk_object(w, val_idx, [&](uint32_t param_key, uint32_t binding_token) {
@@ -3285,7 +3447,7 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
                     if (! key_eq(w, param_key, effect_param_keys[static_cast<uint32_t>(prescanned_type)][param]))
                         continue;
                     if (w.toks[binding_token].type != JSMN_OBJECT) {
-                        unknown_field(w, param_key);
+                        mark_damage("effect parameter, defaulted");
                         return;
                     }
                     params_seen[param] = true;
@@ -3363,6 +3525,10 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
         decode_fir_slope(w, slope_token, slot);
     if (w.failed)
         return;
+    if (w.lenient && ! fir_band_count) {
+        fir_band_count = 1;
+        mark_damage("effect band count, defaulted");
+    }
     if (have_fir_bands)
         slot.fir_bands.band_count = static_cast<uint8_t>(fir_band_count);
     if (slot.type == Synth::EffectType::fir) {
@@ -3433,19 +3599,66 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
                 return;
         }
     }
+    if (w.lenient && ! w.failed) {
+        repair_mod_input(slot.enable_input, true, true);
+        auto repair = [&](Synth::EffectParamBinding& binding) {
+            if (! effect_source_valid(binding.lfo_depth_source)) {
+                binding.lfo_depth_source = Synth::ModSource::none;
+                mark_damage("effect depth source, defaulted");
+            }
+            if (! effect_source_valid(binding.lfo_rate_source)) {
+                binding.lfo_rate_source = Synth::ModSource::none;
+                mark_damage("effect rate source, defaulted");
+            }
+            for (uint32_t i = 0; i < binding.num_inputs; ++i)
+                repair_mod_input(binding.inputs[i], true);
+        };
+        for (auto& binding : slot.bindings)
+            repair(binding);
+        for (auto& binding : slot.fir_bands.bands)
+            repair(binding);
+    }
 }
 
 static void decode_chain(Walker&                       w,
                          uint32_t                      obj,
                          Synth::EffectChainBinding&    chain,
-                         Sculptor::EffectChainRouting& routing)
+                         Sculptor::EffectChainRouting& routing,
+                         uint32_t                      owner = Synth::max_channels)
 {
+    if (w.toks[obj].type != JSMN_OBJECT) {
+        if (w.lenient) {
+            chain   = {};
+            routing = {};
+            mark_damage("effect chain, skipped");
+        }
+        else
+            w.failed = true;
+        return;
+    }
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
-        if (key_eq(w, key_idx, "effects"))
-            walk_array(w, val_idx, Synth::max_chain_effects, [&](uint32_t elem, uint32_t pos) {
-                decode_effect(w, elem, chain.effects[pos], &routing.out[pos]);
-                chain.num_effects = static_cast<uint8_t>(pos + 1);
+        if (key_eq(w, key_idx, "effects")) {
+            walk_entries(w, val_idx, Synth::max_chain_effects, "effect", [&](uint32_t elem, uint32_t pos) {
+                DamageScope              scope(damaged_effects[owner][pos]);
+                Synth::EffectSlotBinding slot = {};
+                uint8_t                  feed = 0;
+                decode_effect(w, elem, slot, &feed);
+                if (w.failed && w.lenient) {
+                    w.failed = false;
+                    mark_damage("effect entry, skipped");
+                    return;
+                }
+                chain.effects[pos] = slot;
+                routing.out[pos]   = feed;
+                chain.num_effects  = static_cast<uint8_t>(pos + 1);
             });
+            if (w.failed && w.lenient) {
+                w.failed = false;
+                chain    = {};
+                routing  = {};
+                mark_damage("effect array, skipped");
+            }
+        }
         else if (key_eq(w, key_idx, "input")) {
             uint32_t value = 0;
             want_routing_name(w, key_idx, val_idx, effect_input_names, 3, &value);
@@ -3462,15 +3675,16 @@ static uint16_t file_pool_slots[4][65536];
 static uint16_t file_zone_ids[Synth::max_channels][Synth::max_instr_per_channel];
 static uint16_t file_layout_ids[Synth::max_graph_records];
 static uint16_t staged_layout_id;
+static bool     salvage_identity[Synth::max_channels][Synth::max_instr_per_channel];
+static bool     zone_present[Synth::max_channels][Synth::max_instr_per_channel];
+static bool     zone_invalid[Synth::max_channels][Synth::max_instr_per_channel];
 static_assert(sizeof(file_pool_slots) + sizeof(file_zone_ids) + sizeof(file_layout_ids) + sizeof(staged_layout_id) ==
               bank_json_id_scratch_bytes);
 
 static bool decode_pool_id(Walker& w, uint32_t obj, uint16_t* table, uint32_t slot)
 {
     if (w.toks[obj].type != JSMN_OBJECT) {
-        record_ignored("unknown pool entry, skipped");
-        if (! table[0])
-            table[0] = 1;
+        w.failed = true;
         return false;
     }
     uint32_t id   = 0;
@@ -3482,9 +3696,7 @@ static bool decode_pool_id(Walker& w, uint32_t obj, uint16_t* table, uint32_t sl
         }
     });
     if (! seen) {
-        record_ignored("pool entry without id, skipped");
-        if (! table[0])
-            table[0] = 1;
+        w.failed = true;
         return false;
     }
     if (! id || table[id]) {
@@ -3493,7 +3705,6 @@ static bool decode_pool_id(Walker& w, uint32_t obj, uint16_t* table, uint32_t sl
     }
     if (w.failed)
         return false;
-    table[0]  = 2; // at least one understood entry: missing references are genuinely dangling
     table[id] = static_cast<uint16_t>(slot + 1);
     return true;
 }
@@ -3505,13 +3716,8 @@ static bool resolve_file_id(uint16_t& id, const uint16_t* table, bool zero_based
             record_ignored("absent parameter/instrument reference, using default");
         return true;
     }
-    if (! table[id]) {
-        if (table[0] != 1)
-            return false;
-        record_ignored("reference into legacy id-less pool, skipped");
-        id = 0;
-        return true;
-    }
+    if (! table[id])
+        return false;
     id = static_cast<uint16_t>(table[id] - (zero_based ? 1 : 0));
     return true;
 }
@@ -3536,7 +3742,8 @@ static void decode_zone(Walker& w, uint32_t obj, Synth::Zone& zone, uint16_t& in
         if (key_eq(w, key_idx, "start")) {
             uint8_t start = 0;
             want_u8(w, val_idx, 127, &start);
-            zone.start_note = static_cast<uint8_t>(start + 1);
+            if (! w.failed)
+                zone.start_note = static_cast<uint8_t>(start + 1);
         }
         else if (key_eq(w, key_idx, "instrument")) {
             instrument_id = reference_id(w, key_idx, val_idx);
@@ -3550,6 +3757,8 @@ static void canonicalize_name(char* name);
 
 static bool chain_object_has_effects(Walker& w, uint32_t obj)
 {
+    if (w.toks[obj].type != JSMN_OBJECT)
+        return false;
     bool has_effects = false;
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         const jsmntok_t& token = w.toks[val_idx];
@@ -3561,7 +3770,8 @@ static bool chain_object_has_effects(Walker& w, uint32_t obj)
 
 static void decode_channel(Walker& w, uint32_t obj, Synth::InstrumentEditorBank* out, uint32_t channel)
 {
-    int content_pairs = w.toks[obj].type == JSMN_OBJECT ? w.toks[obj].size : 0;
+    DamageScope scope(damaged_channels[channel]);
+    int         content_pairs = w.toks[obj].type == JSMN_OBJECT ? w.toks[obj].size : 0;
 
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "category"))
@@ -3576,8 +3786,14 @@ static void decode_channel(Walker& w, uint32_t obj, Synth::InstrumentEditorBank*
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         // An explicit empty name is stored as-is but is not custom.  The next
         // encode omits it, so the factory name returns on the next decode.
-        if (key_eq(w, key_idx, "name"))
+        if (key_eq(w, key_idx, "name")) {
             want_text(w, val_idx, out->channel_names[channel], Synth::max_name_len);
+            if (w.failed && w.lenient) {
+                w.failed = false;
+                Synth::get_default_channel_name(channel, out->channel_names[channel], Synth::max_name_len);
+                mark_damage("channel name, defaulted");
+            }
+        }
         else if (key_eq(w, key_idx, "category")) {
             char             category[Synth::max_name_len] = {};
             const jsmntok_t& token                         = w.toks[val_idx];
@@ -3594,14 +3810,33 @@ static void decode_channel(Walker& w, uint32_t obj, Synth::InstrumentEditorBank*
             }
         }
         else if (key_eq(w, key_idx, "zones"))
-            walk_array(w, val_idx, Synth::max_instr_per_channel, [&](uint32_t elem, uint32_t pos) {
+            walk_entries(w, val_idx, Synth::max_instr_per_channel, "zone", [&](uint32_t elem, uint32_t pos) {
+                DamageScope scope(damaged_zones[channel][pos]);
+                zone_present[channel][pos] = true;
                 decode_zone(w, elem, out->bank.channel_zones[channel][pos], file_zone_ids[channel][pos]);
+                if (w.lenient && ! out->bank.channel_zones[channel][pos].start_note)
+                    w.failed = true;
+                if (w.failed && w.lenient) {
+                    w.failed                              = false;
+                    out->bank.channel_zones[channel][pos] = {};
+                    zone_invalid[channel][pos]            = true;
+                    file_zone_ids[channel][pos]           = 0;
+                }
             });
         else if (key_eq(w, key_idx, "chain"))
-            decode_chain(w, val_idx, out->bank.channel_chains[channel], out->effect_routing[channel]);
+            decode_chain(w, val_idx, out->bank.channel_chains[channel], out->effect_routing[channel], channel);
         else
             unknown_field(w, key_idx);
+        if (w.failed && w.lenient) {
+            w.failed = false;
+            mark_damage("channel field, defaulted");
+        }
     });
+    // A chain alone has no playable zones.  Keep its editor state disabled,
+    // rather than treating this healthy channel as a damaged empty channel.
+    if ((w.guarded || w.lenient) && ! damaged_channels[channel] && ! zone_present[channel][0] &&
+        out->bank.channel_chains[channel].num_effects)
+        out->bank.channel_enabled[channel] = 0;
 }
 
 // Pool entries decode into zeroed locals (absent entry fields take their zero
@@ -3609,80 +3844,201 @@ static void decode_channel(Walker& w, uint32_t obj, Synth::InstrumentEditorBank*
 // dense prefix the bank invariants require.  Every allocation is checked - the
 // pool fills up when the document repeats pool arrays, and a full pool must reject
 // the document, never write past its entries.
-static void decode_instruments(Walker& w, uint32_t arr, Synth::InstrumentEditorBank* out)
+// Pool staging uses the original token's id only after the entry validates.
+static uint32_t pool_entry_id(Walker& w, uint32_t elem)
 {
-    walk_array(w, arr, Synth::max_instruments, [&](uint32_t elem, uint32_t pos) {
-        if (! decode_pool_id(w, elem, file_pool_slots[0], out->bank.instruments.num_allocated))
+    uint32_t id = 0;
+    if (w.toks[elem].type != JSMN_OBJECT) {
+        w.failed = true;
+        return 0;
+    }
+    walk_object(w, elem, [&](uint32_t key, uint32_t val) {
+        if (key_eq(w, key, "id"))
+            want_uint(w, val, 65535, &id);
+    });
+    if (! id)
+        w.failed = true;
+    return id;
+}
+
+static void repair_envelope(Walker& w, Synth::EnvelopeDescriptor& env)
+{
+    if (! Synth::salvage_envelope_valid(env)) {
+        if (! env.num_points || env.num_points > Synth::max_envelope_points)
+            env.num_points = 1;
+        if (env.sustain_first_point > env.sustain_last_point || env.sustain_last_point >= env.num_points) {
+            env.sustain_first_point = 0;
+            env.sustain_last_point  = 0;
+        }
+        if (! Synth::salvage_envelope_valid(env))
+            for (uint32_t i = 0; i < env.num_points; ++i)
+                env.points[i].position = 0;
+        mark_damage("envelope field, defaulted");
+    }
+    (void)w;
+}
+
+static void repair_lfo(Walker& w, Synth::LFODescriptor& lfo)
+{
+    if (! lfo.period_ms) {
+        lfo.period_ms = 1000;
+        mark_damage("LFO period, defaulted");
+    }
+    if (lfo.wave != Synth::WaveType::sine_wave && lfo.wave != Synth::WaveType::sawtooth_wave) {
+        lfo.wave = Synth::WaveType::sine_wave;
+        mark_damage("LFO wave, defaulted");
+    }
+    (void)w;
+}
+
+static bool salvage_param_valid(const Synth::ParamDescriptor& param)
+{
+    switch (param.kind) {
+        case Synth::ParamKind::external:
+            return true;
+        case Synth::ParamKind::envelope:
+            return Synth::salvage_envelope_valid(param.envelope);
+        case Synth::ParamKind::lfo:
+            return Synth::salvage_lfo_valid(param.lfo.lfo);
+        case Synth::ParamKind::plain:
+            return param.plain.num_sources <= Synth::max_param_sources;
+    }
+    return false;
+}
+
+// Pool staging shares identity, allocation and damage bookkeeping.  Entry-specific
+// decoding and repair stay in the callers so public strict decoding stays unchanged.
+template <typename Entry, typename Pool, typename Decode, typename Repair, typename Valid>
+static void decode_pool(Walker&     w,
+                        uint32_t    arr,
+                        Pool&       pool,
+                        uint32_t    capacity,
+                        uint32_t    kind,
+                        const char* name,
+                        bool*       flags,
+                        Decode      decode,
+                        Repair      repair,
+                        Valid       valid)
+{
+    walk_entries(w, arr, capacity, name, [&](uint32_t elem, uint32_t) {
+        bool           damaged = false;
+        DamageScope    scope(damaged);
+        const uint32_t id    = pool_entry_id(w, elem);
+        Entry          entry = {};
+        if (! w.failed)
+            decode(elem, entry);
+        if (w.lenient && ! w.failed)
+            repair(entry);
+        if (w.lenient && ! w.failed && ! valid(entry))
+            w.failed = true;
+        if (! w.failed && (file_pool_slots[kind][id] || pool.num_allocated >= capacity))
+            w.failed = true;
+        if (w.failed) {
+            if (w.lenient) {
+                w.failed = false;
+                char context[48];
+                snprintf(context, sizeof(context), "%s entry id %u, skipped", name, id);
+                mark_damage(context);
+            }
             return;
-        Synth::Instrument instr = {};
-        decode_instrument(w, elem, instr);
-        if (w.failed)
-            return;
-        const uint32_t slot = out->bank.instruments.allocate();
+        }
+        const uint32_t slot = pool.allocate();
         if (slot == pool_no_slot) {
             w.failed = true;
             return;
         }
-        out->bank.instruments.entries[slot] = instr;
-        walk_object(w, elem, [&](uint32_t key, uint32_t val) {
-            if (key_eq(w, key, "name"))
-                want_text(w, val, out->instrument_names[slot], Synth::max_name_len);
-        });
+        flags[slot]               = damaged;
+        pool.entries[slot]        = entry;
+        file_pool_slots[kind][id] = static_cast<uint16_t>(slot + 1);
     });
+    if (w.failed && w.lenient) {
+        w.failed = false;
+        char context[48];
+        snprintf(context, sizeof(context), "%s collection, skipped", name);
+        record_skipped(context);
+    }
+}
+
+static void decode_instruments(Walker& w, uint32_t arr, Synth::InstrumentEditorBank* out)
+{
+    decode_pool<Synth::Instrument>(
+        w,
+        arr,
+        out->bank.instruments,
+        Synth::max_instruments,
+        0,
+        "instrument",
+        damaged_instruments,
+        [&](uint32_t elem, Synth::Instrument& entry) {
+            decode_instrument(w, elem, entry);
+            const uint32_t slot = out->bank.instruments.num_allocated;
+            if (! w.failed && slot < Synth::max_instruments) {
+                // A rejected entry must not leave its name in the next reused slot.
+                memset(out->instrument_names[slot], 0, Synth::max_name_len);
+                walk_object(w, elem, [&](uint32_t key, uint32_t val) {
+                    if (key_eq(w, key, "name"))
+                        want_text(w, val, out->instrument_names[slot], Synth::max_name_len);
+                });
+            }
+        },
+        [](Synth::Instrument&) {},
+        Synth::salvage_instrument_valid);
 }
 
 static void decode_envelopes(Walker& w, uint32_t arr, Synth::InstrumentEditorBank* out)
 {
-    walk_array(w, arr, Synth::max_envelopes, [&](uint32_t elem, uint32_t pos) {
-        if (! decode_pool_id(w, elem, file_pool_slots[1], out->bank.envelopes.num_allocated))
-            return;
-        Synth::EnvelopeDescriptor env = {};
-        decode_envelope(w, elem, env);
-        if (w.failed)
-            return;
-        const uint32_t slot = out->bank.envelopes.allocate();
-        if (slot == pool_no_slot) {
-            w.failed = true;
-            return;
-        }
-        out->bank.envelopes.entries[slot] = env;
-    });
+    decode_pool<Synth::EnvelopeDescriptor>(
+        w,
+        arr,
+        out->bank.envelopes,
+        Synth::max_envelopes,
+        1,
+        "envelope",
+        damaged_envelopes,
+        [&](uint32_t elem, Synth::EnvelopeDescriptor& entry) { decode_envelope(w, elem, entry); },
+        [&](Synth::EnvelopeDescriptor& entry) { repair_envelope(w, entry); },
+        Synth::salvage_envelope_valid);
 }
 
 static void decode_lfos(Walker& w, uint32_t arr, Synth::InstrumentEditorBank* out)
 {
-    walk_array(w, arr, Synth::max_lfos, [&](uint32_t elem, uint32_t pos) {
-        if (! decode_pool_id(w, elem, file_pool_slots[2], out->bank.lfos.num_allocated))
-            return;
-        Synth::LFODescriptor lfo = {};
-        decode_lfo(w, elem, lfo);
-        if (w.failed)
-            return;
-        const uint32_t slot = out->bank.lfos.allocate();
-        if (slot == pool_no_slot) {
-            w.failed = true;
-            return;
-        }
-        out->bank.lfos.entries[slot] = lfo;
-    });
+    decode_pool<Synth::LFODescriptor>(
+        w,
+        arr,
+        out->bank.lfos,
+        Synth::max_lfos,
+        2,
+        "LFO",
+        damaged_lfos,
+        [&](uint32_t elem, Synth::LFODescriptor& entry) { decode_lfo(w, elem, entry); },
+        [&](Synth::LFODescriptor& entry) { repair_lfo(w, entry); },
+        Synth::salvage_lfo_valid);
 }
 
 static void decode_parameters(Walker& w, uint32_t arr, Synth::InstrumentEditorBank* out)
 {
-    walk_array(w, arr, Synth::max_parameters, [&](uint32_t elem, uint32_t pos) {
-        if (! decode_pool_id(w, elem, file_pool_slots[3], out->bank.parameters.num_allocated))
-            return;
-        Synth::ParamDescriptor param = {};
-        decode_param(w, elem, param);
-        if (w.failed)
-            return;
-        const uint32_t slot = out->bank.parameters.allocate();
-        if (slot == pool_no_slot) {
-            w.failed = true;
-            return;
-        }
-        out->bank.parameters.entries[slot] = param;
-    });
+    decode_pool<Synth::ParamDescriptor>(
+        w,
+        arr,
+        out->bank.parameters,
+        Synth::max_parameters,
+        3,
+        "parameter",
+        damaged_parameters,
+        [&](uint32_t elem, Synth::ParamDescriptor& entry) {
+            decode_param(w, elem, entry);
+            // Runtime validation does not validate standalone parameter semantics.
+            // Only the guarded strict pass requests a repair retry for these entries.
+            if (w.guarded && ! w.lenient && ! w.failed && ! salvage_param_valid(entry))
+                mark_damage("parameter field, defaulted");
+        },
+        [&](Synth::ParamDescriptor& entry) {
+            if (entry.kind == Synth::ParamKind::envelope)
+                repair_envelope(w, entry.envelope);
+            if (entry.kind == Synth::ParamKind::lfo)
+                repair_lfo(w, entry.lfo.lfo);
+        },
+        salvage_param_valid);
 }
 
 // One sparse layout record.  Field-level checks that do not depend on the
@@ -3706,9 +4062,10 @@ static uint32_t graph_record_kind(Walker& w, uint32_t object, const char* const*
                 }
         }
         unknown_field(w, key);
+        record_lost("unknown layout kind, skipped");
     });
     if (! kind_seen)
-        record_ignored("layout missing kind, skipped");
+        record_skipped("layout missing kind, skipped");
     return kind;
 }
 
@@ -3732,10 +4089,18 @@ static bool decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout
                 names_known = false;
             }
         }
-        if (key_eq(w, key, "channel"))
+        if (key_eq(w, key, "channel")) {
+            uint32_t locator = 0;
+            if (! unsigned_literal(w, value, Synth::max_channels - 1, &locator) && kind != 5)
+                locators |= 128;
             locators |= 1;
-        if (key_eq(w, key, "zone"))
+        }
+        if (key_eq(w, key, "zone")) {
+            uint32_t locator = 0;
+            if (! unsigned_literal(w, value, Synth::max_instr_per_channel - 1, &locator))
+                locators |= 128;
             locators |= 2;
+        }
         if (key_eq(w, key, "layer"))
             locators |= 4;
         if (key_eq(w, key, "envelope_id") || key_eq(w, key, "lfo_id"))
@@ -3749,14 +4114,21 @@ static bool decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout
         if (key_eq(w, key, "node") && tok_text_eq(w, value, "lfo"))
             lfo_node = true;
     });
-    if (! names_known)
-        return false; // unknown roles skip the detached LFO
+    if (! names_known) {
+        record_lost("layout source name, defaulted");
+        if (! w.lenient)
+            return false;
+    } // unknown roles skip the detached LFO
     const uint32_t required = kind == 5 ? (32u | (lfo_node ? 8u : 64u))
                                         : (3u | (kind == 2                ? 4u
                                                  : kind == 3 || kind == 4 ? 24u
                                                                           : 0u));
+    if (w.lenient && (locators & 128)) {
+        mark_damage("layout invalid locator, skipped");
+        return false;
+    }
     if ((locators & required) != required) {
-        record_ignored("layout missing locator, skipped");
+        mark_damage("layout missing locator, skipped");
         return false;
     }
     const uint8_t stored_kinds[] = { 0, 0, 0, 1, 2, 4, 5 };
@@ -3826,7 +4198,7 @@ static bool decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout
             unknown_field(w, key_idx);
     });
     if ((kind == 3 || kind == 4 || (kind == 5 && lfo_node)) && ! staged_layout_id) {
-        record_ignored("layout without valid descriptor reference, skipped");
+        mark_damage("layout without valid descriptor reference, skipped");
         return false;
     }
     if (w.failed)
@@ -3864,6 +4236,11 @@ static bool decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout
         w.failed = true;
         return false;
     }
+    if (((record->kind == 1 || record->kind == 2) && record->uid == 0) ||
+        (record->kind == 4 && (record->zone != 0 || record->index != 0 || record->uid != 0 || ! record->name[0]))) {
+        record_lost("invalid layout record, skipped");
+        return false;
+    }
     return true;
 }
 
@@ -3889,7 +4266,8 @@ static bool decode_source_wiring(Walker& w, uint32_t token, uint8_t* row)
         return false;
     bool valid = true;
     walk_array(w, token, Synth::max_layers, [&](uint32_t element, uint32_t) {
-        uint32_t slot = Synth::max_layers, layer = 0;
+        uint32_t slot  = Synth::max_layers;
+        uint32_t layer = 0;
         walk_object(w, element, [&](uint32_t key, uint32_t value) {
             if (key_eq(w, key, "slot"))
                 want_uint(w, value, 0xFFFF, &slot);
@@ -3927,20 +4305,44 @@ static void decode_editor_state(Walker&                      w,
                                 bool*                        routing_present = nullptr,
                                 bool*                        editor_seen     = nullptr)
 {
-
+    if (w.lenient && w.toks[val_idx].type != JSMN_OBJECT) {
+        record_lost("editor collection, skipped");
+        return;
+    }
     walk_object(w, val_idx, [&](uint32_t key_idx, uint32_t inner_idx) {
         if (editor_seen) {
             *editor_seen = true;
         }
         if (key_eq(w, key_idx, "layouts")) {
+            if (w.lenient && w.toks[inner_idx].type != JSMN_ARRAY) {
+                record_lost("layout collection, skipped");
+                return;
+            }
             uint16_t detached_per_zone[Synth::max_channels][Synth::max_instr_per_channel] = {};
-            walk_array(w, inner_idx, Synth::max_graph_records, [&](uint32_t elem, uint32_t) {
-                Synth::GraphNodeLayout record = {};
-                if (! decode_editor_record(w, elem, &record))
+            walk_entries(w, inner_idx, Synth::max_graph_records, "layout", [&](uint32_t elem, uint32_t) {
+                bool        damaged = false;
+                DamageScope scope(damaged);
+                if (w.lenient && w.toks[elem].type != JSMN_OBJECT) {
+                    record_lost("layout entry, skipped");
                     return;
+                }
+                Synth::GraphNodeLayout record         = {};
+                const uint32_t         skipped_before = skipped_count;
+                if (! decode_editor_record(w, elem, &record)) {
+                    if (w.failed && w.lenient) {
+                        w.failed = false;
+                        if (skipped_count == skipped_before)
+                            record_lost("layout entry, skipped");
+                    }
+                    return;
+                }
                 if (record.kind != 0 && record.kind != 4 && record.kind != 5) {
                     if (record.channel >= Synth::max_channels || record.zone >= Synth::max_instr_per_channel ||
                         ++detached_per_zone[record.channel][record.zone] > Synth::max_detached_per_zone) {
+                        if (w.lenient) {
+                            record_lost("layout capacity entry, skipped");
+                            return;
+                        }
                         w.failed = true;
                         return;
                     }
@@ -3951,9 +4353,7 @@ static void decode_editor_state(Walker&                      w,
                     const Synth::GraphNodeLayout& other = out->graph_layout[i];
                     if (file_layout_ids[i] == staged_layout_id &&
                         Sculptor::graph_layout_record_identity_equal(other, record)) {
-                        // One key addresses one node: compatibility decoding
-                        // drops later records; strict metadata decoding refuses
-                        // duplicates before any deduplication.
+                        mark_damage("duplicate layout record, skipped");
                         if (w.strict_editor_metadata)
                             w.failed = true;
                         return;
@@ -3964,47 +4364,79 @@ static void decode_editor_state(Walker&                      w,
                     return;
                 }
                 file_layout_ids[out->graph_layout_count]     = staged_layout_id;
+                damaged_layouts[out->graph_layout_count]     = damaged;
                 out->graph_layout[out->graph_layout_count++] = record;
             });
         }
         else if (key_eq(w, key_idx, "osc_sources")) {
-            if (! object_array(w, inner_idx)) {
+            if (w.toks[inner_idx].type != JSMN_ARRAY) {
                 unknown_field(w, key_idx);
+                record_lost("editor array, skipped");
                 return;
             }
             bool seen[Synth::max_channels][Synth::max_instr_per_channel] = {};
-            walk_array(w, inner_idx, Synth::max_channels * Synth::max_instr_per_channel, [&](uint32_t elem, uint32_t) {
-                uint32_t channel = Synth::max_channels, zone = Synth::max_instr_per_channel, wiring = 0;
-                walk_object(w, elem, [&](uint32_t key, uint32_t value) {
-                    if (key_eq(w, key, "channel"))
-                        want_uint(w, value, 0xFFFF, &channel);
-                    else if (key_eq(w, key, "zone"))
-                        want_uint(w, value, 0xFFFF, &zone);
-                    else if (key_eq(w, key, "wiring"))
-                        wiring = value;
-                    else
-                        unknown_field(w, key);
-                });
-                uint8_t row[Synth::max_layers] = {};
-                if (w.failed)
-                    return;
-                if (channel >= Synth::max_channels || zone >= Synth::max_instr_per_channel || seen[channel][zone] ||
-                    ! wiring || w.toks[wiring].size == 0 || ! decode_source_wiring(w, wiring, row)) {
-                    unknown_field(w, key_idx);
-                    return;
-                }
-                seen[channel][zone] = true;
-                memcpy(out->graph_osc_source[channel][zone], row, sizeof(row));
-            });
+            walk_entries(w,
+                         inner_idx,
+                         Synth::max_channels * Synth::max_instr_per_channel,
+                         "osc_sources",
+                         [&](uint32_t elem, uint32_t) {
+                             bool        damaged = false;
+                             DamageScope scope(damaged);
+                             if (w.toks[elem].type != JSMN_OBJECT) {
+                                 record_lost("osc_sources element, skipped");
+                                 return;
+                             }
+                             uint32_t channel = Synth::max_channels;
+                             uint32_t zone    = Synth::max_instr_per_channel;
+                             uint32_t wiring  = 0;
+                             walk_object(w, elem, [&](uint32_t key, uint32_t value) {
+                                 if (key_eq(w, key, "channel"))
+                                     want_uint(w, value, 0xFFFF, &channel);
+                                 else if (key_eq(w, key, "zone"))
+                                     want_uint(w, value, 0xFFFF, &zone);
+                                 else if (key_eq(w, key, "wiring"))
+                                     wiring = value;
+                                 else
+                                     unknown_field(w, key);
+                             });
+                             uint8_t row[Synth::max_layers] = {};
+                             if (w.failed) {
+                                 if (w.lenient) {
+                                     w.failed = false;
+                                     record_lost("editor entry, skipped");
+                                 }
+                                 return;
+                             }
+                             if (channel >= Synth::max_channels || zone >= Synth::max_instr_per_channel ||
+                                 seen[channel][zone] || ! wiring || w.toks[wiring].size == 0 ||
+                                 ! decode_source_wiring(w, wiring, row)) {
+                                 unknown_field(w, key_idx);
+                                 record_lost("editor entry, skipped");
+                                 if (w.lenient)
+                                     w.failed = false;
+                                 if (w.lenient && channel < Synth::max_channels &&
+                                     zone < Synth::max_instr_per_channel && ! seen[channel][zone])
+                                     salvage_identity[channel][zone] = true;
+                                 return;
+                             }
+                             seen[channel][zone] = true;
+                             memcpy(out->graph_osc_source[channel][zone], row, sizeof(row));
+                         });
         }
         else if (key_eq(w, key_idx, "added_ccs")) {
-            if (! object_array(w, inner_idx)) {
+            if (w.toks[inner_idx].type != JSMN_ARRAY) {
                 unknown_field(w, key_idx);
+                record_lost("editor array, skipped");
                 return;
             }
             bool seen[Synth::max_channels + 1] = {};
-            walk_array(w, inner_idx, Synth::max_channels + 1, [&](uint32_t elem, uint32_t) {
-                uint32_t owner = Synth::max_channels + 1, ccs = 0;
+            walk_entries(w, inner_idx, Synth::max_channels + 1, "added_ccs", [&](uint32_t elem, uint32_t) {
+                if (w.toks[elem].type != JSMN_OBJECT) {
+                    record_lost("added_ccs element, skipped");
+                    return;
+                }
+                uint32_t owner = Synth::max_channels + 1;
+                uint32_t ccs   = 0;
                 bool     valid = true;
                 walk_object(w, elem, [&](uint32_t key, uint32_t value) {
                     if (key_eq(w, key, "chain"))
@@ -4014,10 +4446,16 @@ static void decode_editor_state(Walker&                      w,
                     else
                         unknown_field(w, key);
                 });
-                if (w.failed)
+                if (w.failed) {
+                    if (w.lenient) {
+                        w.failed = false;
+                        record_lost("editor entry, skipped");
+                    }
                     return;
+                }
                 if (! valid || owner > Synth::max_channels || seen[owner] || ! ccs || w.toks[ccs].type != JSMN_ARRAY) {
                     unknown_field(w, key_idx);
+                    record_lost("editor entry, skipped");
                     return;
                 }
                 uint16_t mask = 0;
@@ -4030,10 +4468,17 @@ static void decode_editor_state(Walker&                      w,
                     }
                     mask |= static_cast<uint16_t>(1u << (cc - 16));
                 });
-                if (w.failed)
+                if (w.failed) {
+                    if (w.lenient) {
+                        w.failed = false;
+                        record_lost("editor entry, skipped");
+                    }
                     return;
-                if (! valid)
+                }
+                if (! valid) {
+                    record_lost("added_ccs entry, skipped");
                     return;
+                }
                 seen[owner]               = true;
                 out->added_cc_mask[owner] = mask;
             });
@@ -4041,6 +4486,285 @@ static void decode_editor_state(Walker&                      w,
         else
             unknown_field(w, key_idx);
     });
+}
+
+// Count dependent layout loss before the editor helpers filter records.  Move
+// scratch identities and flags with the same filter, so later repairs count once.
+static void drop_dependent_layouts(Synth::InstrumentEditorBank& out,
+                                   uint32_t                     channel,
+                                   uint32_t                     zone,
+                                   bool                         whole_channel)
+{
+    uint32_t kept = 0;
+    for (uint32_t i = 0; i < out.graph_layout_count; ++i) {
+        const Synth::GraphNodeLayout& record = out.graph_layout[i];
+        if (record.channel == channel && (whole_channel || (record.kind != 4 && record.zone == zone))) {
+            DamageScope scope(damaged_layouts[i]);
+            mark_damage("dependent layout, skipped");
+            continue;
+        }
+        file_layout_ids[kept]   = file_layout_ids[i];
+        damaged_layouts[kept++] = damaged_layouts[i];
+    }
+    if (whole_channel)
+        Sculptor::channel_records_reset(&out, channel);
+    else
+        Sculptor::zone_records_drop_zone(&out, channel, zone);
+}
+
+static bool salvage_resolve_bank_ids(Synth::InstrumentEditorBank& out)
+{
+    Synth::InstrumentBank& bank = out.bank;
+    static bool            drop_instr[Synth::max_instruments];
+    static bool            drop_env[Synth::max_envelopes];
+    static bool            drop_lfo[Synth::max_lfos];
+    static bool            drop_param[Synth::max_parameters];
+    static bool            default_param[Synth::max_parameters][2 + Synth::max_param_sources];
+    memset(drop_instr, 0, sizeof(drop_instr));
+    memset(drop_env, 0, sizeof(drop_env));
+    memset(drop_lfo, 0, sizeof(drop_lfo));
+    memset(drop_param, 0, sizeof(drop_param));
+    memset(default_param, 0, sizeof(default_param));
+    for (uint32_t i = 0; i < bank.instruments.num_allocated; ++i) {
+        DamageScope scope(damaged_instruments[i]);
+        for (uint32_t l = 0; l < bank.instruments.entries[i].layer_count; ++l)
+            for (auto& target : bank.instruments.entries[i].layers[l].targets) {
+                if (! resolve_file_id(target.envelope_desc_id, file_pool_slots[1])) {
+                    target.envelope_desc_id = 0;
+                    mark_damage("instrument envelope reference, defaulted");
+                }
+                if (! resolve_file_id(target.lfo_desc_id, file_pool_slots[2])) {
+                    target.lfo_desc_id = 0;
+                    mark_damage("instrument LFO reference, defaulted");
+                }
+            }
+    }
+    for (uint32_t i = 0; i < bank.parameters.num_allocated; ++i) {
+        Synth::ParamDescriptor& param   = bank.parameters.entries[i];
+        auto                    resolve = [&](uint16_t& id, uint32_t reference) {
+            default_param[i][reference] = id == 0;
+            if (! resolve_file_id(id, file_pool_slots[3], true)) {
+                drop_param[i] = true;
+                id            = 0;
+            }
+        };
+        if (param.kind == Synth::ParamKind::lfo) {
+            resolve(param.lfo.depth_param_id, 0);
+            resolve(param.lfo.rate_param_id, 1);
+        }
+        else if (param.kind == Synth::ParamKind::plain)
+            for (uint32_t j = 0; j < param.plain.num_sources; ++j)
+                resolve(param.plain.sources[j].param_id, 2 + j);
+    }
+    for (uint32_t round = 0; round < Synth::max_parameters; ++round) {
+        bool changed  = false;
+        bool survivor = false;
+        for (uint32_t i = 0; i < bank.parameters.num_allocated; ++i)
+            survivor |= ! drop_param[i];
+        for (uint32_t i = 0; i < bank.parameters.num_allocated; ++i) {
+            if (drop_param[i])
+                continue;
+            Synth::ParamDescriptor& param   = bank.parameters.entries[i];
+            bool                    invalid = false;
+            auto                    missing = [&](uint16_t id, uint32_t reference) {
+                return default_param[i][reference] ? ! survivor : id >= bank.parameters.num_allocated || drop_param[id];
+            };
+            if (param.kind == Synth::ParamKind::lfo)
+                invalid = missing(param.lfo.depth_param_id, 0) || missing(param.lfo.rate_param_id, 1);
+            else if (param.kind == Synth::ParamKind::plain)
+                for (uint32_t j = 0; j < param.plain.num_sources; ++j)
+                    invalid |= missing(param.plain.sources[j].param_id, 2 + j);
+            if (invalid) {
+                drop_param[i] = true;
+                changed       = true;
+            }
+        }
+        if (! changed)
+            break;
+    }
+    uint16_t default_slot = 0;
+    for (uint32_t i = 0; i < bank.parameters.num_allocated; ++i)
+        if (! drop_param[i]) {
+            default_slot = static_cast<uint16_t>(i);
+            break;
+        }
+    for (uint32_t i = 0; i < bank.parameters.num_allocated; ++i) {
+        if (drop_param[i]) {
+            DamageScope scope(damaged_parameters[i]);
+            mark_damage("dependent parameter, skipped");
+            continue;
+        }
+        Synth::ParamDescriptor& param = bank.parameters.entries[i];
+        if (param.kind == Synth::ParamKind::lfo) {
+            if (default_param[i][0])
+                param.lfo.depth_param_id = default_slot;
+            if (default_param[i][1])
+                param.lfo.rate_param_id = default_slot;
+        }
+        else if (param.kind == Synth::ParamKind::plain)
+            for (uint32_t j = 0; j < param.plain.num_sources; ++j)
+                if (default_param[i][2 + j])
+                    param.plain.sources[j].param_id = default_slot;
+    }
+    for (uint32_t c = 0; c <= Synth::max_channels; ++c) {
+        Synth::EffectChainBinding&    chain   = c < Synth::max_channels ? bank.channel_chains[c] : bank.master_chain;
+        Sculptor::EffectChainRouting& routing = out.effect_routing[c];
+        Synth::EffectChainBinding     trial   = {};
+        Sculptor::EffectChainRouting  kept_routing = routing;
+        memset(kept_routing.out, 0, sizeof(kept_routing.out));
+        for (uint32_t e = 0; e < chain.num_effects; ++e) {
+            DamageScope              scope(damaged_effects[c][e]);
+            Synth::EffectSlotBinding effect = chain.effects[e];
+
+            auto resolve = [&](uint16_t& id) {
+                if (! resolve_file_id(id, file_pool_slots[2])) {
+                    id = 0;
+                    mark_damage("effect LFO reference, defaulted");
+                }
+            };
+            for (auto& binding : effect.bindings)
+                resolve(binding.lfo_desc_id);
+            for (auto& binding : effect.fir_bands.bands)
+                resolve(binding.lfo_desc_id);
+            if (effect.type == Synth::EffectType::none)
+                continue;
+            trial.effects[trial.num_effects] = effect;
+            ++trial.num_effects;
+            if (! Synth::salvage_effect_chain_valid(trial, bank.lfos.num_allocated)) {
+                --trial.num_effects;
+                trial.effects[trial.num_effects] = {};
+                char context[48];
+                snprintf(context, sizeof(context), "effect %u of chain %u, skipped", e, c);
+                mark_damage(context);
+            }
+            else {
+                kept_routing.out[trial.num_effects - 1]   = routing.out[e];
+                damaged_effects[c][trial.num_effects - 1] = damaged_effects[c][e];
+            }
+        }
+        chain   = trial;
+        routing = kept_routing;
+        Sculptor::fx_compact_chain(&chain, &routing);
+        Sculptor::fx_sanitize_routing(&chain, &routing);
+    }
+    uint32_t kept_layouts = 0;
+    for (uint32_t i = 0; i < out.graph_layout_count; ++i) {
+        DamageScope            scope(damaged_layouts[i]);
+        Synth::GraphNodeLayout record = out.graph_layout[i];
+        uint16_t               id     = file_layout_ids[i];
+        if (record.kind == 1 || record.kind == 2 || (record.kind == 4 && id)) {
+            if (! resolve_file_id(id, file_pool_slots[record.kind == 1 ? 1 : 2]) || ! id) {
+                mark_damage("layout descriptor, skipped");
+                continue;
+            }
+            if ((record.kind == 1 ? drop_env[id - 1] : drop_lfo[id - 1])) {
+                mark_damage("dependent layout descriptor, skipped");
+                continue;
+            }
+            if (record.kind == 4)
+                snprintf(record.name, sizeof(record.name), "LFO %u", id);
+            else
+                record.index = static_cast<uint8_t>(id);
+        }
+        if (record.kind != 4 && ! zone_present[record.channel][record.zone]) {
+            mark_damage("layout without decoded zone, skipped");
+            continue;
+        }
+        file_layout_ids[kept_layouts]    = file_layout_ids[i];
+        damaged_layouts[kept_layouts]    = damaged_layouts[i];
+        out.graph_layout[kept_layouts++] = record;
+    }
+    out.graph_layout_count = kept_layouts;
+    // Resolve zones before pool compaction.  Only invalid zones are removed.
+    for (uint32_t c = 0; c < Synth::max_channels; ++c) {
+        uint32_t z        = 0;
+        uint8_t  previous = 0;
+        while (z < Synth::max_instr_per_channel) {
+            Synth::Zone& zone = bank.channel_zones[c][z];
+            DamageScope  scope(damaged_zones[c][z]);
+            if (! zone_present[c][z])
+                break;
+            uint16_t   id    = file_zone_ids[c][z];
+            const bool valid = ! zone_invalid[c][z] && zone.start_note != 0 &&
+                               resolve_file_id(id, file_pool_slots[0], true) && id < bank.instruments.num_allocated &&
+                               ! drop_instr[id] && zone.start_note > previous;
+            if (! valid) {
+                char context[48];
+                snprintf(context, sizeof(context), "zone %u of channel %u, skipped", z, c);
+                mark_damage(context);
+                drop_dependent_layouts(out, c, z, false);
+                for (uint32_t next = z; next + 1 < Synth::max_instr_per_channel; ++next) {
+                    bank.channel_zones[c][next] = bank.channel_zones[c][next + 1];
+                    file_zone_ids[c][next]      = file_zone_ids[c][next + 1];
+                    zone_present[c][next]       = zone_present[c][next + 1];
+                    damaged_zones[c][next]      = damaged_zones[c][next + 1];
+                    zone_invalid[c][next]       = zone_invalid[c][next + 1];
+                    salvage_identity[c][next]   = salvage_identity[c][next + 1];
+                }
+                bank.channel_zones[c][Synth::max_instr_per_channel - 1] = {};
+                file_zone_ids[c][Synth::max_instr_per_channel - 1]      = 0;
+                zone_present[c][Synth::max_instr_per_channel - 1]       = false;
+                zone_invalid[c][Synth::max_instr_per_channel - 1]       = false;
+                salvage_identity[c][Synth::max_instr_per_channel - 1]   = false;
+            }
+            else {
+                zone.instrument = static_cast<uint8_t>(id);
+                previous        = zone.start_note;
+                ++z;
+            }
+        }
+        const uint32_t kept = z;
+        if (kept && bank.channel_zones[c][0].start_note != 1) {
+            DamageScope scope(damaged_zones[c][0]);
+            mark_damage("first zone start, repaired");
+            bank.channel_zones[c][0].start_note = 1;
+        }
+        else if (! kept) {
+            DamageScope scope(damaged_channels[c]);
+            bool        reset = damaged_channels[c];
+            for (uint32_t entry = 0; entry < Synth::max_instr_per_channel; ++entry)
+                reset |= damaged_zones[c][entry];
+            reset |= bank.channel_enabled[c] && ! bank.channel_chains[c].num_effects;
+            if (reset && bank.channel_enabled[c])
+                mark_damage("channel without decoded zones, disabled");
+            bank.channel_enabled[c] = 0;
+            // Healthy disabled channels can retain channel-wide effect layouts.
+            if (reset)
+                drop_dependent_layouts(out, c, 0, true);
+        }
+    }
+    Synth::salvage_compact(&out, drop_instr, drop_env, drop_lfo, drop_param, damaged_layouts);
+    // Reset invalid wiring zone-by-zone, without dropping the editor block.
+    for (uint32_t c = 0; c < Synth::max_channels; ++c)
+        for (uint32_t z = 0; z < Synth::max_instr_per_channel; ++z) {
+            const Synth::Zone& zone = bank.channel_zones[c][z];
+            if (! zone.start_note) {
+                memset(out.graph_osc_source[c][z], 0, Synth::max_layers);
+                continue;
+            }
+            const uint32_t layers = bank.instruments.entries[zone.instrument].layer_count;
+            bool           valid  = true;
+            for (uint8_t source : out.graph_osc_source[c][z])
+                valid &= source <= layers;
+            if (! valid || salvage_identity[c][z]) {
+                Sculptor::set_identity_osc_sources(&out, c, z);
+                if (! salvage_identity[c][z])
+                    record_lost("osc_sources wiring, skipped");
+            }
+        }
+    // All entry invariants hold now; only the whole-bank budget can remain.
+    for (int c = static_cast<int>(Synth::max_channels); c >= 0 && ! Synth::validate_instrument_bank(&bank, true); --c) {
+        Synth::EffectChainBinding& chain =
+            c == static_cast<int>(Synth::max_channels) ? bank.master_chain : bank.channel_chains[c];
+        while (chain.num_effects && ! Synth::validate_instrument_bank(&bank, true)) {
+            --chain.num_effects;
+            chain.effects[chain.num_effects]             = {};
+            out.effect_routing[c].out[chain.num_effects] = 0;
+            DamageScope scope(damaged_effects[c][chain.num_effects]);
+            mark_damage("effect budget slot, skipped");
+        }
+    }
+    return Synth::validate_instrument_bank(&bank, true);
 }
 
 static bool resolve_bank_ids(Synth::InstrumentEditorBank& out)
@@ -4070,13 +4794,20 @@ static bool resolve_bank_ids(Synth::InstrumentEditorBank& out)
         uint32_t kept_zones = 0;
         for (uint32_t z = 0; z < Synth::max_instr_per_channel; ++z) {
             auto& zone = bank.channel_zones[c][z];
-            if (! zone.start_note)
+            if (! zone.start_note) {
+                if (zone_present[c][z]) {
+                    char context[48];
+                    snprintf(context, sizeof(context), "zone %u of channel %u, skipped", z, c);
+                    record_skipped(context);
+                    drop_dependent_layouts(out, c, kept_zones, false);
+                }
                 continue;
+            }
             uint16_t id = file_zone_ids[c][z];
             if (! resolve_file_id(id, file_pool_slots[0], true))
                 return false;
             if (! bank.instruments.num_allocated) {
-                record_ignored("zone without decoded instrument, skipped");
+                record_skipped("zone without decoded instrument, skipped");
                 continue;
             }
             zone.instrument                     = static_cast<uint8_t>(id);
@@ -4085,7 +4816,7 @@ static bool resolve_bank_ids(Synth::InstrumentEditorBank& out)
         for (uint32_t z = kept_zones; z < Synth::max_instr_per_channel; ++z)
             bank.channel_zones[c][z] = {};
         if (! bank.instruments.num_allocated && ! kept_zones && bank.channel_enabled[c]) {
-            record_ignored("channel without decoded zones, disabled");
+            record_skipped("channel without decoded zones, disabled");
             bank.channel_enabled[c] = 0;
         }
         if (! resolve_chain_ids(bank.channel_chains[c], file_pool_slots[2]))
@@ -4095,13 +4826,14 @@ static bool resolve_bank_ids(Synth::InstrumentEditorBank& out)
         return false;
     uint32_t kept_layouts = 0;
     for (uint32_t i = 0; i < out.graph_layout_count; ++i) {
-        auto&    record = out.graph_layout[i];
-        uint16_t id     = file_layout_ids[i];
+        DamageScope scope(damaged_layouts[i]);
+        auto&       record = out.graph_layout[i];
+        uint16_t    id     = file_layout_ids[i];
         if (record.kind == 1 || record.kind == 2 || (record.kind == 4 && id)) {
             if (! resolve_file_id(id, file_pool_slots[record.kind == 1 ? 1 : 2]))
                 return false;
             if (! id) {
-                record_ignored("layout reference defaulted, skipped");
+                mark_damage("layout reference defaulted, skipped");
                 continue;
             }
             if (record.kind == 4)
@@ -4109,9 +4841,8 @@ static bool resolve_bank_ids(Synth::InstrumentEditorBank& out)
             else
                 record.index = static_cast<uint8_t>(id);
         }
-        if (file_pool_slots[0][0] == 1 && record.kind != 4 &&
-            ! bank.channel_zones[record.channel][record.zone].start_note) {
-            record_ignored("layout without decoded zone, skipped");
+        if (record.kind != 4 && ! bank.channel_zones[record.channel][record.zone].start_note) {
+            mark_damage("layout without decoded zone, skipped");
             continue;
         }
         out.graph_layout[kept_layouts++] = record;
@@ -4142,10 +4873,32 @@ static void decode_bank(Walker&                      w,
             decode_lfos(w, val_idx, out);
         else if (key_eq(w, key_idx, "parameters"))
             decode_parameters(w, val_idx, out);
-        else if (key_eq(w, key_idx, "channels"))
-            walk_array(w, val_idx, Synth::max_channels, [&](uint32_t elem, uint32_t pos) {
+        else if (key_eq(w, key_idx, "channels")) {
+            if (w.lenient && w.toks[val_idx].type != JSMN_ARRAY) {
+                record_skipped("channel collection, skipped");
+                return;
+            }
+            walk_entries(w, val_idx, Synth::max_channels, "channel", [&](uint32_t elem, uint32_t pos) {
+                DamageScope scope(damaged_channels[pos]);
+                if (w.toks[elem].type != JSMN_OBJECT) {
+                    if (w.lenient) {
+                        mark_damage("channel entry, skipped");
+                        return;
+                    }
+                    w.failed = true;
+                    return;
+                }
                 decode_channel(w, elem, out, pos);
+                if (w.failed && w.lenient) {
+                    w.failed                       = false;
+                    out->bank.channel_enabled[pos] = 0;
+                    memset(out->bank.channel_zones[pos], 0, sizeof(out->bank.channel_zones[pos]));
+                    out->bank.channel_chains[pos] = {};
+                    Sculptor::channel_records_reset(out, pos);
+                    mark_damage("channel entry, skipped");
+                }
             });
+        }
         else if (key_eq(w, key_idx, "master_chain"))
             decode_chain(w, val_idx, out->bank.master_chain, out->effect_routing[Synth::max_channels]);
         else if (key_eq(w, key_idx, "editor")) {
@@ -5174,17 +5927,36 @@ static bool parse_document(const char* text, uint32_t len, Walker& w)
 // Decode pipeline into decode_scratch: grammar pass, schema overlay
 // onto the defaults, then descriptor validation.
 
-static bool decode_document_into_scratch(const char* text, uint32_t len, bool strict_editor_metadata = false)
+static bool decode_document_into_scratch(const char* text,
+                                         uint32_t    len,
+                                         bool        strict_editor_metadata = false,
+                                         bool        lenient                = false,
+                                         bool        guarded                = false)
 {
-    Walker w = {};
+    skipped_count = 0;
+    Walker w      = {};
     if (! parse_document(text, len, w)) {
         return false;
     }
 
     w.strict_editor_metadata = strict_editor_metadata;
+    w.lenient                = lenient;
+    w.guarded                = guarded;
+    memset(damaged_channels, 0, sizeof(damaged_channels));
+    memset(damaged_instruments, 0, sizeof(damaged_instruments));
+    memset(damaged_envelopes, 0, sizeof(damaged_envelopes));
+    memset(damaged_lfos, 0, sizeof(damaged_lfos));
+    memset(damaged_parameters, 0, sizeof(damaged_parameters));
+    memset(damaged_zones, 0, sizeof(damaged_zones));
+    memset(damaged_effects, 0, sizeof(damaged_effects));
+    memset(damaged_layouts, 0, sizeof(damaged_layouts));
+    damaged_entry = nullptr;
     memset(file_pool_slots, 0, sizeof(file_pool_slots));
     memset(file_zone_ids, 0, sizeof(file_zone_ids));
     memset(file_layout_ids, 0, sizeof(file_layout_ids));
+    memset(salvage_identity, 0, sizeof(salvage_identity));
+    memset(zone_present, 0, sizeof(zone_present));
+    memset(zone_invalid, 0, sizeof(zone_invalid));
     fill_default_editor_bank(&decode_scratch);
 
     bool      routing_present = false;
@@ -5219,7 +5991,7 @@ static bool decode_document_into_scratch(const char* text, uint32_t len, bool st
         return false;
     }
 
-    if (! resolve_bank_ids(decode_scratch))
+    if (lenient ? ! salvage_resolve_bank_ids(decode_scratch) : ! resolve_bank_ids(decode_scratch))
         return false;
     for (uint32_t owner = 0; owner <= Synth::max_channels; ++owner) {
         Synth::EffectChainBinding& chain =
@@ -5229,7 +6001,7 @@ static bool decode_document_into_scratch(const char* text, uint32_t len, bool st
         Sculptor::fx_compact_chain(&chain, &routing);
     }
 
-    if (! Synth::validate_instrument_bank(&decode_scratch.bank, false)) {
+    if (! Synth::validate_instrument_bank(&decode_scratch.bank, lenient)) {
         return false;
     }
     // Editor metadata needs the decoded pools (descriptor ranges) and the
@@ -6061,8 +6833,134 @@ static uint32_t encode_instrument_json_for_domain(char*                         
     return o.pos;
 }
 
+static Synth::BankGuard::State bank_guard_state = Synth::BankGuard::State::open;
+
+void Synth::BankGuard::reset()
+{
+    bank_guard_state = State::open;
+}
+
+Synth::BankGuard::State Synth::BankGuard::state()
+{
+    return bank_guard_state;
+}
+
+bool Synth::bank_save_allowed()
+{
+    return bank_guard_state == BankGuard::State::open;
+}
+
+Synth::BankLoadResult Synth::load_editor_bank_guarded(const char*           path,
+                                                      const char*           backup_path,
+                                                      InstrumentEditorBank* out)
+{
+    BankLoadResult result{ BankLoadStatus::unusable, 0, BankBackupStatus::none };
+    skipped_count = 0;
+    struct stat before;
+#ifdef _WIN32
+    const int exists = stat(path, &before);
+#else
+    const int exists = lstat(path, &before);
+#endif
+    if (exists && errno == ENOENT) {
+        result.status = BankLoadStatus::absent;
+        return result;
+    }
+    bool loaded        = false;
+    bool strict_failed = true;
+    bool regular       = exists == 0 && (before.st_mode & S_IFMT) == S_IFREG;
+    if (regular) {
+        FILE* const file = fopen(path, "rb");
+        if (file) {
+            const size_t got      = fread(json_text, 1, sizeof(json_text), file);
+            const int    extra    = got == sizeof(json_text) ? fgetc(file) : EOF;
+            const bool   readable = ! ferror(file);
+            const bool   closed   = fclose(file) == 0;
+            if (readable && closed && extra == EOF) {
+                loaded = decode_document_into_scratch(json_text, static_cast<uint32_t>(got), false, false, true);
+                if (loaded && ! validate_instrument_bank(&decode_scratch.bank, true))
+                    loaded = false;
+                strict_failed = ! loaded;
+                if (! loaded || skipped_count) {
+                    ignored_count = 0;
+                    loaded = decode_document_into_scratch(json_text, static_cast<uint32_t>(got), false, true, true);
+                }
+                if (loaded) {
+                    bool surviving =
+                        decode_scratch.bank.instruments.num_allocated || decode_scratch.bank.envelopes.num_allocated ||
+                        decode_scratch.bank.lfos.num_allocated || decode_scratch.bank.parameters.num_allocated ||
+                        decode_scratch.bank.master_chain.num_effects;
+                    for (uint32_t c = 0; c < max_channels; ++c)
+                        surviving |= decode_scratch.bank.channel_chains[c].num_effects ||
+                                     (decode_scratch.bank.channel_enabled[c] &&
+                                      decode_scratch.bank.channel_zones[c][0].start_note);
+                    if ((strict_failed || skipped_count) && ! surviving)
+                        loaded = false;
+                }
+            }
+        }
+    }
+    result.skipped = skipped_count;
+    if (loaded && ! strict_failed && ! result.skipped) {
+        result.status = BankLoadStatus::ok;
+        memcpy(out, &decode_scratch, sizeof(*out));
+        return result;
+    }
+    result.status = loaded ? BankLoadStatus::salvaged : BankLoadStatus::unusable;
+    struct stat backup;
+#ifdef _WIN32
+    // GetFileAttributes sees entries, including reparse points, without a write.
+    const DWORD attributes    = GetFileAttributesA(backup_path);
+    const bool  backup_exists = attributes != INVALID_FILE_ATTRIBUTES;
+    const bool  backup_absent = ! backup_exists && GetLastError() == ERROR_FILE_NOT_FOUND;
+#else
+    const int  backup_stat   = lstat(backup_path, &backup);
+    const bool backup_exists = backup_stat == 0;
+    const bool backup_absent = backup_stat != 0 && errno == ENOENT;
+#endif
+    (void)backup;
+    if (backup_exists) {
+        bank_guard_state = BankGuard::State::locked;
+        result.status    = BankLoadStatus::locked;
+        result.backup    = BankBackupStatus::pre_existing;
+        return result;
+    }
+    if (! backup_absent)
+        result.backup = BankBackupStatus::failed;
+    else {
+        const RenameResult renamed = rename_no_replace(path, backup_path);
+        if (renamed == RenameResult::renamed)
+            result.backup = BankBackupStatus::renamed;
+        else if (renamed == RenameResult::renamed_partial)
+            result.backup = BankBackupStatus::renamed_partial;
+        else if (errno == EEXIST) {
+            bank_guard_state = BankGuard::State::locked;
+            result.status    = BankLoadStatus::locked;
+            result.backup    = BankBackupStatus::pre_existing;
+            return result;
+        }
+        else
+            result.backup = BankBackupStatus::failed;
+    }
+    if (result.backup != BankBackupStatus::renamed && bank_guard_state != BankGuard::State::locked)
+        bank_guard_state = BankGuard::State::blocked;
+    if (loaded)
+        memcpy(out, &decode_scratch, sizeof(*out));
+    else {
+        fill_default_editor_bank(out);
+        init_default_bank(&out->bank);
+        out->effect_routing[0].in            = Sculptor::effect_in_output;
+        out->effect_routing[max_channels].in = Sculptor::effect_in_output;
+        for (uint32_t z = 0; z < max_instr_per_channel; ++z)
+            Sculptor::set_identity_osc_sources(out, 0, z);
+    }
+    return result;
+}
+
 int Synth::save_editor_bank_file(const char* path, const InstrumentEditorBank* bank)
 {
+    if (! bank_save_allowed())
+        return EACCES;
     uint32_t len = 0;
 
     const int error = prepare_editor_bank_json(bank, &len);

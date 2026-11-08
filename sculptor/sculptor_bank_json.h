@@ -12,10 +12,48 @@
 // layout id, beyond the parser staging in the namespace below. The tables
 // live in the codec's translation unit; the editor's resident accounting
 // adds this size to its total.
-static constexpr size_t bank_json_id_scratch_bytes = (4u * 65536u + Synth::max_channels * Synth::max_instr_per_channel + Synth::max_graph_records + 1u) * sizeof(uint16_t);
+static constexpr size_t bank_json_id_scratch_bytes =
+    (4u * 65536u + Synth::max_channels * Synth::max_instr_per_channel + Synth::max_graph_records + 1u) *
+    sizeof(uint16_t);
 
 namespace Synth {
 uint32_t take_ignored_fields(char (*names)[48], uint32_t capacity);
+uint32_t take_skipped_entries(char (*names)[48], uint32_t capacity);
+
+enum class BankLoadStatus {
+    ok,
+    absent,
+    salvaged,
+    unusable,
+    locked
+};
+enum class BankBackupStatus {
+    renamed,
+    renamed_partial,
+    pre_existing,
+    failed,
+    none
+};
+
+struct BankLoadResult {
+    BankLoadStatus   status;
+    uint32_t         skipped;
+    BankBackupStatus backup;
+};
+
+struct BankGuard {
+    enum class State {
+        open,
+        blocked,
+        locked
+    };
+    // Reset is only for a new session; production never resets a latched guard.
+    static void  reset();
+    static State state();
+};
+
+bool           bank_save_allowed();
+BankLoadResult load_editor_bank_guarded(const char* path, const char* backup_path, InstrumentEditorBank* out);
 
 // Documents are bounded: the codec stages one document at a time in a shared
 // static buffer whose sizes are internal to the codec's translation unit, and

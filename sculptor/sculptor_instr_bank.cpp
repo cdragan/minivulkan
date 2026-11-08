@@ -650,6 +650,142 @@ static void compact_and_remap_pool(Pool<T, capacity>* pool, char (*names)[Synth:
     }
 }
 
+bool Synth::salvage_envelope_valid(const EnvelopeDescriptor& envelope)
+{
+    return validate_envelope(envelope);
+}
+
+bool Synth::salvage_lfo_valid(const LFODescriptor& lfo)
+{
+    return lfo.period_ms != 0 && (lfo.wave == WaveType::sine_wave || lfo.wave == WaveType::sawtooth_wave);
+}
+
+bool Synth::salvage_instrument_valid(const Instrument& instrument)
+{
+    return validate_instrument(instrument);
+}
+
+bool Synth::salvage_effect_chain_valid(const EffectChainBinding& chain, uint32_t num_lfos)
+{
+    uint32_t modulated = 0;
+    uint32_t bytes     = 0;
+    return validate_effect_chain(chain, num_lfos, &modulated, &bytes);
+}
+
+void Synth::salvage_compact(InstrumentEditorBank* editor,
+                            const bool*           drop_instr,
+                            const bool*           drop_env,
+                            const bool*           drop_lfo,
+                            const bool*           drop_param,
+                            bool*                 layout_damage)
+{
+    InstrumentBank& bank = editor->bank;
+    for (uint32_t i = 0; i < max_instruments; ++i)
+        if (drop_instr[i] && bank.instruments.is_occupied(i))
+            bank.instruments.free(i);
+    for (uint32_t i = 0; i < max_envelopes; ++i)
+        if (drop_env[i] && bank.envelopes.is_occupied(i))
+            bank.envelopes.free(i);
+    for (uint32_t i = 0; i < max_lfos; ++i)
+        if (drop_lfo[i] && bank.lfos.is_occupied(i))
+            bank.lfos.free(i);
+    for (uint32_t i = 0; i < max_parameters; ++i)
+        if (drop_param[i] && bank.parameters.is_occupied(i))
+            bank.parameters.free(i);
+    static uint16_t instruments[max_instruments];
+    static uint16_t envelopes[max_envelopes];
+    static uint16_t lfos[max_lfos];
+    static uint16_t parameters[max_parameters];
+    compact_and_remap_pool(&bank.instruments, editor->instrument_names, instruments);
+    compact_and_remap_pool(&bank.envelopes, nullptr, envelopes);
+    compact_and_remap_pool(&bank.lfos, nullptr, lfos);
+    compact_and_remap_pool(&bank.parameters, nullptr, parameters);
+    for (uint32_t c = 0; c < max_channels; ++c) {
+        for (uint32_t z = 0; z < max_instr_per_channel && bank.channel_zones[c][z].start_note;) {
+            Zone&          zone = bank.channel_zones[c][z];
+            const uint16_t id   = instruments[zone.instrument];
+            if (! id) {
+                if (layout_damage) {
+                    // Match zone_records_drop_zone's filter before it moves the
+                    // layouts; channel-wide effect records always survive.
+                    uint32_t kept = 0;
+                    for (uint32_t i = 0; i < editor->graph_layout_count; ++i) {
+                        const GraphNodeLayout& record = editor->graph_layout[i];
+                        if (record.kind != 4 && record.channel == c && record.zone == z)
+                            continue;
+                        layout_damage[kept++] = layout_damage[i];
+                    }
+                }
+                Sculptor::zone_records_drop_zone(editor, c, z);
+                for (uint32_t next = z; next + 1 < max_instr_per_channel; ++next)
+                    bank.channel_zones[c][next] = bank.channel_zones[c][next + 1];
+                bank.channel_zones[c][max_instr_per_channel - 1] = {};
+            }
+            else {
+                zone.instrument = static_cast<uint8_t>(id - 1);
+                ++z;
+            }
+        }
+        if (bank.channel_zones[c][0].start_note)
+            bank.channel_zones[c][0].start_note = 1;
+    }
+    for (uint32_t i = 0; i < bank.parameters.num_allocated; ++i) {
+        ParamDescriptor& param = bank.parameters.entries[i];
+        if (param.kind == ParamKind::lfo) {
+            const uint16_t depth     = parameters[param.lfo.depth_param_id];
+            const uint16_t rate      = parameters[param.lfo.rate_param_id];
+            param.lfo.depth_param_id = depth ? static_cast<uint16_t>(depth - 1) : 0;
+            param.lfo.rate_param_id  = rate ? static_cast<uint16_t>(rate - 1) : 0;
+        }
+        else if (param.kind == ParamKind::plain) {
+            for (uint32_t j = 0; j < param.plain.num_sources; ++j) {
+                const uint16_t id               = parameters[param.plain.sources[j].param_id];
+                param.plain.sources[j].param_id = id ? static_cast<uint16_t>(id - 1) : 0;
+            }
+        }
+    }
+    for (uint32_t i = 0; i < bank.instruments.num_allocated; ++i)
+        for (uint32_t layer = 0; layer < bank.instruments.entries[i].layer_count; ++layer)
+            for (auto& target : bank.instruments.entries[i].layers[layer].targets) {
+                if (target.envelope_desc_id)
+                    target.envelope_desc_id = envelopes[target.envelope_desc_id - 1];
+                if (target.lfo_desc_id)
+                    target.lfo_desc_id = lfos[target.lfo_desc_id - 1];
+            }
+    for (uint32_t c = 0; c <= max_channels; ++c) {
+        EffectChainBinding& chain = c < max_channels ? bank.channel_chains[c] : bank.master_chain;
+        for (uint32_t i = 0; i < chain.num_effects; ++i) {
+            for (auto& binding : chain.effects[i].bindings)
+                if (binding.lfo_desc_id)
+                    binding.lfo_desc_id = lfos[binding.lfo_desc_id - 1];
+            for (auto& binding : chain.effects[i].fir_bands.bands)
+                if (binding.lfo_desc_id)
+                    binding.lfo_desc_id = lfos[binding.lfo_desc_id - 1];
+        }
+    }
+    uint32_t kept = 0;
+    for (uint32_t i = 0; i < editor->graph_layout_count; ++i) {
+        GraphNodeLayout record = editor->graph_layout[i];
+        uint16_t        id     = 0;
+        if (record.kind == 1 || record.kind == 2) {
+            id = record.index ? (record.kind == 1 ? envelopes[record.index - 1] : lfos[record.index - 1]) : 0;
+            if (! id)
+                continue;
+            record.index = static_cast<uint8_t>(id);
+        }
+        else if (record.kind == 4 && Sculptor::parse_effect_lfo_title(record.name, &id)) {
+            id = id ? lfos[id - 1] : 0;
+            if (! id)
+                continue;
+            snprintf(record.name, sizeof(record.name), "LFO %u", id);
+        }
+        if (layout_damage)
+            layout_damage[kept] = layout_damage[i];
+        editor->graph_layout[kept++] = record;
+    }
+    editor->graph_layout_count = kept;
+}
+
 void Synth::reclaim_unused_slots(Synth::InstrumentEditorBank* editor_bank)
 {
     reclaim_unused_slots(editor_bank, nullptr);

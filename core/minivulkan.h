@@ -62,7 +62,9 @@ inline constexpr void set_vk_object_name(VkObjectType type, uint64_t handle, Des
 void set_vk_object_name(VkObjectType type, uint64_t handle, Description desc);
 #endif
 
+#ifdef __GNUC__
 [[gnu::format(printf, 3, 4)]]
+#endif
 #ifdef NDEBUG
 inline constexpr void begin_debug_label(VkCommandBuffer cmd_buf, uint32_t color, const char* labelFormat, ...) { }
 #else

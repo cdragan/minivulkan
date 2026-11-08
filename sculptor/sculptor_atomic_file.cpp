@@ -69,3 +69,24 @@ int atomic_write_commit(const char* file_path, const char* staging_path, FILE* s
 
     return 0;
 }
+
+RenameResult rename_no_replace(const char* from, const char* to)
+{
+#ifdef _WIN32
+    if (MoveFileExA(from, to, MOVEFILE_WRITE_THROUGH))
+        return RenameResult::renamed;
+
+    const DWORD error = GetLastError();
+    errno             = error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS ? EEXIST : EIO;
+
+    return RenameResult::failed;
+#else
+    if (link(from, to))
+        return RenameResult::failed;
+
+    if (unlink(from) == 0 || unlink(from) == 0)
+        return RenameResult::renamed;
+
+    return RenameResult::renamed_partial;
+#endif
+}
