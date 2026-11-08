@@ -3465,11 +3465,13 @@ static void fir_multiband_staging_regressions()
         degenerate[0] = 2000.0f;
         degenerate[1] = 0.0f;
         TEST(! Synth::stage_fir_multiband_coeff_entry(9, 1, degenerate, &entry));
-        degenerate[1] = degenerate[1] / degenerate[1]; // NaN spread
+        degenerate[1] = NAN;
+
         TEST(! Synth::stage_fir_multiband_coeff_entry(9, 1, degenerate, &entry));
+
         degenerate[1] = 4000.0f;
-        degenerate[0] = 0.0f;
-        degenerate[0] = degenerate[0] / degenerate[0]; // NaN center
+        degenerate[0] = NAN;
+
         TEST(! Synth::stage_fir_multiband_coeff_entry(9, 1, degenerate, &entry));
     }
 
