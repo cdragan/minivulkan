@@ -7926,10 +7926,12 @@ static void m1_reverb(M1Reverb& state, float* left, float* right, uint32_t rate,
         aoff[a] = asum;
         asum += alen[a];
     }
-    const uint32_t stride   = sum + 8 + asum;
-    const float    feedback = 0.75f * 0.28f + 0.7f;
-    const float    damp1    = 0.4f * 0.4f;
-    const float    damp2    = 1.0f - damp1;
+    const uint32_t stride      = sum + 8 + asum;
+    const float    feedback    = 0.75f * 0.28f + 0.7f;
+    const float    damping     = 0.4f;
+    const float    damp_cutoff = 16000.0f * expf(damping * -2.3671236f);
+    const float    damp1       = (damping > 0.0f) ? expf(-6.2831853f * damp_cutoff / static_cast<float>(rate)) : 0.0f;
+    const float    damp2       = 1.0f - damp1;
     for (uint32_t i = 0; i < 256; ++i) {
         float scratch[16];
         // Serial side-major versus lanes 0-7 left, 8-15 right.

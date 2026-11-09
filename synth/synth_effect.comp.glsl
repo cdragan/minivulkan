@@ -201,11 +201,16 @@ vec2 apply_reverb(in EffectParams eff)
     // Freeverb's published tuning constants.
     const float scale_room  = 0.28;
     const float offset_room = 0.7;
-    const float scale_damp  = 0.4;
     const float fixed_gain  = 0.015;
 
-    const float feedback         = room_size * scale_room + offset_room;
-    const float damp1            = damping * scale_damp;
+    const float feedback = room_size * scale_room + offset_room;
+    // Damping sets a one-pole lowpass cutoff in the comb feedback loop.  The
+    // cutoff falls exponentially from 16000 Hz to 1500 Hz.
+    const float damp_cutoff_open = 16000.0;
+    const float damp_log_ratio   = -2.3671236; // ln(1500 / 16000)
+    const float two_pi           = 6.2831853;
+    const float damp_cutoff      = damp_cutoff_open * exp(damping * damp_log_ratio);
+    const float damp1            = (damping > 0.0) ? exp(-two_pi * damp_cutoff / float(sampling_rate)) : 0.0;
     const float damp2            = 1.0 - damp1;
     const float input_gain       = fixed_gain;
     const float allpass_feedback = 0.5;
