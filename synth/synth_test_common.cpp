@@ -268,13 +268,13 @@ void fan_out_routing(Synth::Instrument& instrument)
 
 // Zeroed instrument memory carries no dispersion section count; the validator requires an integer 1..6, so
 // fixtures that build instruments from raw memory restore the default four.
-// This helper also seeds the Drive Time and Spectrum defaults.
+// This helper also sets the Hammer Contact default.
 void set_default_dispersion_sections(Synth::Instrument& instrument)
 {
     for (uint32_t layer = 0; layer < Synth::max_layers; ++layer) {
         instrument.layers[layer].string_dispersion_sections = 4.0f;
-        instrument.layers[layer].string_drive               = 3.0f;
-        instrument.layers[layer].string_spectrum            = 2.0f;
+        instrument.layers[layer].string_hammer_contact      = Synth::string_hammer_contact_default;
+        instrument.layers[layer].string_hammer_gain         = Synth::string_hammer_gain_default;
     }
 }
 
@@ -371,7 +371,8 @@ void build_osc_graph_max_fixture(Synth::InstrumentBank* bank,
             continue;
         }
         if (t == Synth::mod_string_damping || t == Synth::mod_string_release_damping ||
-            t == Synth::mod_string_dispersion || t == Synth::mod_string_brightness || t == Synth::mod_string_strike) {
+            t == Synth::mod_string_dispersion || t == Synth::mod_string_brightness || t == Synth::mod_string_hammer ||
+            t == Synth::mod_string_hammer_contact || t == Synth::mod_string_hammer_gain) {
             continue; // projected only under the string wave, which this fixture never uses
         }
         routing.base_value = -1.0f + 0.25f * static_cast<float>(t);

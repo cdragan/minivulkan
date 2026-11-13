@@ -108,7 +108,7 @@ static char                        clipboard_destination_name[Synth::max_name_le
 static_assert(static_cast<uint32_t>(Synth::mod_panning) == 2);
 static_assert(static_cast<uint32_t>(Synth::mod_duty0) == 3);
 static_assert(static_cast<uint32_t>(Synth::mod_fm_index) == 6);
-static_assert(Synth::num_mod_targets == 31);
+static_assert(Synth::num_mod_targets == 33);
 static_assert(static_cast<uint32_t>(Synth::mod_fm_ratio) == 8);
 static_assert(static_cast<uint32_t>(Synth::mod_pad_tilt0) == 9);
 static_assert(Synth::max_mod_inputs == 2);
@@ -146,8 +146,10 @@ const LabelTooltip target_descs[Synth::num_mod_targets] = {
     { "Sustain Damping", "How fast the string vibration decays and darkens while the key is held" },
     { "Release Damping", "Extra string damping applied while the key is released" },
     { "String Dispersion", "Stiff-string inharmonicity: raises the upper partials, strongest on low notes (0 = off)" },
-    { "Pluck Brightness", "Brightness of the initial burst.  Route a source to control the attack tone." },
-    { "Strike", "Blend from the noise pluck to a streamed tonal strike.  Routing is captured at note-on." },
+    { "Pluck Brightness", "Pluck part only.  Scaled by 1 - Hammer." },
+    { "Hammer", "Mix the pluck with the shaped hammer source.  Routing is captured at note-on." },
+    { "Hammer Contact", "Hammer contact window in milliseconds.  Routing is captured at note-on." },
+    { "Hammer Gain", "Hammer source gain.  Routing is captured at note-on.  Velocity has no implicit effect." },
 };
 const char* const wave_names[7]       = { "off", "sine", "sawtooth", "pulse", "noise", "pad", "string" };
 const char* const voice_mode_names[3] = { "multiple", "reuse per-note", "single" };
@@ -165,25 +167,18 @@ const LabelTooltip fir_spread_descs[Synth::num_filter_types] = { { "Filter Off",
                                                                  { "Cutoff (Hz)", "Cutoff frequency (in Hz)" },
                                                                  { "Cutoff (Hz)", "Cutoff frequency (in Hz)" } };
 
-// Oscillator slot layout.  Every target row is followed by a twelve-slot block.
-// 0 output; 1 Waveform A; 2 Duty A / String Dispersion; 3..14 its block
-// 15 Pad Tone A / Sustain Damping; 16..27 its block
-// 28 Release Damping; 29..40 its block; 41 Pluck Brightness; 42..53 its block
-// 54 Strike; 55..66 its block; 67 Drive Time; 68 Strike Spectrum
-// 69 Waveform B; 70 Duty B; 71..82 its block; 83 Pad Tone B; 84..95 its block
-// 96 Mix Mode; 97 Waveform Mix; 98..109 its block; 110 FM Depth; 111..122 its block
-// 123 FM Ratio; 124..135 its block; 136 Volume; 137..148 its block
-// 149 Pan; 150..161 its block; 162 Pitch; 163..174 its block
-// 175 Octave Offset; 176 Filter Type; 177 Band 1 header; 178..179 buttons
-// 180 Offset; 193 Spread; 206 Gain; 219 FIR Slope
-// Bands 2..4 repeat the header/buttons/four-target grammar with a 55-slot stride.
+// Oscillator slot layout.  Each target owns a twelve-slot modulation block.
+// 0 output; 1 Waveform A; 2 Dispersion; 15 Sustain Damping
+// 28 Release Damping; 41 Pluck Brightness; 54 Hammer; 67 Hammer Contact
+// Hammer Contact and Hammer Gain each own a value row and a routing block.
+// The later property rows follow both blocks.  Bands use a 55-slot stride.
 constexpr uint32_t osc_waveform_a_prop    = 1;
-constexpr uint32_t osc_waveform_b_prop    = 69;
-constexpr uint32_t osc_mode_prop          = 96;
-constexpr uint32_t osc_fm_ratio_prop      = 123;
-constexpr uint32_t osc_octave_offset_prop = 175;
-constexpr uint32_t osc_fir_slope_prop     = 219;
-constexpr uint32_t osc_fir_type_prop      = 176;
+constexpr uint32_t osc_waveform_b_prop    = 93;
+constexpr uint32_t osc_mode_prop          = 120;
+constexpr uint32_t osc_fm_ratio_prop      = 147;
+constexpr uint32_t osc_octave_offset_prop = 199;
+constexpr uint32_t osc_fir_slope_prop     = 243;
+constexpr uint32_t osc_fir_type_prop      = 200;
 // Header labels of the band blocks, indexed by band.
 const char* const band_header_names[Sculptor::osc_band_max_bands] = { "Band 1", "Band 2", "Band 3", "Band 4" };
 // Per-target presentation views: the single source of truth for value
@@ -221,7 +216,9 @@ constexpr Sculptor::OscTargetView osc_target_views[Synth::num_mod_targets] = {
     { 0.0f, 1.0f, 1.0f, false },                                         // string release damping
     { 0.0f, 1.0f, 1.0f, false },                                         // string dispersion
     { 0.0f, 1.0f, 1.0f, false },                                         // string brightness
-    { 0.0f, 1.0f, 1.0f, false },                                         // string strike
+    { 0.0f, 1.0f, 1.0f, false },                                         // string hammer
+    { 0.5f, 10.0f, 1.0f, false },                                        // hammer contact
+    { 0.0f, 4.0f, 1.0f, false },                                         // hammer gain
 };
 
 // Low-pass and high-pass cutoff slider.  The editor writes a zero cutoff (edge off)
@@ -280,9 +277,9 @@ bool Sculptor::oscillator_slot_waveform_mode_disabled(const Sculptor::Node& node
     const uint32_t wave_a = node.slots.entries[osc_waveform_a_prop].value.list_index;
     if (wave_a != static_cast<uint32_t>(Synth::WaveType::string_wave) - 1u &&
         slot_idx >= osc_string_extras_first_slot && slot_idx <= osc_string_extras_last_slot) {
-        // Through osc_string_extras_last_slot (68): Release Damping row/block,
-        // Pluck Brightness row (41) and block (42..53), and Strike row/block (54..66) and the Drive Time/Spectrum rows
-        // (67..68).
+        // Through osc_string_extras_last_slot (67): Release Damping row/block,
+        // Pluck Brightness row (41) and block (42..53), and Hammer row/block (54..66) and the Hammer Contact row
+        // (67).
         return true;
     }
     if (wave_a != static_cast<uint32_t>(Synth::WaveType::pad_wave) - 1u &&
@@ -501,7 +498,8 @@ static bool osc_target_owns_row(bool string_wave, uint32_t target)
 {
     const bool string_only = target == Synth::mod_string_dispersion || target == Synth::mod_string_damping ||
                              target == Synth::mod_string_release_damping || target == Synth::mod_string_brightness ||
-                             target == Synth::mod_string_strike;
+                             target == Synth::mod_string_hammer || target == Synth::mod_string_hammer_contact ||
+                             target == Synth::mod_string_hammer_gain;
     const bool shared      = target == Synth::mod_duty0 || target == Synth::mod_pad_tilt0;
     return string_wave ? ! shared : ! string_only;
 }
@@ -1051,7 +1049,7 @@ static void project_osc_node(Sculptor::Graph*           graph,
                                               true));
     append_target_block(graph, node, tone_row_target, osc.targets[tone_row_target], 2);
 
-    // Release Damping and Pluck Brightness own blocks.  Strike owns a block.
+    // Release Damping and Pluck Brightness own blocks.  Hammer owns a block.
     // These controls nest under Waveform A and are hidden on other waves.
     graph->add_slot(node,
                     osc_view_connectable_slot(target_descs[Synth::mod_string_release_damping].name,
@@ -1070,19 +1068,29 @@ static void project_osc_node(Sculptor::Graph*           graph,
                                               true));
     append_target_block(graph, node, Synth::mod_string_brightness, osc.targets[Synth::mod_string_brightness], 2);
     graph->add_slot(node,
-                    osc_view_connectable_slot(target_descs[Synth::mod_string_strike].name,
-                                              osc.string_strike,
-                                              Synth::mod_string_strike,
+                    osc_view_connectable_slot(target_descs[Synth::mod_string_hammer].name,
+                                              osc.string_hammer,
+                                              Synth::mod_string_hammer,
                                               true));
-    append_target_block(graph, node, Synth::mod_string_strike, osc.targets[Synth::mod_string_strike], 2);
-    Sculptor::Slot drive_slot = with_tooltip(bounded_real_slot("Drive Time", osc.string_drive, 0.5f, 10.0f),
-                                             "Strike force window in milliseconds.  Captured at note-on.");
-    drive_slot.child_row      = true;
-    graph->add_slot(node, drive_slot);
-    Sculptor::Slot spectrum_slot = with_tooltip(bounded_real_slot("Strike Spectrum", osc.string_spectrum, 1.5f, 4.0f),
-                                                "Harmonic rolloff exponent.  Captured at note-on.");
-    spectrum_slot.child_row      = true;
-    graph->add_slot(node, spectrum_slot);
+    append_target_block(graph, node, Synth::mod_string_hammer, osc.targets[Synth::mod_string_hammer], 2);
+    graph->add_slot(node,
+                    osc_view_connectable_slot(target_descs[Synth::mod_string_hammer_contact].name,
+                                              osc.string_hammer_contact,
+                                              Synth::mod_string_hammer_contact,
+                                              true));
+    append_target_block(graph,
+                        node,
+                        Synth::mod_string_hammer_contact,
+                        osc.targets[Synth::mod_string_hammer_contact],
+                        2);
+
+    graph->add_slot(node,
+                    osc_view_connectable_slot(target_descs[Synth::mod_string_hammer_gain].name,
+                                              osc.string_hammer_gain,
+                                              Synth::mod_string_hammer_gain,
+                                              true));
+    append_target_block(graph, node, Synth::mod_string_hammer_gain, osc.targets[Synth::mod_string_hammer_gain], 2);
+
     graph->add_slot(node,
                     with_tooltip(list_slot("Waveform B", wave_names, 6, static_cast<uint32_t>(osc.osc_type[1])),
                                  "Secondary oscillator wave shape"));
@@ -1578,9 +1586,9 @@ bool Sculptor::osc_node_slot_hidden(const Graph& graph, const uint32_t node_idx,
         }
     }
 
-    // String-only extras extend through osc_string_extras_last_slot (68):
+    // String-only extras extend through osc_string_extras_last_slot (67):
     // Release Damping row/block, Pluck Brightness row and its twelve-slot
-    // block (42..53), and Strike row/block (54..66) and the Drive Time/Spectrum rows (67..68).  Other waves hide this
+    // block (42..53), and Hammer row/block (54..66) and the Hammer Contact row (67).  Other waves hide this
     // range.
     const Sculptor::Node& node = graph.node(node_idx);
     if (node.oscillator && slot_idx >= osc_string_extras_first_slot && slot_idx <= osc_string_extras_last_slot &&
@@ -2101,11 +2109,11 @@ static bool read_oscillator_layer(const Sculptor::Graph&           graph,
     if (! read_list_prop(slots[osc_fir_type_prop], &index)) {
         return false;
     }
-    osc.fir_type          = static_cast<Synth::FilterType>(index);
-    osc.string_brightness = slots[osc_brightness_slot].value.real;
-    osc.string_strike     = slots[Sculptor::osc_strike_slot].value.real;
-    osc.string_drive      = slots[Sculptor::osc_drive_slot].value.real;
-    osc.string_spectrum   = slots[Sculptor::osc_spectrum_slot].value.real;
+    osc.fir_type              = static_cast<Synth::FilterType>(index);
+    osc.string_brightness     = slots[osc_brightness_slot].value.real;
+    osc.string_hammer         = slots[Sculptor::osc_hammer_slot].value.real;
+    osc.string_hammer_contact = slots[Sculptor::osc_hammer_contact_slot].value.real;
+    osc.string_hammer_gain    = slots[Sculptor::osc_hammer_gain_slot].value.real;
 
     // The projected band blocks encode the count: one uniform block per
     // existing band after Filter Type.
@@ -2139,7 +2147,8 @@ static bool read_oscillator_layer(const Sculptor::Graph&           graph,
                 gen.base_value = osc.fir_slope_percent;
             }
         }
-        else if (target != Synth::mod_string_brightness && target != Synth::mod_string_strike) {
+        else if (target != Synth::mod_string_brightness && target != Synth::mod_string_hammer &&
+                 target != Synth::mod_string_hammer_contact && target != Synth::mod_string_hammer_gain) {
             // The per-band slope rows are integer-percent slots like the
             // stored FIR slope row, so their base reads from the integer
             // property instead of the real union field.

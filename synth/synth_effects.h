@@ -133,7 +133,8 @@ constexpr uint32_t effect_output_reserve =
     max_oscillators * ((rt_step_samples * sizeof(float) + effect_state_round) & ~effect_state_round);
 // Device bytes reserved for the per-oscillator string wave state regions.
 constexpr uint32_t effect_string_reserve =
-    (max_oscillators - 1) * ((string_state_floats * sizeof(float) + effect_state_round) & ~effect_state_round);
+    (max_oscillators - 1) *
+    (((string_state_floats + hammer_source_floats) * sizeof(float) + effect_state_round) & ~effect_state_round);
 constexpr uint32_t effect_state_headroom = 8192;
 constexpr uint32_t effect_state_budget =
     effect_buffer_bytes - effect_fir_reserve - effect_output_reserve - effect_string_reserve - effect_state_headroom;

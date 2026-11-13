@@ -106,7 +106,7 @@ static void build_fir_slope_max_fixture(Synth::InstrumentBank* bank,
 }
 
 // The FIR Slope row is a connectable target row with a 12-slot
-// block at 220..231 after the Strike layout expansion; the disabled
+// block at 219..230; the disabled
 // predicate covers the widened range exactly on filter-off layers, and the
 // maximum-population projection hits the exact node/instance/connection
 // budgets.
@@ -176,45 +176,45 @@ static void osc_fir_slope_projection_regressions()
     const uint32_t expected_slots =
         Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride * instrument.layers[0].fir_band_count;
     TEST(osc.slots.num_allocated == expected_slots);
-    TEST(expected_slots == 232);
+    TEST(expected_slots == 256);
 
-    // Slot 219 is the connectable FIR Slope row.
-    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_slope] == 219);
-    TEST(Sculptor::osc_target_row(Synth::mod_fir_slope) == 219);
+    // Slot 218 is the connectable FIR Slope row.
+    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_slope] == 243);
+    TEST(Sculptor::osc_target_row(Synth::mod_fir_slope) == 243);
     {
-        const Sculptor::Slot& row = osc.slots.entries[219];
+        const Sculptor::Slot& row = osc.slots.entries[243];
         TEST(row.connectable);
         TEST(row.drop_menu);
         TEST(strncmp(row.name, "FIR Slope", sizeof(row.name)) == 0);
         TEST(row.property_type == Sculptor::PropertyType::integer);
     }
-    // The block follows the row: the env dot at 220 and the source dots at
-    // 226/229, all twelve slots allocated.
-    TEST(Sculptor::osc_target_env_dot(Synth::mod_fir_slope) == 220);
-    TEST(Sculptor::osc_target_src_dot(Synth::mod_fir_slope, 0) == 226);
-    TEST(Sculptor::osc_target_src_dot(Synth::mod_fir_slope, 1) == 229);
+    // The block follows the row: the env dot at 219 and the source dots at
+    // 225/228, all twelve slots allocated.
+    TEST(Sculptor::osc_target_env_dot(Synth::mod_fir_slope) == 244);
+    TEST(Sculptor::osc_target_src_dot(Synth::mod_fir_slope, 0) == 250);
+    TEST(Sculptor::osc_target_src_dot(Synth::mod_fir_slope, 1) == 253);
     {
-        const Sculptor::Slot& env_dot = osc.slots.entries[220];
+        const Sculptor::Slot& env_dot = osc.slots.entries[244];
         TEST(env_dot.kind == Sculptor::SlotKind::input);
         TEST(strncmp(env_dot.name, "Envelope", sizeof(env_dot.name)) == 0);
-        const Sculptor::Slot& src_a = osc.slots.entries[226];
+        const Sculptor::Slot& src_a = osc.slots.entries[250];
         TEST(src_a.kind == Sculptor::SlotKind::input);
         TEST(strncmp(src_a.name, "Source A Op", sizeof(src_a.name)) == 0);
-        const Sculptor::Slot& src_b = osc.slots.entries[229];
+        const Sculptor::Slot& src_b = osc.slots.entries[253];
         TEST(src_b.kind == Sculptor::SlotKind::input);
         TEST(strncmp(src_b.name, "Source B Op", sizeof(src_b.name)) == 0);
     }
-    // Existing rows shift by the Strike block and two new scalar rows.
-    TEST(Sculptor::osc_target_row_slot[Synth::mod_volume] == 136);
-    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_spread] == 193);
+    // The Hammer block and Hammer Contact row precede these rows.
+    TEST(Sculptor::osc_target_row_slot[Synth::mod_volume] == 160);
+    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_spread] == 217);
     // Literal budget pins: a future drift cannot pass silently.
-    TEST(Sculptor::max_nodes == 444);
-    TEST(Sculptor::max_node_slots == 397);
+    TEST(Sculptor::max_nodes == 472);
+    TEST(Sculptor::max_node_slots == 421);
 
     // Disabled state matches the filter-off predicate: the fir-off layer
     // grays the whole 166..204 range; the band-pass layers keep every slot
     // of the range active.
-    for (uint32_t s = 193; s <= 231; s++) {
+    for (uint32_t s = 217; s <= 255; s++) {
         TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(mapping.osc_nodes[1]), s));
         TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, s));
         TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(mapping.osc_nodes[2]), s));
@@ -223,9 +223,9 @@ static void osc_fir_slope_projection_regressions()
     // Display: a routed base wins over the scalar; a wired base of zero
     // clamps to 1 at the display boundary (the integer percent domain); a
     // zeroed binding shows the scalar, even with the filter off.
-    TEST(osc.slots.entries[219].value.integer == 64);
-    TEST(graph.node(mapping.osc_nodes[2]).slots.entries[219].value.integer == 1);
-    TEST(graph.node(mapping.osc_nodes[1]).slots.entries[219].value.integer == 37);
+    TEST(osc.slots.entries[243].value.integer == 64);
+    TEST(graph.node(mapping.osc_nodes[2]).slots.entries[243].value.integer == 1);
+    TEST(graph.node(mapping.osc_nodes[1]).slots.entries[243].value.integer == 37);
 
     // An envelope wired into the slope block's env dot compiles onto the
     // slope binding; the wired row is the binding's base, so the routed
@@ -266,9 +266,9 @@ static void osc_fir_slope_projection_regressions()
                                 Synth::max_layers * Synth::num_mod_targets,
                                 4);
         TEST(max_mapping.detached_count == 2 * Synth::max_layers * Synth::num_mod_targets);
-        TEST(max_mapping.detached_count == 434);
+        TEST(max_mapping.detached_count == 462);
         TEST(max_mapping.detached_count <= Sculptor::max_osc_instances);
-        TEST(max_graph.connection_count() == 1169);
+        TEST(max_graph.connection_count() == 1197);
         TEST(max_graph.connection_count() <= Sculptor::max_connections);
     }
 }
@@ -1090,7 +1090,7 @@ struct m2_has_band_seam<GraphT,
 
 constexpr bool m2_band_seam_present = m2_has_band_seam<Sculptor::Graph>::value;
 
-constexpr bool m2_band_rows_present = Synth::num_mod_targets == 31;
+constexpr bool m2_band_rows_present = Synth::num_mod_targets == 33;
 
 // The band parameter target indices: band 0 reuses the stored spread (7) and
 // slope (11) targets; the 14 appended targets follow at 12..25 in the order
@@ -1339,8 +1339,8 @@ static const char* const band_header_names_m2[4] = { "Band 1", "Band 2", "Band 3
 // Low-pass keeps the cutoff and FIR Slope labels.
 static void m2_band_layout_regressions()
 {
-    TEST(Synth::num_mod_targets == 31);
-    TEST(Synth::instrument_graph_layout_capacity == 443);
+    TEST(Synth::num_mod_targets == 33);
+    TEST(Synth::instrument_graph_layout_capacity == 471);
     TEST(Synth::fir_coeff_entry_words == 18);
 
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
@@ -1359,7 +1359,7 @@ static void m2_band_layout_regressions()
     // One band block: 150 + 55 slots.
     TEST(osc.slots.num_allocated == Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride);
     TEST(find_nth_osc_slot(osc, "Band 1", 0) == Sculptor::osc_band_header_slot(0));
-    TEST(find_nth_osc_slot(osc, "Filter Type", 0) == 176);
+    TEST(find_nth_osc_slot(osc, "Filter Type", 0) == 200);
     const uint32_t        header_slot = Sculptor::osc_band_header_slot(0);
     const Sculptor::Slot& header      = osc.slots.entries[header_slot];
     TEST(strncmp(header.name, "Band 1", sizeof(header.name)) == 0);
@@ -1381,10 +1381,10 @@ static void m2_band_layout_regressions()
         const char* name;
         uint32_t    target;
     } band_rows[16] = {
-        { 180, "Offset", 12 }, { 193, "Spread", 7 },  { 206, "Gain", 13 }, { 219, "FIR Slope", 11 },
-        { 235, "Offset", 14 }, { 248, "Spread", 15 }, { 261, "Gain", 16 }, { 274, "FIR Slope", 17 },
-        { 290, "Offset", 18 }, { 303, "Spread", 19 }, { 316, "Gain", 20 }, { 329, "FIR Slope", 21 },
-        { 345, "Offset", 22 }, { 358, "Spread", 23 }, { 371, "Gain", 24 }, { 384, "FIR Slope", 25 },
+        { 204, "Offset", 12 }, { 217, "Spread", 7 },  { 230, "Gain", 13 }, { 243, "FIR Slope", 11 },
+        { 259, "Offset", 14 }, { 272, "Spread", 15 }, { 285, "Gain", 16 }, { 298, "FIR Slope", 17 },
+        { 314, "Offset", 18 }, { 327, "Spread", 19 }, { 340, "Gain", 20 }, { 353, "FIR Slope", 21 },
+        { 369, "Offset", 22 }, { 382, "Spread", 23 }, { 395, "Gain", 24 }, { 408, "FIR Slope", 25 },
     };
 
     bank.bank.instruments.entries[0].layers[0].fir_band_count = 4;
@@ -1413,8 +1413,8 @@ static void m2_band_layout_regressions()
         const Sculptor::Node& lowpass_osc = graph.node(mapping.osc_nodes[0]);
         const uint32_t        cutoff_slot = find_nth_osc_slot(lowpass_osc, "Cutoff (Hz)", 0);
         const uint32_t        slope_slot  = find_nth_osc_slot(lowpass_osc, "FIR Slope", 0);
-        TEST(cutoff_slot == 193);
-        TEST(slope_slot == 219);
+        TEST(cutoff_slot == 217);
+        TEST(slope_slot == 243);
         // The stored single-edge rows keep the fix-6 stored depths: the
         // Cutoff and FIR Slope rows stay one level under Filter Type.
         TEST(lowpass_osc.slots.entries[cutoff_slot].child_row &&
@@ -1495,7 +1495,7 @@ static void m2_band_visibility_regressions()
     const Sculptor::Node& osc                  = graph.node(mapping.osc_nodes[0]);
     const uint32_t        header_slot          = find_nth_osc_slot(osc, "Band 1", 0);
     const uint32_t        filter_slot          = find_nth_osc_slot(osc, "Filter Type", 0);
-    constexpr uint32_t    expected_filter_slot = 176;
+    constexpr uint32_t    expected_filter_slot = 200;
     TEST(header_slot == Sculptor::osc_band_header_slot(0) && filter_slot == expected_filter_slot);
     if (header_slot != Sculptor::osc_band_header_slot(0) || filter_slot != expected_filter_slot) {
         return;
@@ -1527,7 +1527,7 @@ static void m2_band_source_gray_regressions()
     const uint32_t velocity_slot = mapping.input_source_slots[static_cast<uint32_t>(Synth::ModSource::velocity) - 1];
     TEST(find_osc_graph_connection(graph, { osc_node, dot }) != Sculptor::pool_no_slot);
     const uint32_t     filter_slot          = find_nth_osc_slot(graph.node(osc_node), "Filter Type", 0);
-    constexpr uint32_t expected_filter_slot = 176;
+    constexpr uint32_t expected_filter_slot = 200;
     TEST(filter_slot == expected_filter_slot);
     if (filter_slot != expected_filter_slot) {
         return;
@@ -1552,8 +1552,8 @@ static void m2_band_source_gray_regressions()
 
 static void m2_band_add_remove_regressions()
 {
-    TEST(Synth::num_mod_targets == 31);
-    if (Synth::num_mod_targets != 31) {
+    TEST(Synth::num_mod_targets == 33);
+    if (Synth::num_mod_targets != 33) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
@@ -1703,8 +1703,8 @@ static void m2_band_add_remove_regressions()
 // vacated band 3 block stops projecting.
 static void m2_band_remove_first_regressions()
 {
-    TEST(Synth::num_mod_targets == 31);
-    if (Synth::num_mod_targets != 31) {
+    TEST(Synth::num_mod_targets == 33);
+    if (Synth::num_mod_targets != 33) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
@@ -1804,8 +1804,8 @@ static void m2_band_remove_first_regressions()
 // band is a fresh copy of the surviving band rather than the removed state.
 static void m2_band_donation_regressions()
 {
-    TEST(Synth::num_mod_targets == 31);
-    if (Synth::num_mod_targets != 31) {
+    TEST(Synth::num_mod_targets == 33);
+    if (Synth::num_mod_targets != 33) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
@@ -1874,8 +1874,8 @@ static void m2_band_donation_regressions()
 // re-projection); the count change survives.
 static void m2_band_batch_boundary_regressions()
 {
-    TEST(Synth::num_mod_targets == 31);
-    if (Synth::num_mod_targets != 31) {
+    TEST(Synth::num_mod_targets == 33);
+    if (Synth::num_mod_targets != 33) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
@@ -1941,8 +1941,8 @@ static void m2_band_batch_boundary_regressions()
 // band, all [+] at four, both editable in between.
 static void m2_band_button_gray_regressions()
 {
-    TEST(Synth::num_mod_targets == 31);
-    if (Synth::num_mod_targets != 31) {
+    TEST(Synth::num_mod_targets == 33);
+    if (Synth::num_mod_targets != 33) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
@@ -1991,8 +1991,8 @@ static void m2_band_button_gray_regressions()
 // carry base and wiring per band.
 static void m2_per_band_modulation_regressions()
 {
-    TEST(Synth::num_mod_targets == 31);
-    if (Synth::num_mod_targets != 31) {
+    TEST(Synth::num_mod_targets == 33);
+    if (Synth::num_mod_targets != 33) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
@@ -4725,8 +4725,8 @@ static void m2_document_json_regressions()
 // on top of existing bank content without disturbing it.
 static void m2_bank_json_round_trip_regressions()
 {
-    TEST(Synth::num_mod_targets == 31);
-    if (Synth::num_mod_targets != 31) {
+    TEST(Synth::num_mod_targets == 33);
+    if (Synth::num_mod_targets != 33) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
@@ -4838,8 +4838,8 @@ static void m2_bank_json_round_trip_regressions()
 // splits carry the per-band generator bindings to the cloned zone.
 static void m2_library_zone_regressions()
 {
-    TEST(Synth::num_mod_targets == 31);
-    if (Synth::num_mod_targets != 31) {
+    TEST(Synth::num_mod_targets == 33);
+    if (Synth::num_mod_targets != 33) {
         return;
     }
     const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
@@ -5146,8 +5146,8 @@ static void m2_fix2_wave_regressions()
                 return Sculptor::osc_node_slot_hidden(graph, osc_node, slot);
             };
             // Bandpass: band 1's whole block shows, header and buttons included.
-            TEST(! hidden(177) && ! hidden(178) && ! hidden(179));
-            TEST(! hidden(180) && ! hidden(193) && ! hidden(206) && ! hidden(219));
+            TEST(! hidden(201) && ! hidden(202) && ! hidden(203));
+            TEST(! hidden(204) && ! hidden(217) && ! hidden(230) && ! hidden(243));
             // The single-edge filter types keep the stored cutoff and FIR
             // Slope rows visible while the band UI hides wholesale.
             for (uint32_t type = 0; type < Synth::num_filter_types; type++) {
@@ -5157,8 +5157,8 @@ static void m2_fix2_wave_regressions()
                 Sculptor::PropertyValue select_type = {};
                 select_type.list_index              = static_cast<uint8_t>(type);
                 graph.set_slot_value(osc_node, filter_slot, select_type);
-                TEST(! hidden(193) && ! hidden(219));
-                TEST(hidden(177) && hidden(178) && hidden(179) && hidden(180) && hidden(206));
+                TEST(! hidden(217) && ! hidden(243));
+                TEST(hidden(201) && hidden(202) && hidden(203) && hidden(204) && hidden(230));
             }
         }
     }

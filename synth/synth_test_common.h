@@ -299,7 +299,7 @@ void Synth::apply_midi_event(const Synth::MidiEvent&);
 void make_valid_bank(Synth::InstrumentBank& bank);
 
 static_assert(max_portable_records == Synth::instrument_graph_layout_capacity);
-static_assert(max_portable_records == 443);
+static_assert(max_portable_records == 471);
 int  test_exit_code();
 void test_silence_stdout();
 

@@ -230,10 +230,10 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
     const Sculptor::Node& sum = graph.node(mapping.output_node);
     TEST(sum.position.x == 600 && sum.position.y == -450);
     TEST(sum.content_width_override == 360 && sum.content_height_override == 270);
-    const uint32_t          wave_b_slot   = 69; // waveform b, layout contract
-    const uint32_t          mode_slot     = 96; // mix mode, layout contract
+    const uint32_t          wave_b_slot   = 93;  // waveform b, layout contract
+    const uint32_t          mode_slot     = 120; // mix mode, layout contract
     const uint32_t          fm_depth_slot = Sculptor::osc_target_row(Synth::mod_fm_index);
-    const uint32_t          fm_ratio_slot = 123; // fm ratio, layout contract
+    const uint32_t          fm_ratio_slot = 147; // fm ratio, layout contract
     Sculptor::PropertyValue wave          = {};
     wave.list_index                       = 0;
     graph.set_slot_value(mapping.osc_nodes[0], wave_b_slot, wave);
@@ -1021,7 +1021,7 @@ static void check_zero_fm_clipboard_library_round_trips()
                     TEST(instr.layers[l].osc_mode == (active ? Synth::osc_mode_fm : Synth::osc_mode_blend));
                     const Sculptor::Node& node = graph.node(mapping.osc_nodes[l]);
                     TEST(node.slots.entries[Sculptor::osc_target_row(Synth::mod_fm_index)].value.real == depth);
-                    TEST(node.slots.entries[123].value.real == ratio); // fm ratio, layout contract
+                    TEST(node.slots.entries[147].value.real == ratio); // fm ratio, layout contract
                     TEST(fm_widget_enabled(graph, mapping.osc_nodes[l]) == (active != 0));
                 }
             }
@@ -4375,7 +4375,10 @@ static void check_bank_inline_0()
             for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
                 Synth::TargetBinding& routing = instr.layers[0].targets[target];
                 routing.base_value =
-                    (target == Synth::mod_string_brightness || target == Synth::mod_string_strike) ? 0.0f : 0.25f;
+                    (target == Synth::mod_string_brightness || target == Synth::mod_string_hammer ||
+                     target == Synth::mod_string_hammer_contact || target == Synth::mod_string_hammer_gain)
+                        ? 0.0f
+                        : 0.25f;
                 routing.num_inputs = Synth::max_mod_inputs;
                 for (uint32_t in = 0; in < Synth::max_mod_inputs; in++) {
                     routing.inputs[in].source = Synth::ModSource::velocity;
@@ -4846,10 +4849,10 @@ static void check_bank_inline_1()
         // The max_nodes pool (444) leaves the four-target fixture's 66
         // implied nodes too far below the pool for the 120-record detached cap to
         // reach the per-zone node-pool refusal, so this test alone wires fifteen
-        // more targets, including Strike after the target append, with full
+        // more targets, including Hammer after the target append, with full
         // envelope + LFO bindings.
-        constexpr uint32_t strike_target_index =
-            Synth::mod_string_strike; // Appended after brightness in the approved enum.
+        constexpr uint32_t hammer_target_index =
+            Synth::mod_string_hammer; // Appended after brightness in the approved enum.
         for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
             Synth::Oscillator& osc                       = instrument.layers[layer];
             osc.fir_type                                 = Synth::fir_bandpass;
@@ -4859,7 +4862,9 @@ static void check_bank_inline_1()
                 const bool extra = target == Synth::mod_fm_ratio ||
                                    (target >= Synth::mod_fir_band0_offset && target <= Synth::mod_fir_band3_slope) ||
                                    target == Synth::mod_string_damping || target == Synth::mod_string_release_damping ||
-                                   target == Synth::mod_string_brightness || target == strike_target_index;
+                                   target == Synth::mod_string_brightness || target == hammer_target_index ||
+                                   target == Synth::mod_string_hammer_contact ||
+                                   target == Synth::mod_string_hammer_gain;
                 if (osc_graph_target(static_cast<Synth::ModTarget>(target)) || ! extra) {
                     continue;
                 }
@@ -4915,7 +4920,7 @@ static void check_bank_inline_1()
         build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 112, 2, 1, 0, 0);
         TEST(decode_bank_with_editor_section(max_bank, editor_json, &restored));
         // The accepted boundary fills the node pool exactly: the projection
-        // still succeeds at 332 + 112 = 444 nodes after the Strike append.
+        // still succeeds at 360 + 112 = 472 nodes with both hammer targets.
         const std::unique_ptr<Sculptor::Graph> boundary_graph_storage = std::make_unique<Sculptor::Graph>();
         Sculptor::Graph&                       boundary_graph         = *boundary_graph_storage;
         Sculptor::OscGraphMapping              boundary_mapping       = {};
@@ -7071,7 +7076,7 @@ static void resilience_revision10_defaulting()
     }
     for (
         const char* fields :
-        { "\"instruments\":[{\"id\":42,\"voices\":\"future\",\"release_seconds\":2,\"layers\":[{\"wave_a\":\"future\",\"string_dispersion_sections\":0,\"wave_b\":\"sawtooth\",\"string_drive\":5},{\"wave_a\":\"sine\"}]}]",
+        { "\"instruments\":[{\"id\":42,\"voices\":\"future\",\"release_seconds\":2,\"layers\":[{\"wave_a\":\"future\",\"string_dispersion_sections\":0,\"wave_b\":\"sawtooth\",\"string_hammer_contact\":5},{\"wave_a\":\"sine\"}]}]",
           "\"lfos\":[{\"id\":24,\"wave\":\"future\",\"period_ms\":0,\"min_value\":7}]",
           "\"envelopes\":[{\"id\":20,\"num_points\":0,\"sustain_first\":7,\"min_value\":3}]",
           "\"parameters\":[{\"id\":2,\"kind\":\"plain\",\"base_value\":\"bad\",\"sources\":[{\"scale\":\"bad\",\"param_id\":2},{\"scale\":5,\"param_id\":2}]}]",
@@ -7086,7 +7091,7 @@ static void resilience_revision10_defaulting()
             const Synth::Instrument& entry = bank.bank.instruments.entries[1];
             TEST(entry.layer_count == 2 && entry.release_seconds == 2);
             TEST(entry.layers[0].osc_type[1] == Synth::WaveType::sawtooth_wave);
-            TEST(entry.layers[0].string_dispersion_sections == 4 && entry.layers[0].string_drive == 5);
+            TEST(entry.layers[0].string_dispersion_sections == 4 && entry.layers[0].string_hammer_contact == 5);
             TEST(entry.layers[1].osc_type[0] == Synth::WaveType::sine_wave);
         }
         if (strstr(fields, "\"lfos\"")) {

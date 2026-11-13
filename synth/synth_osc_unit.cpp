@@ -15,37 +15,39 @@ constexpr uint32_t t7_rate_field = 5;
 // The value row slot of each ModTarget on an oscillator node; its
 // 12-slot block starts directly after it.
 constexpr uint32_t t7_target_row_slots[Synth::num_mod_targets] = {
-    136, // volume
-    162, // pitch
-    149, // pan
+    160, // volume
+    186, // pitch
+    173, // pan
     2,   // duty a
-    70,  // duty b
-    97,  // waveform mix
-    110, // fm depth
-    193, // fir pitch spread
-    123, // fm ratio
+    94,  // duty b
+    121, // waveform mix
+    134, // fm depth
+    217, // fir pitch spread
+    147, // fm ratio
     15,  // pad tone a
-    83,  // pad tone b
-    219, // fir slope
-    180, // fir band 0 offset
-    206, // fir band 0 gain
-    235, // fir band 1 offset
-    248, // fir band 1 spread
-    261, // fir band 1 gain
-    274, // fir band 1 slope
-    290, // fir band 2 offset
-    303, // fir band 2 spread
-    316, // fir band 2 gain
-    329, // fir band 2 slope
-    345, // fir band 3 offset
-    358, // fir band 3 spread
-    371, // fir band 3 gain
-    384, // fir band 3 slope
+    107, // pad tone b
+    243, // fir slope
+    204, // fir band 0 offset
+    230, // fir band 0 gain
+    259, // fir band 1 offset
+    272, // fir band 1 spread
+    285, // fir band 1 gain
+    298, // fir band 1 slope
+    314, // fir band 2 offset
+    327, // fir band 2 spread
+    340, // fir band 2 gain
+    353, // fir band 2 slope
+    369, // fir band 3 offset
+    382, // fir band 3 spread
+    395, // fir band 3 gain
+    408, // fir band 3 slope
     15,  // damping
     28,  // release damping
     2,   // dispersion
     41,  // brightness
-    54,  // strike
+    54,  // hammer
+    67,  // hammer contact
+    80,  // hammer gain
 };
 
 // True when target t has a projected row on this layer: the duty a / pad tone a
@@ -57,7 +59,7 @@ static bool t7_target_has_row(const Synth::Oscillator& osc, uint32_t t)
     const bool string_wave = osc.osc_type[0] == Synth::WaveType::string_wave;
     const bool string_only = t == Synth::mod_string_damping || t == Synth::mod_string_release_damping ||
                              t == Synth::mod_string_dispersion || t == Synth::mod_string_brightness ||
-                             t == Synth::mod_string_strike;
+                             t == Synth::mod_string_hammer;
     const bool shared      = t == Synth::mod_duty0 || t == Synth::mod_pad_tilt0;
     return string_wave ? ! shared : ! string_only;
 }
@@ -1371,10 +1373,10 @@ static void child_row_projection_regressions()
         // parents.
         const bool band_header = s >= Sculptor::osc_band_first_slot &&
                                  (s - Sculptor::osc_band_first_slot) % Sculptor::osc_band_block_stride == 0u;
-        child_row_expected     = child_row_expected || band_header || s == 28 || s == 29 || (s >= 30 && s <= 68) ||
-                                 s == 175 || s == 219 ||
-                                 (s >= Sculptor::osc_band_first_slot + 3u &&
-                                  s < Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride);
+        child_row_expected = child_row_expected || band_header || s == 28 || s == 29 || (s >= 30 && s <= 67) ||
+                             s == 199 || s == 243 ||
+                             (s >= Sculptor::osc_band_first_slot + 3u &&
+                              s < Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride);
         TEST(osc.slots.entries[s].child_row == child_row_expected);
     }
 
@@ -1685,10 +1687,10 @@ static void osc_direct_modulator_regressions()
             // the widened slot count.  Wave B starts off and the mode starts
             // on blend, so the duty b / mix mode / waveform mix / fm depth / fm
             // ratio rows plus both pad tone families are disabled and nothing else is.
-            const uint32_t wave_b_slot    = 69; // waveform b, layout contract
-            const uint32_t mode_slot      = 96; // mix mode, layout contract
+            const uint32_t wave_b_slot    = 93;  // waveform b, layout contract
+            const uint32_t mode_slot      = 120; // mix mode, layout contract
             const uint32_t fm_depth_slot  = Sculptor::osc_target_row(Synth::mod_fm_index);
-            const uint32_t fm_ratio_slot  = 123; // fm ratio, layout contract
+            const uint32_t fm_ratio_slot  = 147; // fm ratio, layout contract
             const uint32_t gated_slots[4] = { Sculptor::osc_target_row(Synth::mod_duty1),
                                               mode_slot,
                                               fm_depth_slot,
@@ -3744,7 +3746,7 @@ static void check_osc_pitch_gating()
         TEST(find_graph_slot(graph, mapping.osc_nodes[0], "Pitch", &pitch_slot));
         TEST(find_graph_slot(graph, mapping.osc_nodes[0], "Octave Offset", &octave_slot));
         TEST(pitch_slot == Sculptor::osc_target_row(Synth::mod_pitch));
-        TEST(octave_slot == 175);
+        TEST(octave_slot == 199);
         const Sculptor::Slot& pitch_row = graph.node(mapping.osc_nodes[0]).slots.entries[pitch_slot];
         TEST(pitch_row.property_type == Sculptor::PropertyType::real);
         TEST(! pitch_row.real_bounded); // a bare input box, not a slider
@@ -3760,7 +3762,7 @@ static void check_osc_pitch_gating()
         const Sculptor::OscTargetView spread_view = Sculptor::osc_target_view(Synth::mod_fir_spread);
         TEST(spread_view.min_value == 0.0f && spread_view.max_value == 36.0f);
         TEST(spread_view.bank_scale == 1.0f && ! spread_view.logarithmic);
-        TEST(Sculptor::osc_target_row(Synth::mod_fir_spread) == 193);
+        TEST(Sculptor::osc_target_row(Synth::mod_fir_spread) == 217);
 
         // Round-trip: an octave edit applies through the value_changed path,
         // lands in the bank and reprojection shows it again.
@@ -3835,7 +3837,7 @@ static void check_osc_pitch_gating()
         graph.take_changes(discarded, Sculptor::max_pending_changes);
         uint32_t slope_slot = Sculptor::pool_no_slot;
         TEST(find_graph_slot(graph, mapping.osc_nodes[0], "FIR Slope", &slope_slot));
-        TEST(slope_slot == 219);
+        TEST(slope_slot == 243);
         const Sculptor::Slot& slope_row = graph.node(mapping.osc_nodes[0]).slots.entries[slope_slot];
         TEST(slope_row.property_type == Sculptor::PropertyType::integer);
         TEST(slope_row.int_bounded);
@@ -4463,8 +4465,8 @@ static void osc_slot_disable_stamped_rules_regressions()
     const uint32_t tone1       = Sculptor::osc_target_row(Synth::mod_pad_tilt1);
     const uint32_t volume      = Sculptor::osc_target_row(Synth::mod_volume);
     const uint32_t wave_a_slot = 1;  // waveform a, layout contract
-    const uint32_t wave_b_slot = 69; // waveform b, layout contract
-    const uint32_t mode_slot   = 96; // mix mode, layout contract
+    const uint32_t wave_b_slot = 93; // waveform b, layout contract
+    const uint32_t mode_slot   = 120; // mix mode, layout contract
 
     Sculptor::PropertyValue wave = {};
     // Sine wave a (list 0; the wave a list starts at sine), waveform b
@@ -4601,9 +4603,9 @@ static void check_osc_inline_0()
         TEST(strncmp(graph.node(mapping.osc_nodes[0]).slots.entries[1].list_options[1],
                      "sawtooth",
                      sizeof(graph.node(mapping.osc_nodes[0]).slots.entries[1].list_options[0])) == 0);
-        TEST(strncmp(graph.node(mapping.osc_nodes[0]).slots.entries[69].list_options[2],
+        TEST(strncmp(graph.node(mapping.osc_nodes[0]).slots.entries[93].list_options[2],
                      "sawtooth",
-                     sizeof(graph.node(mapping.osc_nodes[0]).slots.entries[69].list_options[0])) == 0);
+                     sizeof(graph.node(mapping.osc_nodes[0]).slots.entries[93].list_options[0])) == 0);
         Sculptor::PropertyValue saw;
         saw.list_index = 1;
         graph.set_slot_value(mapping.osc_nodes[0], 1, saw); // "sawtooth"

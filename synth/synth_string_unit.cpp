@@ -32,11 +32,8 @@ struct StringMirror {
     float    e;
     float    chain_lo; // Models shader header words 8-9: the chain token split in two integer-valued floats
     float    chain_hi; // lo = float((token & 0xFFFF) + 1), hi = float(token >> 16); both 0 for a clean region
-    float    drive_age;
-    float    strike;
-    float    drive;
-    float    spectrum;
-    float    brightness;
+
+    float brightness;
 };
 
 // D11/TRAP: a string layer with a non-default brightness and routing on
@@ -332,7 +329,7 @@ static void check_string_param_json_bounds()
             TEST(bindings[26].base_value == 0.0f && bindings[26].num_inputs == 0);
             TEST(bindings[27].base_value == 0.0f && bindings[27].num_inputs == 0);
         }
-        TEST(Synth::num_mod_targets == 31);
+        TEST(Synth::num_mod_targets == 33);
     }
 }
 
@@ -363,15 +360,15 @@ static void check_string_wave_gating()
         const Sculptor::Node& node = graph.node(node_index);
         TEST(node.slots.entries[1].num_list_options == 6);
         TEST(strcmp(node.slots.entries[1].list_options[5], "string") == 0);
-        TEST(node.slots.entries[69].num_list_options == 6);
-        for (uint32_t i = 0; i < node.slots.entries[69].num_list_options; ++i) {
-            TEST(strcmp(node.slots.entries[69].list_options[i], "string") != 0);
+        TEST(node.slots.entries[93].num_list_options == 6);
+        for (uint32_t i = 0; i < node.slots.entries[93].num_list_options; ++i) {
+            TEST(strcmp(node.slots.entries[93].list_options[i], "string") != 0);
         }
     }
 
     constexpr uint32_t wave_a_slot     = 1;
-    constexpr uint32_t wave_b_slot     = 69;
-    constexpr uint32_t mode_slot       = 96;
+    constexpr uint32_t wave_b_slot     = 93;
+    constexpr uint32_t mode_slot       = 120;
     constexpr uint32_t brightness_slot = Sculptor::osc_brightness_slot;
 
     Sculptor::PropertyValue value = {};
@@ -381,7 +378,7 @@ static void check_string_wave_gating()
     graph.set_slot_value(node_index, mode_slot, value);
 
     bool           mode_rows_saw[5] = {};
-    const uint32_t mode_rows[5]     = { mode_slot, 109, 122, 96, 69 };
+    const uint32_t mode_rows[5]     = { mode_slot, 133, 146, 120, 93 };
     value.list_index                = 1; // sawtooth: reference for the mode rows
     graph.set_slot_value(node_index, wave_a_slot, value);
     for (uint32_t r = 0; r < 5; ++r) {
@@ -467,7 +464,7 @@ static void check_string_row_reuse()
     change.node_idx              = mapping.osc_nodes[0];
     change.slot_idx              = 1;
     TEST(Sculptor::osc_change_restructures(mapping, change));
-    change.slot_idx = 69; // wave b renames the duty b row (Pad Wander under pad)
+    change.slot_idx = 93; // wave b renames the duty b row (Pad Wander under pad)
     TEST(Sculptor::osc_change_restructures(mapping, change));
     change.slot_idx = Sculptor::osc_target_src_op(Synth::mod_volume, 0);
     TEST(Sculptor::osc_change_restructures(mapping, change));
@@ -559,7 +556,7 @@ static void check_string_extras_hidden()
              ++slot) {
             const bool target_row =
                 slot == Sculptor::osc_string_extras_first_slot || slot == Sculptor::osc_brightness_slot;
-            const bool plain_row = slot == Sculptor::osc_strike_slot;
+            const bool plain_row = slot == Sculptor::osc_hammer_slot;
             if (! is_string) {
                 TEST(Sculptor::osc_node_slot_hidden(graph, node_idx, slot));
             }
@@ -571,7 +568,7 @@ static void check_string_extras_hidden()
         // rows are never hidden; Waveform B is not a string row).
         TEST(! Sculptor::osc_node_slot_hidden(graph, node_idx, 2));
         TEST(! Sculptor::osc_node_slot_hidden(graph, node_idx, 15));
-        TEST(! Sculptor::osc_node_slot_hidden(graph, node_idx, 69));
+        TEST(! Sculptor::osc_node_slot_hidden(graph, node_idx, 93));
     }
 }
 
@@ -3965,9 +3962,9 @@ static void string_mirror_m2_regressions_b()
 // Compiled slot indices for the string rows and shifted FIR band blocks.
 static void check_string_slot_layout()
 {
-    TEST(Sculptor::osc_band_first_slot == 177);
-    TEST(Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride == 232);
-    TEST(Sculptor::osc_band_header_slot(3) + Sculptor::osc_band_block_stride == 397);
+    TEST(Sculptor::osc_band_first_slot == 201);
+    TEST(Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride == 256);
+    TEST(Sculptor::osc_band_header_slot(3) + Sculptor::osc_band_block_stride == 421);
     TEST(Sculptor::osc_string_extras_first_slot == 28);
     TEST(Sculptor::osc_brightness_slot == 41);
     TEST(Sculptor::osc_target_row_slot[Synth::mod_string_dispersion] == 2);
@@ -3975,573 +3972,6 @@ static void check_string_slot_layout()
     TEST(Sculptor::osc_target_row_slot[Synth::mod_string_release_damping] == 28);
 }
 
-// Strike tests use static scratch and no temporary paths.  The mirror is an
-// executable CPU specification, not evidence of GPU float equivalence.
-static void string_strike_shape(float* table, uint32_t n, float brightness)
-{
-    float sum = 0.0f;
-    for (uint32_t i = 0; i < n; ++i) {
-        sum += table[i];
-    }
-    const float mean = sum / static_cast<float>(n);
-    for (uint32_t i = 0; i < n; ++i) {
-        table[i] -= mean;
-    }
-    if (brightness < 1.0f) {
-        const float coeff  = 0.95f * (1.0f - string_unit_clamp(brightness));
-        float       state  = 0.0f;
-        float       energy = 0.0f;
-        for (uint32_t i = 0; i < n; ++i) {
-            state = (1.0f - coeff) * table[i] + coeff * state;
-            energy += table[i] * table[i];
-        }
-        state /= 1.0f - powf(coeff, static_cast<float>(n));
-        float filtered_sum    = 0.0f;
-        float filtered_energy = 0.0f;
-        for (uint32_t i = 0; i < n; ++i) {
-            state    = (1.0f - coeff) * table[i] + coeff * state;
-            table[i] = state;
-            filtered_sum += state;
-            filtered_energy += state * state;
-        }
-        const float filtered_mean = filtered_sum / static_cast<float>(n);
-        const float variance      = filtered_energy - filtered_sum * filtered_mean;
-        const float gain          = variance > 0.0f ? sqrtf(energy / variance) : 1.0f;
-        for (uint32_t i = 0; i < n; ++i) {
-            table[i] = (table[i] - filtered_mean) * gain;
-        }
-    }
-}
-
-static float string_strike_amplitude(uint32_t harmonic, float spectrum)
-{
-    if ((harmonic % 8u) == 0) {
-        return 0.0f;
-    }
-    return sinf(vmath::pi * static_cast<float>(harmonic) / 8.0f) / powf(static_cast<float>(harmonic), spectrum);
-}
-
-static void string_strike_table(float* table, uint32_t n, float spectrum)
-{
-    memset(table, 0, n * sizeof(float));
-    const uint32_t harmonics = (n - 1u) / 2u < 2896u ? (n - 1u) / 2u : 2896u;
-    for (uint32_t h = 1; h <= harmonics; ++h) {
-        const float amplitude = string_strike_amplitude(h, spectrum);
-        const float phase     = vmath::two_pi * static_cast<float>(string_pcg_hash(h * 0x85ebca6bu)) / 4294967296.0f;
-        const float step      = vmath::two_pi * static_cast<float>(h) / static_cast<float>(n);
-        for (uint32_t i = 0; i < n; ++i) {
-            table[i] += amplitude * cosf(step * static_cast<float>(i) + phase);
-        }
-    }
-}
-
-static float string_strike_force(float age, float samples)
-{
-    if (! (age < samples)) {
-        return 0.0f;
-    }
-    return 0.5f - 0.5f * cosf(vmath::two_pi * age / samples);
-}
-
-static float string_strike_sample(const float* table, uint32_t n, float age, float loop_length)
-{
-    const float    phase    = age / loop_length;
-    const float    position = (phase - floorf(phase)) * static_cast<float>(n);
-    const uint32_t first    = static_cast<uint32_t>(floorf(position));
-    const uint32_t next     = first + 1u == n ? 0u : first + 1u;
-    const float    fraction = position - static_cast<float>(first);
-    return table[first] + (table[next] - table[first]) * fraction;
-}
-
-// Fixed lane ownership and one float tree model the new drive summation order.
-// Repeatability is required.  Equality with the previous order is not.
-static float string_drive_energy_tree(const float* folded, uint32_t touched, uint32_t lanes)
-{
-    static float slots[256];
-    for (uint32_t lane = 0; lane < lanes; ++lane) {
-        float partial = 0.0f;
-        for (uint32_t j = lane; j < touched; j += lanes) {
-            partial += folded[j] * folded[j];
-        }
-        slots[lane] = partial;
-        for (uint32_t i = lanes + lane; i < 256u; i += lanes) {
-            slots[i] = 0.0f;
-        }
-    }
-    for (uint32_t stride = 128u; stride != 0u; stride >>= 1u) {
-        for (uint32_t lane = 0; lane < lanes; ++lane) {
-            for (uint32_t s = lane; s < stride; s += lanes) {
-                slots[s] += slots[s + stride];
-            }
-        }
-    }
-    return slots[0];
-}
-
-static float string_strike_gain(const float* table, uint32_t n, float loop_length, float samples, float brightness)
-{
-    static float noise[string_ring_size];
-    for (uint32_t i = 0; i < n; ++i) {
-        noise[i] = static_cast<float>(string_pcg_hash(i) & 0xFFFFu) / 32767.5f - 1.0f;
-    }
-    string_strike_shape(noise, n, brightness);
-    float noise_energy = 0.0f;
-    for (uint32_t i = 0; i < n; ++i) {
-        noise_energy += noise[i] * noise[i];
-    }
-    const uint32_t     window_samples   = static_cast<uint32_t>(ceilf(samples));
-    const uint32_t     touched          = window_samples < n ? window_samples : n;
-    constexpr uint32_t scratch_capacity = 1025 - 1 + 256;
-    if (touched > scratch_capacity) {
-        return 1.0f;
-    }
-    static float accumulated[scratch_capacity];
-    memset(accumulated, 0, touched * sizeof(float));
-    for (uint32_t k = 0; k < window_samples; ++k) {
-        const float age = static_cast<float>(k);
-        accumulated[k % n] += string_strike_force(age, samples) * string_strike_sample(table, n, age, loop_length);
-    }
-    const float     drive_energy      = string_drive_energy_tree(accumulated, touched, 256u);
-    const float     target_rms        = sqrtf(noise_energy / static_cast<float>(n));
-    const float     drive_rms         = sqrtf(drive_energy / static_cast<float>(n));
-    constexpr float drive_rms_epsilon = 0.000001f;
-    const float     gain              = drive_rms > drive_rms_epsilon ? target_rms / drive_rms : 1.0f;
-    // Measured 22 Hz, 0.5 ms boundary: the next larger float trips the flush guard.
-    return fminf(gain, 16.5609913f);
-}
-
-static void string_strike_scale(float* table, uint32_t n, float loop_length, float samples, float brightness)
-{
-    const float gain = string_strike_gain(table, n, loop_length, samples, brightness);
-    for (uint32_t i = 0; i < n; ++i) {
-        table[i] *= gain;
-    }
-}
-
-static ChainInit string_strike_init(StringMirror* m,
-                                    uint32_t      token,
-                                    float         f0,
-                                    float         damping,
-                                    uint32_t      seed,
-                                    float         strike,
-                                    float         drive      = 3.0f,
-                                    float         spectrum   = 2.0f,
-                                    float         brightness = 1.0f,
-                                    float         dispersion = 0.0f)
-{
-    if (! (strike > 0.0f)) {
-        const ChainInit result = string_mirror_chain_init(m, token, f0, damping, seed, brightness, dispersion);
-        if (result != ChainInit::none) {
-            m->strike = 0.0f;
-        }
-        return result;
-    }
-    const StringScalars s = string_mirror_scalars(f0, damping, 0.0f, dispersion);
-    if (s.silent || (m->tagged && m->tag == seed)) {
-        return ChainInit::none;
-    }
-    const bool   additive = string_chain_matches(m, token);
-    static float noise[string_ring_size];
-    memset(noise, 0, sizeof(noise));
-    if (strike < 1.0f) {
-        string_mirror_burst(noise, f0, damping, 0, brightness, dispersion);
-        for (uint32_t i = 0; i < s.n; ++i) {
-            noise[i] *= 1.0f - strike;
-        }
-    }
-    if (additive) {
-        for (uint32_t i = 0; i < s.n; ++i) {
-            m->ring[(m->wr + i + string_ring_size - s.n) % string_ring_size] += noise[i];
-        }
-    }
-    else {
-        memset(m->ring, 0, sizeof(m->ring));
-        memcpy(m->ring, noise, s.n * sizeof(float));
-        m->wr = s.n;
-        m->t1 = 0.0f;
-        m->u1 = 0.0f;
-        memset(m->ds, 0, sizeof(m->ds));
-    }
-    m->e          = 1.0f;
-    m->tagged     = true;
-    m->tag        = seed;
-    m->chain_lo   = string_chain_lo(token);
-    m->chain_hi   = string_chain_hi(token);
-    m->strike     = strike;
-    m->drive      = drive;
-    m->spectrum   = spectrum;
-    m->brightness = brightness;
-    m->drive_age  = 0.0f; // Shader header word 10.  Words 8-9 remain the token.
-    return additive ? ChainInit::additive : ChainInit::replace;
-}
-
-static float    string_strike_injection_peak;
-static float    string_strike_peak;
-static uint32_t string_strike_flushes;
-
-static void string_strike_step(StringMirror* m,
-                               float         f0,
-                               float         damping,
-                               float*        out,
-                               uint32_t      count,
-                               float         dispersion = 0.0f)
-{
-    if (! (m->strike > 0.0f)) {
-        string_mirror_step(m, f0, damping, 0.0f, false, out, count, dispersion);
-        return;
-    }
-    const StringScalars s = string_mirror_scalars(f0, damping, 0.0f, dispersion);
-    if (s.silent) {
-        memset(out, 0, count * sizeof(float));
-        return;
-    }
-    const float  samples = m->drive * 0.001f * string_fs;
-    static float table[string_ring_size];
-    if (m->drive_age < samples) {
-        string_strike_table(table, s.n, m->spectrum);
-        string_strike_shape(table, s.n, m->brightness);
-        string_strike_scale(table, s.n, string_fs / f0, samples, m->brightness);
-    }
-    for (uint32_t i = 0; i < count; ++i) {
-        const float age              = m->drive_age;
-        const float injection        = age < samples ? m->strike * string_strike_force(age, samples) *
-                                                           string_strike_sample(table, s.n, age, string_fs / f0)
-                                                     : 0.0f;
-        string_strike_injection_peak = fmaxf(string_strike_injection_peak, fabsf(injection));
-        const uint32_t rd            = m->wr >= s.n ? m->wr - s.n : m->wr + string_ring_size - s.n;
-        const float    x             = m->ring[rd];
-        out[i]                       = x + injection;
-        const float kr               = 1.0f - expf(-1.0f / (string_fs * 0.003f));
-        m->e += kr * (1.0f - m->e);
-        const float t       = (1.0f - s.c) * x + s.c * m->t1;
-        const float u       = s.a * t + m->t1 - s.a * m->u1;
-        float       cascade = u;
-        for (uint32_t k = 0; k < s.num_sections; ++k) {
-            const float section = s.disp_a * cascade + m->ds[k];
-            m->ds[k]            = cascade - s.disp_a * section;
-            cascade             = section;
-        }
-        const float write  = cascade * (s.g * m->e) + injection;
-        string_strike_peak = fmaxf(string_strike_peak, fabsf(write));
-        if (! (fabsf(write) < 8.0f)) {
-            ++string_strike_flushes;
-        }
-        m->ring[m->wr] = fabsf(write) < 8.0f ? write : 0.0f;
-        m->t1          = t;
-        m->u1          = u;
-        m->wr          = m->wr + 1u == string_ring_size ? 0u : m->wr + 1u;
-        m->drive_age += 1.0f;
-    }
-}
-
-static double string_strike_energy(const float* table, uint32_t n)
-{
-    double energy = 0.0;
-    for (uint32_t i = 0; i < n; ++i) {
-        energy += static_cast<double>(table[i]) * static_cast<double>(table[i]);
-    }
-    return energy;
-}
-
-static double string_strike_difference_energy(const float* table, uint32_t n)
-{
-    double energy = 0.0;
-    for (uint32_t i = 0; i < n; ++i) {
-        const double delta = static_cast<double>(table[i]) - static_cast<double>(table[(i + 1u) % n]);
-        energy += delta * delta;
-    }
-    return energy;
-}
-
-static void check_string_strike_shaped_table()
-{
-    constexpr uint32_t n = 199;
-    static float       raw[string_ring_size];
-    static float       shaped[string_ring_size];
-    string_strike_table(raw, n, 2.0f);
-    const double energy = string_strike_energy(raw, n);
-    for (const float brightness : { 0.0f, 0.25f, 1.0f }) {
-        memcpy(shaped, raw, sizeof(raw));
-        string_strike_shape(shaped, n, brightness);
-        double sum = 0.0;
-        for (uint32_t i = 0; i < n; ++i) {
-            sum += static_cast<double>(shaped[i]);
-            if (brightness == 1.0f) {
-                TEST(approx(shaped[i], raw[i], 0.000001f));
-            }
-        }
-        TEST(fabs(sum / n) < 0.000001);
-        TEST(fabs(string_strike_energy(shaped, n) / energy - 1.0) < 0.00002);
-        if (brightness < 1.0f) {
-            TEST(string_strike_difference_energy(shaped, n) < string_strike_difference_energy(raw, n));
-            TEST(memcmp(shaped, raw, n * sizeof(float)) != 0);
-        }
-    }
-    // A nonzero DC probe proves the chain still runs at brightness 1.
-    for (uint32_t i = 0; i < n; ++i) {
-        shaped[i] = raw[i] + 0.125f;
-    }
-    string_strike_shape(shaped, n, 1.0f);
-    double sum = 0.0;
-    for (uint32_t i = 0; i < n; ++i) {
-        sum += static_cast<double>(shaped[i]);
-    }
-    TEST(fabs(sum / n) < 0.000001);
-    for (uint32_t h = 1; h <= 32; ++h) {
-        TEST((string_strike_amplitude(h, 2.0f) == 0.0f) == (h % 8u == 0));
-    }
-    TEST(approx(string_strike_amplitude(3, 4.0f) / string_strike_amplitude(3, 2.0f), 1.0f / 9.0f, 0.000001f));
-}
-
-static void check_string_strike_mirror()
-{
-    check_string_strike_shaped_table();
-    static float legacy[string_ring_size];
-    static float burst[string_ring_size];
-    static float table[string_ring_size];
-    static float raw[string_ring_size];
-    static float first[768];
-    static float second[768];
-    for (const float drive : { 0.5f, 3.0f, 10.0f }) {
-        const float samples = drive * 0.001f * string_fs;
-        TEST(string_strike_force(0.0f, samples) == 0.0f);
-        TEST(string_strike_force(samples, samples) == 0.0f);
-        TEST(string_strike_force(samples + 1.0f, samples) == 0.0f);
-        TEST(string_strike_force(samples * 0.5f, samples) == 1.0f);
-        for (uint32_t i = 1; static_cast<float>(i) < samples; ++i) {
-            TEST(string_strike_force(static_cast<float>(i), samples) >= 0.0f);
-        }
-    }
-    TEST(approx(3.0f * 0.001f * string_fs, 132.3f, 0.00002f));
-    TEST(approx(10.0f * 0.001f * string_fs, 441.0f, 0.00004f));
-    for (const float pitch : { 55.0f, 110.0f, 220.0f, 440.0f, 880.0f }) {
-        for (const float brightness : { 0.0f, 0.25f, 1.0f }) {
-            const uint32_t n = string_mirror_burst(legacy, pitch, 0.0f, 4321, brightness);
-            string_mirror_burst(burst, pitch, 0.0f, 0, brightness);
-            for (const float strike : { 0.0f, 0.25f, 0.5f, 1.0f }) {
-                StringMirror a = {};
-                StringMirror b = {};
-                string_strike_init(&a, 7, pitch, 0.0f, 4321, strike, 10.0f, 2.0f, brightness);
-                if (strike == 0.0f) {
-                    TEST(memcmp(a.ring, legacy, n * sizeof(float)) == 0);
-                    string_mirror_chain_init(&b, 7, pitch, 0.0f, 4321, brightness, 0.0f);
-                }
-                else {
-                    for (uint32_t i = 0; i < n; ++i) {
-                        TEST(a.ring[i] == burst[i] * (1.0f - strike));
-                    }
-                    for (uint32_t i = n; i < string_ring_size; ++i) {
-                        TEST(a.ring[i] == 0.0f);
-                    }
-                    string_strike_init(&b, 7, pitch, 0.0f, 9876, strike, 10.0f, 2.0f, brightness);
-                    TEST(memcmp(a.ring, b.ring, sizeof(a.ring)) == 0);
-                    TEST(a.drive_age == 0.0f);
-                }
-                for (uint32_t i = 0; i < 768; i += 256) {
-                    string_strike_step(&a, pitch, 0.0f, first + i, 256);
-                    string_strike_step(&b, pitch, 0.0f, second + i, 256);
-                }
-                TEST(memcmp(first, second, sizeof(first)) == 0);
-                TEST(memcmp(a.ring, b.ring, sizeof(a.ring)) == 0);
-                TEST(strike == 0.0f || a.drive_age == 768.0f);
-            }
-        }
-    }
-    // First-loop samples have no feedback.  Check both injection destinations
-    // against the shaped table and explicitly distinguish the raw sum.
-    constexpr float pitch = 55.0f;
-    const uint32_t  n     = string_mirror_scalars(pitch, 0.0f, 0.0f).n;
-    string_strike_table(raw, n, 2.0f);
-    memcpy(table, raw, sizeof(table));
-    string_strike_shape(table, n, 0.0f);
-    string_strike_scale(table, n, string_fs / pitch, 441.0f, 0.0f);
-    StringMirror m = {};
-    string_strike_init(&m, 7, pitch, 0.0f, 1, 1.0f, 10.0f, 2.0f, 0.0f);
-    bool differs_from_raw = false;
-    for (uint32_t i = 0; i < 512; ++i) {
-        StringMirror   before = m;
-        const uint32_t wr     = m.wr;
-        float          feedback;
-        string_mirror_step(&before, pitch, 0.0f, 0.0f, false, &feedback, 1);
-        const float force    = string_strike_force(static_cast<float>(i), 441.0f);
-        const float expected = force * string_strike_sample(table, n, static_cast<float>(i), string_fs / pitch);
-        float       sample;
-        string_strike_step(&m, pitch, 0.0f, &sample, 1);
-        TEST(approx(sample, expected, 0.000001f));
-        TEST(approx(m.ring[wr], before.ring[wr] + expected, 0.000001f));
-        if (i >= 441) {
-            TEST(sample == 0.0f);
-        }
-        const float unshaped = force * string_strike_sample(raw, n, static_cast<float>(i), string_fs / pitch);
-        differs_from_raw     = differs_from_raw || fabsf(sample - unshaped) > 0.00001f;
-    }
-    TEST(differs_from_raw);
-    TEST(m.drive_age == 512.0f);
-    const float        lo   = m.chain_lo;
-    const float        hi   = m.chain_hi;
-    const StringMirror live = m;
-    TEST(string_strike_init(&m, 7, pitch, 0.0f, 1, 1.0f) == ChainInit::none);
-    TEST(memcmp(&m, &live, sizeof(m)) == 0);
-    TEST(string_strike_init(&m, 7, pitch, 0.0f, 2, 1.0f) == ChainInit::additive);
-    TEST(m.drive_age == 0.0f && m.chain_lo == lo && m.chain_hi == hi);
-    TEST(memcmp(m.ring, live.ring, sizeof(m.ring)) == 0);
-    TEST(m.wr == live.wr && m.t1 == live.t1 && m.u1 == live.u1);
-    TEST(memcmp(m.ds, live.ds, sizeof(m.ds)) == 0);
-    StringMirror unstruck = live;
-    for (uint32_t i = 0; i < 32; ++i) {
-        const uint32_t wr = m.wr;
-        float          reference;
-        float          struck;
-        string_mirror_step(&unstruck, pitch, 0.0f, 0.0f, false, &reference, 1);
-        string_strike_step(&m, pitch, 0.0f, &struck, 1);
-        string_strike_table(table, n, 2.0f);
-        string_strike_shape(table, n, 1.0f);
-        string_strike_scale(table, n, string_fs / pitch, 132.3f, 1.0f);
-        const float injection = string_strike_force(static_cast<float>(i), 132.3f) *
-                                string_strike_sample(table, n, static_cast<float>(i), string_fs / pitch);
-        TEST(approx(struck, reference + injection, 0.000001f));
-        TEST(approx(m.ring[wr], unstruck.ring[wr] + injection, 0.000001f));
-    }
-    // Intermediate blend combines independently shaped deterministic noise
-    // and the weighted shaped drive before the first physical loop returns.
-    StringMirror blended    = {};
-    StringMirror noise_only = {};
-    string_strike_init(&blended, 7, pitch, 0.0f, 4, 0.5f, 3.0f, 2.0f, 0.25f);
-    noise_only = blended;
-    string_strike_table(table, n, 2.0f);
-    string_strike_shape(table, n, 0.25f);
-    string_strike_scale(table, n, string_fs / pitch, 132.3f, 0.25f);
-    for (uint32_t i = 0; i < 256; ++i) {
-        const uint32_t wr = blended.wr;
-        float          reference;
-        float          sample;
-        string_mirror_step(&noise_only, pitch, 0.0f, 0.0f, false, &reference, 1);
-        string_strike_step(&blended, pitch, 0.0f, &sample, 1);
-        const float injection = 0.5f * string_strike_force(static_cast<float>(i), 132.3f) *
-                                string_strike_sample(table, n, static_cast<float>(i), string_fs / pitch);
-        TEST(approx(sample, reference + injection, 0.000001f));
-        TEST(approx(blended.ring[wr], noise_only.ring[wr] + injection, 0.000001f));
-    }
-    // Strike-zero takeover uses precisely the old note-seeded noise-add.
-    StringMirror zero = {};
-    string_mirror_chain_init(&zero, 7, pitch, 0.0f, 10, 0.25f, 0.0f);
-    StringMirror old = zero;
-    TEST(string_strike_init(&zero, 7, pitch, 0.0f, 11, 0.0f, 3.0f, 2.0f, 0.25f) == ChainInit::additive);
-    TEST(string_mirror_chain_init(&old, 7, pitch, 0.0f, 11, 0.25f, 0.0f) == ChainInit::additive);
-    TEST(memcmp(&zero, &old, sizeof(zero)) == 0);
-    // A later zero-Strike takeover must not keep streaming a prior strike.
-    StringMirror switched           = m;
-    StringMirror switched_reference = m;
-    TEST(string_strike_init(&switched, 7, pitch, 0.0f, 12, 0.0f) == ChainInit::additive);
-    TEST(string_mirror_chain_init(&switched_reference, 7, pitch, 0.0f, 12, 1.0f, 0.0f) == ChainInit::additive);
-    string_strike_step(&switched, pitch, 0.0f, first, 256);
-    string_mirror_step(&switched_reference, pitch, 0.0f, 0.0f, false, second, 256);
-    TEST(memcmp(first, second, 256 * sizeof(float)) == 0);
-    TEST(memcmp(switched.ring, switched_reference.ring, sizeof(switched.ring)) == 0);
-    TEST(string_strike_init(&m, 8, pitch, 0.0f, 3, 1.0f) == ChainInit::replace);
-    TEST(m.drive_age == 0.0f && m.t1 == 0.0f && m.u1 == 0.0f && m.wr == n);
-    for (const float value : m.ring) {
-        TEST(value == 0.0f);
-    }
-}
-
-static void check_string_strike_loudness()
-{
-    static float out[512];
-    for (const float pitch : { 55.0f, 110.0f, 220.0f, 440.0f, 880.0f, 700.0f, 990.0f, 1320.0f }) {
-        const bool     report_only = pitch == 700.0f || pitch == 990.0f || pitch == 1320.0f;
-        const uint32_t n           = string_mirror_scalars(pitch, 0.0f, 0.0f).n;
-        StringMirror   baseline    = {};
-        string_strike_init(&baseline, 7, pitch, 0.0f, 0, 0.0f);
-        const double reference      = sqrt(string_strike_energy(baseline.ring, n) / n);
-        double       three_quarters = 0.0;
-        for (const float strike : { 0.25f, 0.5f, 0.75f, 1.0f }) {
-            StringMirror m = {};
-            string_strike_init(&m, 7, pitch, 0.0f, 0, strike);
-            const uint32_t count  = static_cast<uint32_t>(ceilf(m.drive * 0.001f * string_fs));
-            string_strike_peak    = 0.0f;
-            string_strike_flushes = 0;
-            string_strike_step(&m, pitch, 0.0f, out, count);
-            if (! report_only) {
-                TEST(string_strike_flushes == 0);
-            }
-            double energy = 0.0;
-            for (uint32_t i = 0; i < n; ++i) {
-                const float value = m.ring[(m.wr + string_ring_size - n + i) % string_ring_size];
-                energy += static_cast<double>(value) * static_cast<double>(value);
-            }
-            const double ratio = sqrt(energy / n) / reference;
-            if (! report_only) {
-                // Ruling 1f3c9857 keys the floor on the physical period, not delay_whole.
-                const double intermediate_floor = string_fs / pitch < 100.0f ? 0.5 : 0.6;
-                TEST(ratio >= (strike == 1.0f ? 0.8 : intermediate_floor) && ratio <= 1.3);
-                if (strike == 0.75f) {
-                    three_quarters = ratio;
-                }
-                if (strike == 1.0f) {
-                    TEST(ratio + 0.1 >= three_quarters);
-                }
-            }
-        }
-    }
-}
-
-static void check_string_strike_corner_flush()
-{
-    static float out[512];
-    for (const float pitch : { 22.0f, 30.0f, 40.0f, 55.0f }) {
-        for (const float drive : { 0.5f, 3.0f, 10.0f }) {
-            for (const float strike : { 0.75f, 1.0f }) {
-                StringMirror m = {};
-                string_strike_init(&m, 7, pitch, 0.0f, 0, strike, drive);
-                string_strike_peak           = 0.0f;
-                string_strike_injection_peak = 0.0f;
-                string_strike_flushes        = 0;
-                string_strike_step(&m, pitch, 0.0f, out, static_cast<uint32_t>(ceilf(drive * 0.001f * string_fs)));
-                TEST(string_strike_flushes == 0);
-            }
-        }
-    }
-}
-
-static void check_string_strike_tuning_and_flush()
-{
-    for (const float pitch : { 55.0f, 110.0f, 220.0f, 440.0f, 880.0f }) {
-        for (const float dispersion : { 0.0f, 0.5f, 1.0f }) {
-            memset(&string_test_mirror, 0, sizeof(string_test_mirror));
-            string_strike_init(&string_test_mirror, 7, pitch, 0.0f, 1, 1.0f, 3.0f, 2.0f, 1.0f, dispersion);
-            for (uint32_t i = 0; i < string_test_samples; i += 256) {
-                string_strike_step(&string_test_mirror, pitch, 0.0f, string_test_out + i, 256, dispersion);
-            }
-            const double width = fmax(0.4, 0.006 * static_cast<double>(pitch));
-            const double peak  = string_peak_freq(string_test_out, 11025, 32768, static_cast<double>(pitch), width);
-            TEST(string_peak_valid(peak, static_cast<double>(pitch), width));
-            TEST(fabs(1200.0 * log2(peak / static_cast<double>(pitch))) < 1.0);
-        }
-    }
-    // The same poisoned state trips the guard with Strike enabled, after the
-    // finite drive window.  During the window a bounded injection still runs.
-    for (const float poison : { 1.0e30f, INFINITY, NAN }) {
-        StringMirror m = {};
-        string_strike_init(&m, 7, 441.0f, 0.5f, 1, 1.0f);
-        m.drive_age       = 512.0f;
-        m.t1              = poison;
-        m.u1              = poison;
-        const uint32_t wr = m.wr;
-        float          out;
-        string_strike_step(&m, 441.0f, 0.5f, &out, 1);
-        TEST(m.ring[wr] == 0.0f);
-        m = {};
-        string_strike_init(&m, 7, 441.0f, 0.5f, 2, 1.0f);
-        m.drive_age = 1.0f;
-        m.t1        = poison;
-        m.u1        = poison;
-        string_strike_step(&m, 441.0f, 0.5f, &out, 1);
-        TEST(std::isfinite(m.ring[wr]) && fabsf(m.ring[wr]) < 8.0f);
-    }
-}
-
-// Model the existing additive source propagation, not a hardcoded velocity blend.
 static float string_brightness_routed_value(const Synth::Oscillator& layer, float velocity)
 {
     const Synth::TargetBinding& binding = layer.targets[Synth::mod_string_brightness];
@@ -4576,7 +4006,7 @@ static float string_brightness_routed_value(const Synth::Oscillator& layer, floa
 
 static void check_string_brightness_routing()
 {
-    TEST(Synth::num_mod_targets == 31);
+    TEST(Synth::num_mod_targets == 33);
 
     Synth::Oscillator layer = {};
     static float      baseline[string_ring_size];
@@ -4613,60 +4043,60 @@ static void check_string_brightness_routing()
     TEST(memcmp(&held, &captured, sizeof(held)) == 0);
 }
 
-static void check_string_strike_codecs()
+static void check_string_hammer_codecs()
 {
-    TEST(Synth::num_mod_targets == 31);
+    TEST(Synth::num_mod_targets == 33);
 
     const std::unique_ptr<ClipboardDecode> decoded = std::make_unique<ClipboardDecode>();
     char                                   doc[1024];
     const char*                            values[]   = { "0", "0.25", "1" };
     const float                            expected[] = { 0.0f, 0.25f, 1.0f };
-    TEST(Synth::Oscillator{}.string_strike == 0.0f);
+    TEST(Synth::Oscillator{}.string_hammer == 0.0f);
     TEST(
         string_clip_decode("{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\"}]}", decoded.get()));
-    TEST(decoded->instr.layers[0].string_strike == 0.0f);
+    TEST(decoded->instr.layers[0].string_hammer == 0.0f);
     const std::unique_ptr<Synth::InstrumentEditorBank> bank     = std::make_unique<Synth::InstrumentEditorBank>();
     const std::unique_ptr<Synth::InstrumentEditorBank> restored = std::make_unique<Synth::InstrumentEditorBank>();
     static char                                        text[Synth::library_payload_max];
     for (uint32_t k = 0; k < 3; ++k) {
         snprintf(doc,
                  sizeof(doc),
-                 "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\",\"string_strike\":%s}]}",
+                 "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\",\"string_hammer\":%s}]}",
                  values[k]);
         TEST(string_clip_decode(doc, decoded.get()));
-        TEST(decoded->instr.layers[0].string_strike == expected[k]);
+        TEST(decoded->instr.layers[0].string_hammer == expected[k]);
         string_make_bank(bank->bank, Synth::WaveType::string_wave, Synth::WaveType::no_wave);
         bank->bank.instruments.entries[0].layers[0].string_brightness = 1.0f;
-        bank->bank.instruments.entries[0].layers[0].string_strike     = expected[k];
+        bank->bank.instruments.entries[0].layers[0].string_hammer     = expected[k];
         TEST(Synth::validate_instrument_bank(&bank->bank));
         uint32_t length = Synth::encode_editor_bank_json(bank.get(), text, sizeof(text));
         TEST(length > 0);
         text[length] = 0;
-        TEST((strstr(text, "string_strike") == nullptr) == (k == 0));
+        TEST((strstr(text, "\"string_hammer\"") == nullptr) == (k == 0));
         TEST(Synth::decode_editor_bank_json(text, length, restored.get()));
-        TEST(restored->bank.instruments.entries[0].layers[0].string_strike == expected[k]);
+        TEST(restored->bank.instruments.entries[0].layers[0].string_hammer == expected[k]);
         length = Synth::encode_instrument_json(text, sizeof(text), &bank->bank.instruments.entries[0], &bank->bank);
         TEST(length > 0);
         text[length] = 0;
-        TEST((strstr(text, "string_strike") == nullptr) == (k == 0));
+        TEST((strstr(text, "\"string_hammer\"") == nullptr) == (k == 0));
         TEST(string_clip_decode(text, decoded.get()));
-        TEST(decoded->instr.layers[0].string_strike == expected[k]);
+        TEST(decoded->instr.layers[0].string_hammer == expected[k]);
     }
     for (const char* value : { "-0.1", "1.1", "NaN", "true", "\"0.5\"" }) {
         snprintf(doc,
                  sizeof(doc),
-                 "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\",\"string_strike\":%s}]}",
+                 "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\",\"string_hammer\":%s}]}",
                  value);
         TEST(! string_clip_decode(doc, decoded.get()));
         snprintf(
             doc,
             sizeof(doc),
-            "{\"instrument_editor_bank\":{\"instruments\":[{\"id\":1,\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\",\"string_strike\":%s,\"routing\":{}}]}],\"channels\":[{\"zones\":[{\"start\":1,\"instrument\":1}]}]}}",
+            "{\"instrument_editor_bank\":{\"instruments\":[{\"id\":1,\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\",\"string_hammer\":%s,\"routing\":{}}]}],\"channels\":[{\"zones\":[{\"start\":1,\"instrument\":1}]}]}}",
             value);
         TEST(! Synth::decode_editor_bank_json(doc, static_cast<uint32_t>(strlen(doc)), restored.get()));
     }
     for (const float value : { -0.1f, 1.1f, NAN, INFINITY }) {
-        bank->bank.instruments.entries[0].layers[0].string_strike = value;
+        bank->bank.instruments.entries[0].layers[0].string_hammer = value;
         TEST(! Synth::validate_instrument_bank(&bank->bank));
     }
 
@@ -4751,9 +4181,9 @@ static void check_string_strike_codecs()
     TEST(! Synth::decode_editor_bank_json(bad_bank, static_cast<uint32_t>(strlen(bad_bank)), restored.get()));
 }
 
-static void check_string_strike_projection()
+static void check_string_hammer_projection()
 {
-    TEST(Synth::num_mod_targets == 31);
+    TEST(Synth::num_mod_targets == 33);
 
     const std::unique_ptr<Synth::InstrumentEditorBank> bank       = std::make_unique<Synth::InstrumentEditorBank>();
     Synth::Instrument                                  instrument = {};
@@ -4763,7 +4193,7 @@ static void check_string_strike_projection()
     const uint32_t                         rows[]  = { 28, 41, 42, 53, 54 };
     for (const Synth::WaveType wave : { Synth::WaveType::string_wave, Synth::WaveType::sawtooth_wave }) {
         instrument.layers[0].osc_type[0]       = wave;
-        instrument.layers[0].string_strike     = 0.5f;
+        instrument.layers[0].string_hammer     = 0.5f;
         instrument.layers[0].string_brightness = 0.0f;
         Synth::TargetBinding& binding          = instrument.layers[0].targets[Synth::mod_string_brightness];
         binding.envelope_desc_id               = instrument.layers[0].targets[Synth::mod_volume].envelope_desc_id;
@@ -4779,86 +4209,28 @@ static void check_string_strike_projection()
             TEST(Sculptor::osc_node_slot_hidden(*graph, index, row) == ! string_wave);
         }
         if (wave == Synth::WaveType::string_wave) {
-            const Sculptor::Slot& strike = graph->node(index).slots.entries[54];
-            TEST(strcmp(strike.name, "Strike") == 0 && strike.child_row);
-            TEST(strike.value.real == 0.5f && strike.tooltip != nullptr && strike.real_bounded &&
-                 strike.real_min == 0.0f && strike.real_max == 1.0f && strike.connectable);
+            const Sculptor::Slot& hammer = graph->node(index).slots.entries[Sculptor::osc_hammer_slot];
+            TEST(strcmp(hammer.name, "Hammer") == 0 && hammer.child_row);
+            TEST(hammer.value.real == 0.5f && hammer.tooltip != nullptr && hammer.real_bounded &&
+                 hammer.real_min == 0.0f && hammer.real_max == 1.0f && hammer.connectable);
             TEST(Sculptor::osc_target_row(Synth::mod_string_brightness) == 41);
             TEST(graph->node(index).slots.entries[41].kind == Sculptor::SlotKind::property &&
                  graph->node(index).slots.entries[41].connectable);
         }
         Synth::Instrument compiled = {};
         TEST(Sculptor::compile_graph_to_instrument(*graph, mapping, &compiled, nullptr, &instrument));
-        TEST(compiled.layers[0].string_strike == 0.5f);
+        TEST(compiled.layers[0].string_hammer == 0.5f);
         TEST(compiled.layers[0].string_brightness == 0.0f);
         TEST(compiled.layers[0].targets[Synth::mod_string_brightness].base_value == 0.0f);
         TEST(compiled.layers[0].targets[Synth::mod_string_brightness].num_inputs == 2);
     }
-    TEST(Sculptor::max_nodes == 444 && Sculptor::max_connections == 1320 && Sculptor::max_node_slots == 397);
-    TEST(Sculptor::max_osc_instances == 442);
-    TEST(sizeof(Sculptor::Graph) <= 56u * 1024u * 1024u);
-    TEST(Sculptor::osc_strike_slot == 54 && Sculptor::osc_string_extras_last_slot == 68);
+    TEST(Sculptor::max_nodes == 472 && Sculptor::max_connections == 1404 && Sculptor::max_node_slots == 421);
+    TEST(Sculptor::max_osc_instances == 470);
+    TEST(sizeof(Sculptor::Graph) <= 64u * 1024u * 1024u);
+    TEST(Sculptor::osc_hammer_slot == 54 && Sculptor::osc_string_extras_last_slot == 92);
 }
 
-// Exercise the ordinary editor value-change store, not just projection/compile.
-// Brightness zero still shapes the streamed Strike after its circular filter.
-static void check_string_strike_zero_brightness_edit()
-{
-    const std::unique_ptr<Synth::InstrumentEditorBank> bank       = std::make_unique<Synth::InstrumentEditorBank>();
-    const std::unique_ptr<Sculptor::Graph>             graph      = std::make_unique<Sculptor::Graph>();
-    Synth::Instrument                                  instrument = {};
-    build_binding_fixture(bank.get(), &instrument);
-    instrument.layers[0].osc_type[0]       = Synth::WaveType::string_wave;
-    instrument.layers[0].string_brightness = 0.0f;
-    instrument.layers[0].string_strike     = 0.0f;
-    bank->bank.instruments.entries[0]      = instrument;
-    Sculptor::OscGraphMapping mapping      = {};
-    TEST(Sculptor::project_instrument_to_graph(instrument, bank->bank, graph.get(), &mapping));
-    static float baseline[256];
-    static float burst[256];
-    for (const float strike : { 0.0f, 0.5f, 1.0f, 0.0f }) {
-        Sculptor::PropertyValue value = {};
-        value.real                    = strike;
-        graph->set_slot_value(mapping.osc_nodes[0], Sculptor::osc_strike_slot, value);
-        Sculptor::GraphChange change = {};
-        change.kind                  = Sculptor::ChangeKind::value_changed;
-        change.node_idx              = mapping.osc_nodes[0];
-        change.slot_idx              = Sculptor::osc_strike_slot;
-        TEST(Sculptor::apply_osc_graph_change(bank.get(), graph.get(), &mapping, change));
-        const Synth::Oscillator& stored = bank->bank.instruments.entries[0].layers[0];
-        TEST(stored.string_strike == strike && stored.string_brightness == 0.0f);
-        for (const float pitch : { 55.0f, 110.0f, 220.0f, 440.0f, 880.0f }) {
-            StringMirror legacy = {};
-            StringMirror struck = {};
-            string_mirror_init(&legacy, pitch, 0.0f, 4321, 0.0f);
-            string_mirror_step(&legacy, pitch, 0.0f, 0.0f, false, baseline, 256);
-            string_strike_init(&struck,
-                               7,
-                               pitch,
-                               0.0f,
-                               4321,
-                               stored.string_strike,
-                               stored.string_drive,
-                               stored.string_spectrum,
-                               stored.string_brightness);
-            string_strike_step(&struck, pitch, 0.0f, burst, 256);
-            constexpr uint32_t n = 256;
-            TEST((memcmp(baseline, burst, sizeof(baseline)) == 0) == (strike == 0.0f));
-            if (strike > 0.0f) {
-                double difference = 0.0;
-                double energy     = 0.0;
-                for (uint32_t k = 0; k < n; ++k) {
-                    const double delta = static_cast<double>(burst[k]) - static_cast<double>(baseline[k]);
-                    difference += delta * delta;
-                    energy += static_cast<double>(baseline[k]) * static_cast<double>(baseline[k]);
-                }
-                TEST(difference / energy > 0.01);
-            }
-        }
-    }
-}
-
-static void check_string_strike_load_publish()
+static void check_string_hammer_load_publish()
 {
     const auto editor   = std::make_unique<Synth::InstrumentEditorBank>();
     const auto loaded   = std::make_unique<Synth::InstrumentEditorBank>();
@@ -4870,20 +4242,19 @@ static void check_string_strike_load_publish()
     editor->bank.instruments.entries[0].layers[0].osc_type[0] = Synth::WaveType::string_wave;
     Sculptor::OscGraphMapping mapping                         = {};
     TEST(Sculptor::project_editor_to_graph(*editor, graph.get(), &mapping, 0, 0));
-    static float baseline[256];
-    static float burst[256];
+
     for (const float brightness : { 0.0f, 1.0f }) {
-        for (const float strike : { 0.0f, 1.0f, 0.0f }) {
+        for (const float hammer : { 0.0f, 1.0f, 0.0f }) {
             Sculptor::PropertyValue value = {};
             value.real                    = brightness;
             graph->set_slot_value(mapping.osc_nodes[0], Sculptor::osc_brightness_slot, value);
-            value.real = strike;
-            graph->set_slot_value(mapping.osc_nodes[0], Sculptor::osc_strike_slot, value);
+            value.real = hammer;
+            graph->set_slot_value(mapping.osc_nodes[0], Sculptor::osc_hammer_slot, value);
             // The renderer writes the value and queues this event; the model setter is eventless.
             Sculptor::GraphChange change = {};
             change.kind                  = Sculptor::ChangeKind::value_changed;
             change.node_idx              = mapping.osc_nodes[0];
-            change.slot_idx              = Sculptor::osc_strike_slot;
+            change.slot_idx              = Sculptor::osc_hammer_slot;
             TEST(Sculptor::apply_osc_graph_change(editor.get(), graph.get(), &mapping, change, 0, 0));
             FILE* file = tmpfile();
             TEST(file != nullptr);
@@ -4894,7 +4265,7 @@ static void check_string_strike_load_publish()
             rewind(file);
             TEST(Synth::read_editor_bank_json(file, length, loaded.get()));
             fclose(file);
-            TEST(loaded->bank.instruments.entries[0].layers[0].string_strike == strike);
+            TEST(loaded->bank.instruments.entries[0].layers[0].string_hammer == hammer);
             TEST(Sculptor::compile_editor_playback_bank(*loaded, playback.get()));
             TEST(Synth::push_bank_update(queue.get(), *playback));
             const Synth::InstrumentBank* packet = Synth::peek_bank_update(queue.get());
@@ -4902,23 +4273,8 @@ static void check_string_strike_load_publish()
             if (! packet)
                 return;
             const Synth::Oscillator& layer = packet->instruments.entries[0].layers[0];
-            TEST(layer.string_strike == strike && layer.string_brightness == brightness);
+            TEST(layer.string_hammer == hammer && layer.string_brightness == brightness);
             TEST(layer.targets[Synth::mod_string_brightness].base_value == 0.0f);
-            StringMirror legacy = {};
-            StringMirror struck = {};
-            string_mirror_init(&legacy, 110.0f, 0.0f, 4321, brightness);
-            string_mirror_step(&legacy, 110.0f, 0.0f, 0.0f, false, baseline, 256);
-            string_strike_init(&struck,
-                               7,
-                               110.0f,
-                               0.0f,
-                               4321,
-                               layer.string_strike,
-                               layer.string_drive,
-                               layer.string_spectrum,
-                               layer.string_brightness);
-            string_strike_step(&struck, 110.0f, 0.0f, burst, 256);
-            TEST((memcmp(baseline, burst, sizeof(baseline)) == 0) == (strike == 0.0f));
             Synth::consume_bank_update(queue.get());
             TEST(Synth::peek_bank_update(queue.get()) == nullptr);
         }
@@ -4926,12 +4282,12 @@ static void check_string_strike_load_publish()
 }
 
 // Integration coverage uses the production fields, routing evaluator and codecs.
-static void check_string_strike_onset_routing()
+static void check_string_hammer_onset_routing()
 {
     Synth::Oscillator     layer   = {};
-    Synth::TargetBinding& binding = layer.targets[Synth::mod_string_strike];
+    Synth::TargetBinding& binding = layer.targets[Synth::mod_string_hammer];
     TEST(binding.base_value == 0.0f);
-    layer.string_strike              = 0.1f;
+    layer.string_hammer              = 0.1f;
     Synth::Parameter       params[4] = {};
     Synth::ParamDescriptor descs[4]  = {};
     descs[1].kind                    = Synth::ParamKind::external;
@@ -4939,29 +4295,19 @@ static void check_string_strike_onset_routing()
     source.param_id                  = 1;
     source.op                        = Synth::SourceOp::add;
     source.scale                     = 0.8f;
-    Synth::configure_plain(&descs[2], layer.string_strike, 0, 0.0f, 0, Synth::SourceOp::add, &source, 1);
+    Synth::configure_plain(&descs[2], layer.string_hammer, 0, 0.0f, 0, Synth::SourceOp::add, &source, 1);
     Synth::configure_plain(&descs[3], 0.25f, 0, 0.0f, 0, Synth::SourceOp::add, nullptr, 0);
     for (const float velocity : { 0.0f, 0.25f, 0.75f, 1.0f }) {
         Synth::write_external_leaf(velocity, Synth::ExternalLeaf{ &params[1].value, &params[1].prev_value });
         const float captured = string_unit_clamp(Synth::param_onset_value(params, descs, 2));
         TEST(approx(captured, 0.1f + 0.8f * velocity, 0.000001f));
-        StringMirror held = {};
-        string_strike_init(&held, 7, 110.0f, 0.0f, 1, captured, layer.string_drive, layer.string_spectrum);
         Synth::write_external_leaf(1.0f - velocity, Synth::ExternalLeaf{ &params[1].value, &params[1].prev_value });
         Synth::propagate_parameters(params, descs, 4);
-        TEST(held.strike == captured);
-        TEST(held.drive == 3.0f && held.spectrum == 2.0f);
-        layer.string_drive    = 9.0f;
-        layer.string_spectrum = 4.0f;
-        TEST(held.drive == 3.0f && held.spectrum == 2.0f);
-        layer.string_drive    = 3.0f;
-        layer.string_spectrum = 2.0f;
-        const float next      = string_unit_clamp(Synth::param_onset_value(params, descs, 2));
-        string_strike_init(&held, 7, 110.0f, 0.0f, 2, next);
-        TEST(held.strike == next && held.drive_age == 0.0f);
+        const float next = string_unit_clamp(Synth::param_onset_value(params, descs, 2));
+        TEST(approx(next, 0.1f + 0.8f * (1.0f - velocity), 0.000001f));
     }
     source.param_id = 3;
-    Synth::configure_plain(&descs[2], layer.string_strike, 0, 0.0f, 0, Synth::SourceOp::add, &source, 1);
+    Synth::configure_plain(&descs[2], layer.string_hammer, 0, 0.0f, 0, Synth::SourceOp::add, &source, 1);
     TEST(approx(Synth::param_onset_value(params, descs, 2), 0.3f, 0.000001f));
     Synth::configure_plain(&descs[2], 0.0f, 0, 0.0f, 0, Synth::SourceOp::add, nullptr, 0);
     TEST(Synth::param_onset_value(params, descs, 2) == 0.0f);
@@ -4975,394 +4321,218 @@ static void check_string_strike_onset_routing()
     TEST(string_unit_clamp(Synth::param_onset_value(params, descs, 2)) == 0.0f);
 }
 
-static void check_string_strike_codecs_and_layout()
+static void check_hammer_contact_codec()
 {
     static ClipboardDecode             decoded;
     static Synth::InstrumentEditorBank bank;
     static Synth::InstrumentEditorBank restored;
-    static Sculptor::Graph             graph;
-    static char                        text[Synth::library_payload_max];
-    TEST(Synth::Oscillator{}.string_strike == 0.0f);
-    TEST(Synth::Oscillator{}.string_drive == 3.0f);
-    TEST(Synth::Oscillator{}.string_spectrum == 2.0f);
-    TEST(Sculptor::osc_strike_slot == 54);
-    TEST(Sculptor::osc_target_row_slot[Synth::mod_string_strike] == 54);
-    TEST(Sculptor::osc_target_block_base(Synth::mod_string_strike) == 55);
-    TEST(Sculptor::osc_target_block_base(Synth::mod_string_strike) + 11u == 66);
-    TEST(Sculptor::osc_drive_slot == 67);
-    TEST(Sculptor::osc_spectrum_slot == 68);
-    TEST(Sculptor::osc_string_extras_last_slot == 68);
-    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_band0_offset] == 180);
-    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_band3_slope] == 384);
-    TEST(Synth::instrument_graph_layout_capacity == 443);
-    TEST(max_portable_records == 443);
-    char        doc[2048];
-    const char* keys[]     = { "string_strike", "string_drive", "string_spectrum" };
-    const char* valid[]    = { "0.375", "7.5", "3.5" };
-    const float expected[] = { 0.375f, 7.5f, 3.5f };
-    for (uint32_t k = 0; k < 3; ++k) {
-        snprintf(doc,
-                 sizeof(doc),
-                 "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\",\"%s\":%s}]}",
-                 keys[k],
-                 valid[k]);
-        TEST(string_clip_decode(doc, &decoded));
-        const Synth::Oscillator& decoded_layer = decoded.instr.layers[0];
-        const float              values[]      = { decoded_layer.string_strike,
-                                                   decoded_layer.string_drive,
-                                                   decoded_layer.string_spectrum };
-        TEST(values[k] == expected[k]);
+    static char                        document[Synth::library_payload_max];
+
+    TEST(Synth::Oscillator{}.string_hammer_contact == Synth::string_hammer_contact_default);
+    TEST(Sculptor::osc_hammer_slot == 54);
+    TEST(Sculptor::osc_hammer_contact_slot == 67);
+    TEST(Sculptor::osc_string_extras_last_slot == 92);
+    constexpr uint32_t hammer_drive_max    = 442;
+    constexpr uint32_t hammer_tail_size    = 64;
+    constexpr uint32_t hammer_burst_floats = 2560;
+    const uint32_t     minimum_delay       = string_mirror_scalars(22.0f, 0.0f, 0.0f).n;
+
+    TEST(minimum_delay == 2003);
+    TEST(minimum_delay + hammer_drive_max + hammer_tail_size <= hammer_burst_floats);
+    TEST(hammer_drive_max + hammer_tail_size + 102 <= 4096);
+
+    TEST(Sculptor::max_node_slots == 421);
+    TEST(Synth::instrument_graph_layout_capacity == 471);
+    TEST(max_portable_records == 471);
+
+    for (float contact : { 0.5f, Synth::string_hammer_contact_default, 10.0f }) {
         string_make_bank(bank.bank, Synth::WaveType::string_wave, Synth::WaveType::no_wave);
-        bank.bank.instruments.entries[0].layers[0] = decoded_layer;
+        Synth::Oscillator* layer     = &bank.bank.instruments.entries[0].layers[0];
+        layer->string_hammer         = 0.5f;
+        layer->string_hammer_contact = contact;
+
         TEST(Synth::validate_instrument_bank(&bank.bank));
-        uint32_t length = Synth::encode_editor_bank_json(&bank, text, sizeof(text));
-        TEST(length > 0 && Synth::decode_editor_bank_json(text, length, &restored));
-        const Synth::Oscillator& bank_layer = restored.bank.instruments.entries[0].layers[0];
-        TEST(bank_layer.string_strike == decoded_layer.string_strike);
-        TEST(bank_layer.string_drive == decoded_layer.string_drive);
-        TEST(bank_layer.string_spectrum == decoded_layer.string_spectrum);
-        length = Synth::encode_instrument_json(text, sizeof(text), &bank.bank.instruments.entries[0], &bank.bank);
+
+        uint32_t length = Synth::encode_editor_bank_json(&bank, document, sizeof(document));
         TEST(length > 0);
-        text[length] = 0;
-        TEST(strstr(text, keys[k]) != nullptr);
-        TEST(string_clip_decode(text, &decoded));
-        TEST(decoded.instr.layers[0].string_strike == bank_layer.string_strike);
-        TEST(decoded.instr.layers[0].string_drive == bank_layer.string_drive);
-        TEST(decoded.instr.layers[0].string_spectrum == bank_layer.string_spectrum);
-    }
-    string_make_bank(bank.bank, Synth::WaveType::string_wave, Synth::WaveType::no_wave);
-    uint32_t length = Synth::encode_instrument_json(text, sizeof(text), &bank.bank.instruments.entries[0], &bank.bank);
-    TEST(length > 0);
-    text[length] = 0;
-    for (const char* key : keys) {
-        TEST(strstr(text, key) == nullptr);
-    }
-    TEST(strstr(text, "string_strike") == nullptr);
-    TEST(string_clip_decode(text, &decoded));
-    TEST(decoded.instr.layers[0].string_strike == 0.0f);
-    TEST(decoded.instr.layers[0].string_drive == 3.0f);
-    TEST(decoded.instr.layers[0].string_spectrum == 2.0f);
-    // A free rename installs no migration for the old key.  Unknown keys may
-    // be ignored or rejected by the codec, but must never set Strike.
-    const bool old_key_accepted = string_clip_decode(
-        "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\",\"string_contact\":1}]}",
-        &decoded);
-    TEST(! old_key_accepted || decoded.instr.layers[0].string_strike == 0.0f);
-    const char* invalid[][5] = { { "-0.1", "1.00000001", "NaN", "true", "\"0.5\"" },
-                                 { "0.49999999", "10.00000001", "NaN", "true", "\"3\"" },
-                                 { "1.49999999", "4.00000001", "NaN", "true", "\"2\"" } };
-    for (uint32_t k = 0; k < 3; ++k) {
-        for (const char* value : invalid[k]) {
-            snprintf(doc,
-                     sizeof(doc),
-                     "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\",\"%s\":%s}]}",
-                     keys[k],
-                     value);
-            TEST(! string_clip_decode(doc, &decoded));
-            snprintf(
-                doc,
-                sizeof(doc),
-                "{\"instrument_editor_bank\":{\"instruments\":[{\"id\":1,\"layer_count\":1,\"layers\":[{\"wave_a\":\"string\",\"%s\":%s,\"routing\":{}}]}],\"channels\":[{\"zones\":[{\"start\":1,\"instrument\":1}]}]}}",
-                keys[k],
-                value);
-            TEST(! Synth::decode_editor_bank_json(doc, static_cast<uint32_t>(strlen(doc)), &restored));
-        }
-        for (const float value : { -1.0f, 11.0f, NAN, INFINITY }) {
-            Synth::Oscillator& layer = bank.bank.instruments.entries[0].layers[0];
-            layer.string_strike      = 0.0f;
-            layer.string_drive       = 3.0f;
-            layer.string_spectrum    = 2.0f;
-            if (k == 0) {
-                layer.string_strike = value;
-            }
-            else if (k == 1) {
-                layer.string_drive = value;
-            }
-            else {
-                layer.string_spectrum = value;
-            }
-            TEST(! Synth::validate_instrument_bank(&bank.bank));
-        }
-    }
-    for (const char* fields : { "\"string_strike\":0,\"string_drive\":0.5,\"string_spectrum\":1.5",
-                                "\"string_strike\":1,\"string_drive\":10,\"string_spectrum\":4" }) {
-        snprintf(doc,
-                 sizeof(doc),
-                 "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\",%s}]}",
-                 fields);
-        TEST(string_clip_decode(doc, &decoded));
-    }
-    TEST(string_clip_decode(
-        "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\",\"string_strike\":{\"sources\":[{\"source\":\"velocity\",\"op\":\"add\",\"scale\":0.5}]}}]}",
-        &decoded));
-    TEST(decoded.instr.layers[0].string_strike == 0.0f);
-    TEST(decoded.instr.layers[0].targets[Synth::mod_string_strike].base_value == 0.0f);
-    // Scalar-or-object routing round trips through bank and clipboard codecs.
-    // Reuse the established descriptor fixture, including canonicalization.
-    for (uint32_t kind = 0; kind < 3; ++kind) {
-        graph.clear();
-        Synth::Instrument instrument = {};
-        build_binding_fixture(&bank, &instrument);
-        instrument.layers[0].osc_type[0] = Synth::WaveType::string_wave;
-        Synth::Oscillator& layer         = instrument.layers[0];
-        layer.string_strike              = 0.375f;
-        Synth::TargetBinding& binding    = layer.targets[Synth::mod_string_strike];
-        binding                          = {};
-        if (kind == 0) {
-            binding.num_inputs = 1;
-            binding.inputs[0]  = { Synth::ModSource::velocity, Synth::SourceOp::add, 0, 0.5f };
-        }
-        else if (kind == 1) {
-            binding.envelope_desc_id = 1;
-        }
-        else {
-            binding.lfo_desc_id = 1;
-            binding.lfo_depth   = 0.5f;
-        }
-        bank.bank.instruments.entries[0] = instrument;
-        TEST(Synth::validate_instrument_bank(&bank.bank));
-        length = Synth::encode_editor_bank_json(&bank, text, sizeof(text));
-        TEST(length > 0 && Synth::decode_editor_bank_json(text, length, &restored));
-        TEST(restored.bank.instruments.entries[0].layers[0].string_strike == 0.375f);
-        length = Synth::encode_instrument_json(text, sizeof(text), &instrument, &bank.bank);
+        TEST(Synth::decode_editor_bank_json(document, length, &restored));
+        TEST(restored.bank.instruments.entries[0].layers[0].string_hammer_contact == contact);
+
+        length =
+            Synth::encode_instrument_json(document, sizeof(document), &bank.bank.instruments.entries[0], &bank.bank);
         TEST(length > 0);
-        text[length] = 0;
-        TEST(strstr(text, "\"string_strike\":{") != nullptr);
-        TEST(string_clip_decode(text, &decoded));
-        const Synth::TargetBinding& portable = decoded.instr.layers[0].targets[Synth::mod_string_strike];
-        TEST(decoded.instr.layers[0].string_strike == 0.375f);
-        TEST(portable.base_value == 0.0f && portable.num_inputs == binding.num_inputs);
-        TEST((portable.envelope_desc_id != 0) == (kind == 1));
-        TEST((portable.lfo_desc_id != 0) == (kind == 2));
-        Sculptor::OscGraphMapping mapping = {};
-        TEST(Sculptor::project_instrument_to_graph(instrument, bank.bank, &graph, &mapping));
-        const uint32_t        node_idx   = mapping.osc_nodes[0];
-        const Sculptor::Node& node       = graph.node(node_idx);
-        const Sculptor::Slot& strike_row = node.slots.entries[Sculptor::osc_strike_slot];
-        TEST(strike_row.value.real == 0.375f && strike_row.connectable && strike_row.child_row);
-        TEST(strcmp(strike_row.name, "Strike") == 0 && strike_row.real_min == 0.0f && strike_row.real_max == 1.0f);
-        const Sculptor::Slot& drive_row    = node.slots.entries[Sculptor::osc_drive_slot];
-        const Sculptor::Slot& spectrum_row = node.slots.entries[Sculptor::osc_spectrum_slot];
-        TEST(drive_row.value.real == 3.0f && ! drive_row.connectable);
-        TEST(drive_row.real_min == 0.5f && drive_row.real_max == 10.0f);
-        TEST(spectrum_row.value.real == 2.0f && ! spectrum_row.connectable);
-        TEST(spectrum_row.real_min == 1.5f && spectrum_row.real_max == 4.0f);
-        for (uint32_t row = 54; row <= 68; ++row) {
-            TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(node, row));
-            if (row == 54 || row == 67 || row == 68) {
-                TEST(! Sculptor::osc_node_slot_hidden(graph, node_idx, row));
-            }
-        }
-        Synth::Instrument compiled = {};
-        TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled, nullptr, &instrument));
-        TEST(compiled.layers[0].string_strike == layer.string_strike);
-        TEST(compiled.layers[0].string_drive == layer.string_drive);
-        TEST(compiled.layers[0].string_spectrum == layer.string_spectrum);
-        TEST(compiled.layers[0].targets[Synth::mod_string_strike].base_value == 0.0f);
+        document[length] = 0;
+        TEST(string_clip_decode(document, &decoded));
+        TEST(decoded.instr.layers[0].string_hammer == 0.5f);
+        TEST(decoded.instr.layers[0].string_hammer_contact == contact);
+        TEST(strstr(document, "string_spectrum") == nullptr);
+        TEST(strstr(document, "string_hammer_gain") == nullptr);
+    }
+
+    static Sculptor::Graph           graph;
+    static Sculptor::OscGraphMapping mapping;
+    static Synth::Instrument         compiled;
+    for (float contact : { 0.5f, 10.0f }) {
+        string_make_bank(bank.bank, Synth::WaveType::string_wave, Synth::WaveType::no_wave);
+        TEST(Sculptor::project_instrument_to_graph(bank.bank.instruments.entries[0], bank.bank, &graph, &mapping));
+
         Sculptor::PropertyValue value = {};
-        value.real                    = 7.5f;
-        graph.set_slot_value(mapping.osc_nodes[0], Sculptor::osc_drive_slot, value);
-        value.real = 3.5f;
-        graph.set_slot_value(mapping.osc_nodes[0], Sculptor::osc_spectrum_slot, value);
-        value.real = 0.5f;
-        graph.set_slot_value(mapping.osc_nodes[0], Sculptor::osc_strike_slot, value);
-        Sculptor::GraphChange change = {};
-        change.kind                  = Sculptor::ChangeKind::value_changed;
-        change.node_idx              = mapping.osc_nodes[0];
-        change.slot_idx              = Sculptor::osc_strike_slot;
-        TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, change));
-        const Synth::Oscillator& stored = bank.bank.instruments.entries[0].layers[0];
-        TEST(stored.string_strike == 0.5f && stored.string_drive == 7.5f && stored.string_spectrum == 3.5f);
-        TEST(stored.targets[Synth::mod_string_strike].base_value == 0.0f);
-        bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_string_strike].base_value = 0.25f;
+        value.real                    = contact;
+        graph.set_slot_value(mapping.osc_nodes[0], Sculptor::osc_hammer_contact_slot, value);
+
+        TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+        TEST(compiled.layers[0].string_hammer_contact == contact);
+    }
+
+    for (float contact : { 0.49f, 10.01f, NAN, INFINITY }) {
+        bank.bank.instruments.entries[0].layers[0].string_hammer_contact = contact;
         TEST(! Synth::validate_instrument_bank(&bank.bank));
     }
-}
-
-static void check_string_strike_caps()
-{
-    TEST(Synth::num_mod_targets == 31);
-    TEST(Sculptor::max_node_slots == 397);
-    TEST(Sculptor::max_nodes == 444);
-    TEST(Sculptor::max_connections == 1320);
-    TEST(Sculptor::max_graph_bytes == 56u * 1024u * 1024u);
-    TEST(sizeof(Sculptor::Graph) <= 56u * 1024u * 1024u);
-    check_string_strike_onset_routing();
-    check_string_strike_codecs_and_layout();
-}
-
-static void check_string_drive_reduction()
-{
-    static float     table[string_ring_size], noise[string_ring_size], folded[1280];
-    constexpr float  clamp           = 16.5609913f;
-    constexpr double tolerance       = 0.00001;
-    constexpr double clamp_double    = static_cast<double>(clamp);
-    uint32_t         clearly_clamped = 0;
-    uint32_t         near_threshold  = 0;
-    for (float pitch : { 22.0f, 30.0f, 110.0f, 441.0f }) {
-        const float    loop_length = string_fs / pitch;
-        const uint32_t n           = string_mirror_scalars(pitch, 0.0f, 0.0f).n;
-        for (float brightness : { 0.25f, 1.0f }) {
-            string_strike_table(table, n, 2.0f);
-            string_strike_shape(table, n, brightness);
-            for (uint32_t i = 0; i < n; ++i) {
-                noise[i] = static_cast<float>(string_pcg_hash(i) & 0xFFFFu) / 32767.5f - 1.0f;
-            }
-            string_strike_shape(noise, n, brightness);
-            double noise_energy = 0.0;
-            for (uint32_t i = 0; i < n; ++i) {
-                noise_energy += static_cast<double>(noise[i]) * static_cast<double>(noise[i]);
-            }
-            const float target_rms = static_cast<float>(sqrt(noise_energy / n));
-            // Includes 3 ms, 10 ms and the 22 Hz, 0.5 ms flush boundary.
-            for (float samples : { 22.05f, 132.3f, 441.0f, 1280.0f }) {
-                const uint32_t window_samples = static_cast<uint32_t>(ceilf(samples));
-                for (uint32_t touched : { 1u, 63u, 256u, 257u, 1000u, 1280u }) {
-                    double serial_energy = 0.0;
-                    for (uint32_t j = 0; j < touched; ++j) {
-                        folded[j] = 0.0f;
-                        // Stress counts beyond the physical period are zero padding.
-                        if (j < n) {
-                            for (uint32_t k = j; k < window_samples; k += n) {
-                                const float age = static_cast<float>(k);
-                                folded[j] += string_strike_force(age, samples) *
-                                             string_strike_sample(table, n, age, loop_length);
-                            }
-                        }
-                        serial_energy += static_cast<double>(folded[j]) * static_cast<double>(folded[j]);
-                    }
-                    for (uint32_t lanes : { 256u, 64u }) {
-                        const float energy   = string_drive_energy_tree(folded, touched, lanes);
-                        const float repeated = string_drive_energy_tree(folded, touched, lanes);
-                        TEST(memcmp(&energy, &repeated, sizeof(energy)) == 0);
-                        TEST(fabs(static_cast<double>(energy) - serial_energy) <= tolerance * serial_energy);
-                        const float  tree_rms   = sqrtf(energy / static_cast<float>(n));
-                        const double serial_rms = sqrt(serial_energy / n);
-                        // Natural loudness plus below, near and clearly above clamp cases.
-                        for (float target : { target_rms,
-                                              static_cast<float>(serial_rms * clamp_double * 0.5),
-                                              static_cast<float>(serial_rms * clamp_double * (1.0 - 0.000005)),
-                                              static_cast<float>(serial_rms * clamp_double * (1.0 + 0.000005)),
-                                              static_cast<float>(serial_rms * clamp_double * 2.0) }) {
-                            const float tree_gain   = tree_rms > 0.000001f ? target / tree_rms : 1.0f;
-                            const float serial_gain = serial_rms > 0.000001
-                                                          ? static_cast<float>(static_cast<double>(target) / serial_rms)
-                                                          : 1.0f;
-                            const float tree_clamped   = fminf(tree_gain, clamp);
-                            const float serial_clamped = fminf(serial_gain, clamp);
-                            TEST(fabs(static_cast<double>(tree_clamped) - static_cast<double>(serial_clamped)) <=
-                                 tolerance * static_cast<double>(serial_clamped));
-                            if (static_cast<double>(tree_gain) > clamp_double * (1.0 + tolerance) &&
-                                static_cast<double>(serial_gain) > clamp_double * (1.0 + tolerance)) {
-                                TEST(tree_clamped == clamp);
-                                TEST(serial_clamped == clamp);
-                                ++clearly_clamped;
-                            }
-                            if (fabs(static_cast<double>(serial_gain) - clamp_double) <= tolerance * clamp_double) {
-                                ++near_threshold;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    for (float gain : { -0.01f, 4.01f, NAN, INFINITY }) {
+        bank.bank.instruments.entries[0].layers[0].string_hammer_gain = gain;
+        TEST(! Synth::validate_instrument_bank(&bank.bank));
     }
-    TEST(clearly_clamped > 0);
-    TEST(near_threshold > 0);
-#ifdef SYNTH_STRING_DRIVE_INTENTIONAL_FAILURE
-    // Harness negative control only.  Never enable this in the makefiles.
-    // The energy of one folded value of 2 is 4, not 2.
-    const float negative_control[] = { 2.0f };
-    TEST(string_drive_energy_tree(negative_control, 1u, 256u) == 2.0f);
-#endif
+    bank.bank.instruments.entries[0].layers[0].string_hammer_contact = Synth::string_hammer_contact_default;
+    bank.bank.instruments.entries[0].layers[0].string_hammer_gain    = 4.0f;
+    TEST(Synth::validate_instrument_bank(&bank.bank));
+    bank.bank.instruments.entries[0].layers[0].string_hammer_gain = Synth::string_hammer_gain_default;
+
+    TEST(string_clip_decode(
+        "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\",\"string_strike\":1,\"string_drive\":3,\"string_spectrum\":2,\"string_excite_mode\":1,\"string_hammer_wet\":1}]}",
+        &decoded));
+    TEST(decoded.instr.layers[0].string_hammer == 0.0f);
+    TEST(decoded.instr.layers[0].string_hammer_contact == Synth::string_hammer_contact_default);
 }
 
-static void string_strike_regressions()
+static void check_hammer_scalar_routing()
 {
-    check_string_drive_reduction();
-    check_string_strike_load_publish();
-    check_string_strike_zero_brightness_edit();
-    check_string_strike_mirror();
-    check_string_strike_loudness();
-    check_string_strike_corner_flush();
-    check_string_strike_tuning_and_flush();
-    check_string_brightness_routing();
-    check_string_strike_codecs();
-    check_string_strike_projection();
-}
+    TEST(Synth::mod_string_hammer == 30);
+    TEST(Synth::mod_string_hammer_contact == 31);
+    TEST(Synth::mod_string_hammer_gain == 32);
+    TEST(Synth::num_mod_targets == 33);
 
-// Read the source contract separately from the arithmetic mirror.  No GPU is used.
+    static ClipboardDecode             decoded;
+    static Synth::InstrumentEditorBank bank;
+    static Synth::InstrumentEditorBank restored;
+    static Sculptor::Graph             graph;
+    static char                        document[Synth::library_payload_max];
+    Sculptor::OscGraphMapping          mapping = {};
 
-static void m1_string_regressions()
-{
-    static float serial[string_ring_size], strided[string_ring_size];
-    for (float f0 : { 22.0f, 110.0f, 220.0f, 4410.0f }) {
-        const uint32_t n = string_mirror_scalars(f0, 0.5f, 0.0f).n;
-        for (uint32_t seed : { 0u, 71u, 0xffffffffu }) {
-            for (uint32_t workers : { 1u, 2u, 16u, 64u, 256u }) {
-                for (uint32_t i = 0; i < n; ++i) {
-                    serial[i] = static_cast<float>(string_pcg_hash(seed + i) & 0xffffu) / 32767.5f - 1.0f;
-                }
-                for (uint32_t lane = 0; lane < workers; ++lane) {
-                    for (uint32_t i = lane; i < n; i += workers) {
-                        strided[i] = static_cast<float>(string_pcg_hash(seed + i) & 0xffffu) / 32767.5f - 1.0f;
-                    }
-                }
-                TEST(memcmp(serial, strided, n * sizeof(float)) == 0);
-            }
-            for (float brightness : { 0.0f, 0.25f, 1.0f }) {
-                for (uint32_t i = 0; i < n; ++i) {
-                    serial[i] = static_cast<float>(string_pcg_hash(seed + i) & 0xffffu) / 32767.5f - 1.0f;
-                }
-                string_strike_shape(serial, n, brightness);
-                TEST(string_mirror_burst(strided, f0, 0.5f, seed, brightness) == n);
-                TEST(memcmp(serial, strided, n * sizeof(float)) == 0);
-            }
-        }
+    TEST(string_clip_decode("{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\"}]}", &decoded));
+    TEST(decoded.instr.layers[0].string_hammer_gain == Synth::string_hammer_gain_default);
+    TEST(decoded.instr.layers[0].string_hammer_contact == Synth::string_hammer_contact_default);
+
+    TEST(string_clip_decode(
+        "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"string\",\"string_hammer_gain\":{},\"string_hammer_contact\":{}}]}",
+        &decoded));
+    TEST(decoded.instr.layers[0].string_hammer_gain == Synth::string_hammer_gain_default);
+    TEST(decoded.instr.layers[0].string_hammer_contact == Synth::string_hammer_contact_default);
+
+    string_make_bank(bank.bank, Synth::WaveType::string_wave, Synth::WaveType::no_wave);
+    Synth::Oscillator& layer    = bank.bank.instruments.entries[0].layers[0];
+    layer.string_hammer_gain    = 2.0f;
+    layer.string_hammer_contact = 3.0f;
+
+    for (const Synth::ModTarget target : { Synth::mod_string_hammer_gain, Synth::mod_string_hammer_contact }) {
+        Synth::TargetBinding& binding = layer.targets[target];
+        binding.num_inputs            = 1;
+        binding.inputs[0].source      = Synth::ModSource::velocity;
+        binding.inputs[0].op          = Synth::SourceOp::add;
+        binding.inputs[0].scale       = -0.5f;
     }
-    // Tonal n-outer/i-inner fill preserves the ascending harmonic order per sample.
-    for (uint32_t n : { 11u, 31u, 199u }) {
-        string_strike_table(serial, n, 2.5f);
-        memset(strided, 0, n * sizeof(float));
-        for (uint32_t h = 1; h <= (n - 1u) / 2u; ++h) {
-            const float amp   = string_strike_amplitude(h, 2.5f);
-            const float phase = vmath::two_pi * static_cast<float>(string_pcg_hash(h * 0x85ebca6bu)) / 4294967296.0f;
-            const float step  = vmath::two_pi * static_cast<float>(h) / static_cast<float>(n);
-            for (uint32_t lane = 0; lane < 256; ++lane) {
-                for (uint32_t i = lane; i < n; i += 256) {
-                    strided[i] += amp * cosf(step * static_cast<float>(i) + phase);
-                }
-            }
-        }
-        TEST(memcmp(serial, strided, n * sizeof(float)) == 0);
-        for (uint32_t k = 0; k < 1000; ++k) {
-            const float    age    = static_cast<float>(k) * 0.5f;
-            const float    loop   = static_cast<float>(n) + 0.75f;
-            const float    phase  = age / loop;
-            const float    pos    = (phase - floorf(phase)) * static_cast<float>(n);
-            const uint32_t first  = static_cast<uint32_t>(floorf(pos));
-            const uint32_t next   = first + 1 == n ? 0 : first + 1;
-            const float    old    = serial[first] + (serial[next] - serial[first]) * (pos - static_cast<float>(first));
-            const float    helper = string_strike_sample(serial, n, age, loop);
-            TEST(memcmp(&old, &helper, sizeof(old)) == 0);
-        }
+
+    TEST(Synth::validate_instrument_bank(&bank.bank));
+    uint32_t length = Synth::encode_editor_bank_json(&bank, document, sizeof(document));
+    TEST(length > 0);
+    TEST(Synth::decode_editor_bank_json(document, length, &restored));
+    TEST(restored.bank.instruments.entries[0].layers[0].string_hammer_gain == 2.0f);
+    TEST(restored.bank.instruments.entries[0].layers[0].string_hammer_contact == 3.0f);
+
+    length = Synth::encode_instrument_json(document, sizeof(document), &bank.bank.instruments.entries[0], &bank.bank);
+    TEST(length > 0);
+    document[length] = 0;
+    TEST(string_clip_decode(document, &decoded));
+    TEST(decoded.instr.layers[0].string_hammer_gain == 2.0f);
+    TEST(decoded.instr.layers[0].string_hammer_contact == 3.0f);
+
+    for (const Synth::ModTarget target : { Synth::mod_string_hammer_gain, Synth::mod_string_hammer_contact }) {
+        TEST(decoded.instr.layers[0].targets[target].base_value == 0.0f);
+        TEST(decoded.instr.layers[0].targets[target].num_inputs == 1);
+        TEST(decoded.instr.layers[0].targets[target].inputs[0].scale == -0.5f);
     }
-    // Existing fixture assertions pin tonal injection and the serial recurrence.
-    check_string_mirror_recurrence();
-    check_string_strike_mirror();
+
+    TEST(Sculptor::project_instrument_to_graph(bank.bank.instruments.entries[0], bank.bank, &graph, &mapping));
+    const Sculptor::Node& node = graph.node(mapping.osc_nodes[0]);
+    TEST(strcmp(node.slots.entries[Sculptor::osc_hammer_gain_slot].name, "Hammer Gain") == 0);
+    TEST(node.slots.entries[Sculptor::osc_hammer_gain_slot].connectable);
+    TEST(strcmp(node.slots.entries[Sculptor::osc_hammer_contact_slot].name, "Hammer Contact") == 0);
+    TEST(node.slots.entries[Sculptor::osc_hammer_contact_slot].connectable);
+
+    Synth::Instrument compiled = {};
+    TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+    TEST(compiled.layers[0].string_hammer_gain == 2.0f);
+    TEST(compiled.layers[0].string_hammer_contact == 3.0f);
+    TEST(compiled.layers[0].targets[Synth::mod_string_hammer_gain].base_value == 0.0f);
+    TEST(compiled.layers[0].targets[Synth::mod_string_hammer_contact].base_value == 0.0f);
+
+    Synth::Parameter       parameters[3]  = {};
+    Synth::ParamDescriptor descriptors[3] = {};
+    descriptors[1].kind                   = Synth::ParamKind::external;
+    Synth::SourceParam source             = {};
+    source.param_id                       = 1;
+    source.op                             = Synth::SourceOp::add;
+    source.scale                          = -0.5f;
+
+    for (const float velocity : { 0.0f, 0.25f, 0.75f, 1.0f }) {
+        Synth::write_external_leaf(velocity, Synth::ExternalLeaf{ &parameters[1].value, &parameters[1].prev_value });
+        Synth::configure_plain(&descriptors[2], layer.string_hammer_gain, 0, 0.0f, 0, Synth::SourceOp::add, nullptr, 0);
+        TEST(Synth::param_onset_value(parameters, descriptors, 2) == 2.0f);
+        Synth::configure_plain(&descriptors[2], layer.string_hammer_gain, 0, 0.0f, 0, Synth::SourceOp::add, &source, 1);
+        TEST(Synth::param_onset_value(parameters, descriptors, 2) == 2.0f - 0.5f * velocity);
+        Synth::configure_plain(&descriptors[2],
+                               layer.string_hammer_contact,
+                               0,
+                               0.0f,
+                               0,
+                               Synth::SourceOp::add,
+                               &source,
+                               1);
+        TEST(Synth::param_onset_value(parameters, descriptors, 2) == 3.0f - 0.5f * velocity);
+    }
+
+    layer.string_hammer_gain = -1.0f;
+    TEST(! Synth::validate_instrument_bank(&bank.bank));
+    layer.string_hammer_gain = std::numeric_limits<float>::quiet_NaN();
+    TEST(! Synth::validate_instrument_bank(&bank.bank));
+    layer.string_hammer_gain = std::numeric_limits<float>::infinity();
+    TEST(! Synth::validate_instrument_bank(&bank.bank));
+    layer.string_hammer_gain                                = 2.0f;
+    layer.targets[Synth::mod_string_hammer_gain].base_value = 1.0f;
+    TEST(! Synth::validate_instrument_bank(&bank.bank));
+
+    TEST(! string_clip_decode("{\"format\":\"synth-instrument-v1\",\"layers\":[{\"string_hammer_gain\":-1}]}",
+                              &decoded));
+    TEST(! string_clip_decode(
+        "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"string_hammer_contact\":{\"base\":11}}]}",
+        &decoded));
 }
 
 int main()
 {
-    m1_string_regressions();
     test_silence_stdout();
-    string_strike_regressions();
-    check_string_strike_caps();
+    check_hammer_scalar_routing();
+    check_string_brightness_routing();
+    check_string_hammer_codecs();
+    check_string_hammer_projection();
+    check_hammer_contact_codec();
+    check_string_hammer_load_publish();
+    check_string_hammer_onset_routing();
     check_string_slot_layout();
     string_wave_m2_regressions();
     string_mirror_m2_regressions_a();
     string_mirror_m2_regressions_b();
     string_chain_m2_regressions();
     check_string_brightness_trap_decode_compile();
+
     return test_exit_code();
 }

@@ -256,13 +256,14 @@ static uint32_t build_clipboard_max_fixture(Synth::InstrumentBank*        bank,
                                 target == Synth::mod_string_dispersion)
                                  ? 0.5f
                                  : 2.0f + static_cast<float>(target);
-        if (target == Synth::mod_string_brightness || target == Synth::mod_string_strike) {
+        if (target == Synth::mod_string_brightness || target == Synth::mod_string_hammer ||
+            target == Synth::mod_string_hammer_contact || target == Synth::mod_string_hammer_gain) {
             routing.base_value = 0.0f;
             if (target == Synth::mod_string_brightness) {
                 instrument->layers[0].string_brightness = 0.5f;
             }
-            else {
-                instrument->layers[0].string_strike = 0.5f;
+            else if (target == Synth::mod_string_hammer) {
+                instrument->layers[0].string_hammer = 0.5f;
             }
         }
         routing.num_inputs       = 2;
@@ -5256,7 +5257,7 @@ static void check_channel_category_persistence()
     // the document.  The category key is not content, so decode keeps the
     // channel disabled; the next encode then stores the channel as empty.
     reset();
-    source.bank.channel_enabled[3]                   = 1;
+    source.bank.channel_enabled[3]                       = 1;
     source.bank.channel_enabled[Synth::max_channels - 1] = 1;
     strcpy(source.channel_category[3], "Strings");
     strcpy(source.channel_category[Synth::max_channels - 1], "12345678901234567890123");
@@ -5345,7 +5346,7 @@ static void check_channel_category_persistence()
     reset();
     strcpy(source.channel_category[3], "Strings");
     source.bank.channel_enabled[3] = 1;
-    const char* path = "Out/synth_channel_category_persistence.tmp";
+    const char* path               = "Out/synth_channel_category_persistence.tmp";
     TEST(Synth::save_editor_bank_file(path, &source) == 0);
     TEST(Synth::load_editor_bank_file(path, &decoded) == Synth::BankFileStatus::ok);
     TEST(strcmp(decoded.channel_category[3], "Strings") == 0);

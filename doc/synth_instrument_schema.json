@@ -210,7 +210,9 @@
                   "string_release_damping",
                   "string_dispersion",
                   "string_brightness",
-                  "string_strike"
+                  "string_hammer",
+                  "string_hammer_contact",
+                  "string_hammer_gain"
                 ]
               }
             },
@@ -284,7 +286,9 @@
                   "string_release_damping",
                   "string_dispersion",
                   "string_brightness",
-                  "string_strike"
+                  "string_hammer",
+                  "string_hammer_contact",
+                  "string_hammer_gain"
                 ]
               },
               "depth_source": {
@@ -413,7 +417,9 @@
         "string_release_damping",
         "string_dispersion",
         "string_brightness",
-        "string_strike"
+        "string_hammer",
+        "string_hammer_contact",
+        "string_hammer_gain"
       ],
       "description": "Modulated quantities. Units: volume, panning (0.5 = center), duty_a/duty_b, osc_mix and fm_index (1.0 = full depth) are 0..1; pitch is -24..24 semitones; fir_pitch_spread depends on the layer fir_type: bandpass = spread in semitones 0..36 around the note pitch, one band of up to four (fir_bands); lowpass and highpass = fixed cutoff in Hz 0..22050 with no key tracking, 0 = the edge-off bypassed state; a bandpass bypasses only while every band's spread is zero, so a zero band 0 spread with a positive higher-band spread still filters; fm_ratio is the ratio, slider-bounded 0.125..8 (0 stays bank-legal as the stored unset carrier value). Only 'volume' defaults to 1.0 and 'panning' to 0.5, fm_ratio inherits the layer's stored mod_ratio when its block is absent, and every other base defaults to 0. pad_tone_a/pad_tone_b is the per-oscillator pad spectral tilt in -1..+1: the harmonic exponent is 1 + value (0 = saw-like 1/n spectrum, +1 = mellow 1/n^2, -1 = flat/brightest), inert for non-pad waves. string_damping/string_release_damping and string_dispersion are 0..1 (0 = natural decay) and inert for non-string waves. fir_slope is the FIR window slope as an integer percent 1..100; an unrouted layer carries it in the layer's fir_slope scalar, a routed one in the target block's base."
     },
@@ -599,7 +605,7 @@
           "type": "number",
           "description": "Deprecated and ignored: the pick position was removed.  Old documents that carry it still load whatever the value; new saves omit it."
         },
-        "string_strike": {
+        "string_hammer": {
           "oneOf": [
             {
               "type": "number",
@@ -611,21 +617,21 @@
               "$ref": "#/definitions/target_block"
             }
           ],
-          "description": "Strike blend or routing object, captured at note-on.  An omitted object base means zero."
+          "description": "Hammer mix or routing object, captured at note-on.  An omitted object base means zero."
         },
-        "string_drive": {
-          "type": "number",
-          "minimum": 0.5,
-          "maximum": 10,
-          "default": 3,
-          "description": "Strike force window in milliseconds."
-        },
-        "string_spectrum": {
-          "type": "number",
-          "minimum": 1.5,
-          "maximum": 4,
-          "default": 2,
-          "description": "Strike harmonic rolloff exponent."
+        "string_hammer_contact": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": 0.5,
+              "maximum": 10,
+              "default": 1.737
+            },
+            {
+              "$ref": "#/definitions/target_block"
+            }
+          ],
+          "description": "Hammer contact window in milliseconds or routing object.  Captured at note-on."
         },
         "string_brightness": {
           "oneOf": [
@@ -678,6 +684,20 @@
           "additionalProperties": {
             "$ref": "#/definitions/bank_routing_block"
           }
+        },
+        "string_hammer_gain": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 4,
+              "default": 1
+            },
+            {
+              "$ref": "#/definitions/target_block"
+            }
+          ],
+          "description": "Hammer source gain or routing object.  Captured at note-on.  Velocity has no implicit effect."
         }
       },
       "required": [

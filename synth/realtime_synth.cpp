@@ -16,6 +16,7 @@
 #include "synth_soundtrack.h"
 #include <algorithm>
 #include <atomic>
+#include <float.h>
 #include <iterator>
 #include <math.h>
 #include <type_traits>
@@ -233,14 +234,20 @@ enum OscParamRole : uint32_t {
     osc_string_brightness_dest,
     osc_string_brightness_env,
     osc_string_brightness_lfo,
-    osc_string_strike_dest,
-    osc_string_strike_env,
-    osc_string_strike_lfo,
+    osc_string_hammer_dest,
+    osc_string_hammer_env,
+    osc_string_hammer_lfo,
 
+    osc_string_hammer_contact_dest,
+    osc_string_hammer_contact_env,
+    osc_string_hammer_contact_lfo,
+    osc_string_hammer_gain_dest,
+    osc_string_hammer_gain_env,
+    osc_string_hammer_gain_lfo,
     num_osc_roles
 };
 
-static_assert(num_osc_roles == 93);
+static_assert(num_osc_roles == 99);
 
 constexpr uint32_t channel_block_base = 1;
 constexpr uint32_t voice_block_base   = channel_block_base + Synth::max_channels * num_channel_roles;
@@ -307,7 +314,9 @@ constexpr ModTargetNode mod_target_nodes[] = {
     { mod_string_release_damping, osc_string_release_damping_dest },
     { mod_string_dispersion, osc_string_dispersion_dest },
     { mod_string_brightness, osc_string_brightness_dest },
-    { mod_string_strike, osc_string_strike_dest },
+    { mod_string_hammer, osc_string_hammer_dest },
+    { mod_string_hammer_contact, osc_string_hammer_contact_dest },
+    { mod_string_hammer_gain, osc_string_hammer_gain_dest },
 };
 static_assert(sizeof(mod_target_nodes) / sizeof(mod_target_nodes[0]) == Synth::num_mod_targets,
               "mod target table must cover every ModTarget");
@@ -391,17 +400,17 @@ struct ShaderParams {
         uint32_t fir_memory_offs;
         uint32_t taps_offs;
         uint32_t noise_counter;
-        uint32_t note_seed;           // Per-note constant: the note-on noise counter, never advanced
-        float    pad_tilt[2];         // Pad spectral tilt; harmonic exponent is 1 + clamp(tilt, -1, 1).
-        uint32_t string_state_offs;   // String state region in floats: header, then ring
-        float    string_damping;      // String damping 0..1, higher = shorter decay
-        float string_release_damping; // Effective release damping 0.025..1.667: 0.05 / T60 in s, curved from the knob
-        float string_brightness;      // String pluck brightness 0..1, used by the note-on excitation
-        float string_dispersion;      // String dispersion 0..1, 0 = off
-        uint32_t string_chain;        // Note seed which started the string chain, kept across string takeovers
-        float    string_strike;       // Strike blend 0..1, captured at note-on
-        float    string_drive;        // Strike force window in milliseconds, captured at note-on
-        float    string_spectrum;     // Harmonic rolloff exponent, captured at note-on
+        uint32_t note_seed;             // Per-note constant: the note-on noise counter, never advanced
+        float    pad_tilt[2];           // Pad spectral tilt; harmonic exponent is 1 + clamp(tilt, -1, 1).
+        uint32_t string_state_offs;     // String state region in floats: header, then ring
+        float    string_damping;        // String damping 0..1, higher = shorter decay
+        float string_release_damping;   // Effective release damping 0.025..1.667: 0.05 / T60 in s, curved from the knob
+        float string_brightness;        // String pluck brightness 0..1, used by the note-on excitation
+        float string_dispersion;        // String dispersion 0..1, 0 = off
+        uint32_t string_chain;          // Note seed which started the string chain, kept across string takeovers
+        float    string_hammer;         // Hammer mix 0..1, captured at note-on
+        float    string_hammer_contact; // Hammer contact window in milliseconds, captured at note-on
+        float    string_hammer_gain;    // Source gain captured at note-on
         uint32_t fir_window;
     };
 
@@ -613,9 +622,9 @@ struct RunningOscillator {
     float    string_dispersion;      // String dispersion 0..1, resolved each step
     uint32_t string_state_offs;      // String state region offset in bytes, fixed per slot
     uint32_t string_chain;           // Note seed of the first note of the current string chain on this slot
-    float    string_strike;          // Strike blend 0..1, captured at note-on
-    float    string_drive;           // Force window in milliseconds, captured at note-on
-    float    string_spectrum;        // Harmonic rolloff, captured at note-on
+    float    string_hammer;          // Hammer mix 0..1, captured at note-on
+    float    string_hammer_contact;  // Hammer contact window in milliseconds, captured at note-on
+    float    string_hammer_gain;     // Source gain captured at note-on
     float    osc_mix;                // Mix between osc_type[0] and osc_type[1] (0..1)
     float    fm_index;               // FM modulation depth
 
@@ -758,14 +767,13 @@ static_assert(max_fir_coeff_entries * sizeof(ShaderParams::FIRCoeff) <= ShaderPa
 static ShaderParams::FIRCoeff fir_coeff_stage[max_fir_coeff_entries];
 static ShaderParams::FIRCoeff fir_coeff_prev[max_fir_coeff_entries];
 static uint32_t               fir_coeff_stage_count = 0;
-static uint32_t               fir_coeff_prev_count = 0; // 0 = no valid snapshot
-static bool                   fir_taps_cleared     = false;
+static uint32_t               fir_coeff_prev_count  = 0; // 0 = no valid snapshot
+static bool                   fir_taps_cleared      = false;
 
-// Every oscillator slot gets its own string wave state region, so any slot can play a string
-// note.  Slot 0 is the reserved sentinel and stays unused.
+// Each oscillator slot owns string state.  Slot 0 remains the unused sentinel.
 static void init_string_state()
 {
-    constexpr uint32_t state_bytes = Synth::string_state_floats * sizeof(float);
+    constexpr uint32_t state_bytes = (Synth::string_state_floats + Synth::hammer_source_floats) * sizeof(float);
 
     for (uint32_t osc_idx = 1; osc_idx < Synth::max_oscillators; osc_idx++) {
         const SubAllocatorBase::Chunk chunk = data_allocator.allocate(state_bytes, Synth::effect_state_alignment);
@@ -1651,17 +1659,13 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         const bool chain_continues = reset_voice && osc.osc_type[0] == WaveType::string_wave &&
                                      ! (osc.osc_type[1] != WaveType::no_wave && osc.osc_mode == osc_mode_hard_sync);
 
-        const Oscillator& layer = instrument.layers[layer_idx];
-        osc.osc_type[0]         = layer.osc_type[0];
-        osc.osc_type[1]         = layer.osc_type[1];
-        osc.osc_mode            = layer.osc_mode;
-        osc.mod_ratio           = layer.mod_ratio;
-        osc.string_drive =
-            layer.string_drive >= 0.5f ? (layer.string_drive <= 10.0f ? layer.string_drive : 10.0f) : 0.5f;
-        osc.string_spectrum =
-            layer.string_spectrum >= 1.5f ? (layer.string_spectrum <= 4.0f ? layer.string_spectrum : 4.0f) : 1.5f;
-        osc.octave_offset  = layer.octave_offset;
-        osc.fir_type       = layer.fir_type;
+        const Oscillator& layer   = instrument.layers[layer_idx];
+        osc.osc_type[0]           = layer.osc_type[0];
+        osc.osc_type[1]           = layer.osc_type[1];
+        osc.osc_mode              = layer.osc_mode;
+        osc.mod_ratio             = layer.mod_ratio;
+        osc.octave_offset         = layer.octave_offset;
+        osc.fir_type              = layer.fir_type;
         osc.fir_band_count = layer.fir_type == Synth::fir_bandpass ? (layer.fir_band_count < 1   ? 1
                                                                       : layer.fir_band_count > 4 ? 4
                                                                                                  : layer.fir_band_count)
@@ -1709,9 +1713,17 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
             if (node.target == Synth::mod_string_brightness) {
                 base_extra = layer.string_brightness;
             }
-            if (node.target == Synth::mod_string_strike) {
-                base_extra = layer.string_strike;
+            if (node.target == Synth::mod_string_hammer) {
+                base_extra = layer.string_hammer;
             }
+            if (node.target == Synth::mod_string_hammer_contact) {
+                base_extra = layer.string_hammer_contact;
+            }
+
+            if (node.target == Synth::mod_string_hammer_gain) {
+                base_extra = layer.string_hammer_gain;
+            }
+
             if (node.target == Synth::mod_fir_slope) {
                 // Stored scalar inheritance: an unrouted (zeroed) slope binding starts from the
                 // layer's fir_slope scalar, a routed one from its own base.  The seed enters the
@@ -1734,11 +1746,23 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
                                         env_seeds[layer_idx][node.target]);
         }
 
-        const float onset_strike =
+        const float onset_hammer =
             Synth::param_onset_value(parameters,
                                      param_descs,
-                                     static_cast<uint16_t>(osc_param(osc_slot, osc_string_strike_dest)));
-        osc.string_strike = onset_strike >= 0.0f ? (onset_strike <= 1.0f ? onset_strike : 1.0f) : 0.0f;
+                                     static_cast<uint16_t>(osc_param(osc_slot, osc_string_hammer_dest)));
+        osc.string_hammer = onset_hammer >= 0.0f ? (onset_hammer <= 1.0f ? onset_hammer : 1.0f) : 0.0f;
+
+        const float onset_contact =
+            Synth::param_onset_value(parameters,
+                                     param_descs,
+                                     static_cast<uint16_t>(osc_param(osc_slot, osc_string_hammer_contact_dest)));
+        osc.string_hammer_contact = onset_contact >= 0.5f ? (onset_contact <= 10.0f ? onset_contact : 10.0f) : 0.5f;
+
+        const float onset_gain =
+            Synth::param_onset_value(parameters,
+                                     param_descs,
+                                     static_cast<uint16_t>(osc_param(osc_slot, osc_string_hammer_gain_dest)));
+        osc.string_hammer_gain = onset_gain >= 0.0f && onset_gain <= FLT_MAX ? onset_gain : 0.0f;
 
         // Trigger-time gate: the oscillator only sounds when its final
         // equivalent MIDI pitch at note-on lies within [0, 127].  The onset
@@ -2054,7 +2078,10 @@ static void apply_effects(const char* label, const EffectTarget* targets, uint32
         }
 
         begin_debug_label(audio_cmd_buf, color_compute, "%s_effects_depth_%u", label, depth);
-        DEFER { end_debug_label(audio_cmd_buf); };
+        DEFER
+        {
+            end_debug_label(audio_cmd_buf);
+        };
 
         memory_barrier(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
@@ -2588,7 +2615,10 @@ static void compute_fir_coefficients()
     const uint32_t param_offs = static_cast<uint32_t>(param_allocator.allocate(param_size, synth_alignment).offset);
 
     begin_debug_label(audio_cmd_buf, color_compute, "fir_coefficients");
-    DEFER { end_debug_label(audio_cmd_buf); };
+    DEFER
+    {
+        end_debug_label(audio_cmd_buf);
+    };
 
     // The staging array is copied synchronously into the allocated parameter-buffer region before
     // dispatch: the GPU descriptors reference the parameter buffer, never this reusable array.
@@ -2798,9 +2828,9 @@ static void render_audio_step()
         param.string_brightness      = oscillator.string_brightness;
         param.string_dispersion      = oscillator.string_dispersion;
         param.string_chain           = oscillator.string_chain;
-        param.string_strike          = oscillator.string_strike;
-        param.string_drive           = oscillator.string_drive;
-        param.string_spectrum        = oscillator.string_spectrum;
+        param.string_hammer          = oscillator.string_hammer;
+        param.string_hammer_contact  = oscillator.string_hammer_contact;
+        param.string_hammer_gain     = oscillator.string_hammer_gain;
         // Wrap the phases so float precision does not degrade on long notes.
         oscillator.phase += phase_step;
         oscillator.phase -= mstd::floorf(oscillator.phase);
@@ -3094,7 +3124,10 @@ template <typename T, bool interleaved> static bool render_audio(uint32_t num_sa
         render_audio_step();
 
         begin_debug_label(audio_cmd_buf, color_compute, "output_audio");
-        DEFER { end_debug_label(audio_cmd_buf); };
+        DEFER
+        {
+            end_debug_label(audio_cmd_buf);
+        };
 
         memory_barrier(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 

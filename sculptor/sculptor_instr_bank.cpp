@@ -2,11 +2,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
 #include "sculptor_instr_bank.h"
+
 #include "../synth/synth_effect_expansion.h"
 #include "../synth/synth_midi_cc.h"
 #include "sculptor_effect_graph.h"
 #include "sculptor_graph.h"
 #include "sculptor_osc_graph.h"
+#include <float.h>
 
 #include <assert.h>
 #include <cmath>
@@ -296,11 +298,13 @@ static bool validate_oscillator_body(const Synth::Oscillator& osc)
             return false;
         }
     }
-    if (! (osc.string_strike >= 0.0f && osc.string_strike <= 1.0f) ||
+    if (! (osc.string_hammer >= 0.0f && osc.string_hammer <= 1.0f) ||
         osc.targets[Synth::mod_string_brightness].base_value != 0.0f ||
-        osc.targets[Synth::mod_string_strike].base_value != 0.0f ||
-        ! (osc.string_drive >= 0.5f && osc.string_drive <= 10.0f) ||
-        ! (osc.string_spectrum >= 1.5f && osc.string_spectrum <= 4.0f)) {
+        osc.targets[Synth::mod_string_hammer].base_value != 0.0f ||
+        osc.targets[Synth::mod_string_hammer_contact].base_value != 0.0f ||
+        osc.targets[Synth::mod_string_hammer_gain].base_value != 0.0f ||
+        ! (osc.string_hammer_gain >= 0.0f && osc.string_hammer_gain <= 4.0f) ||
+        ! (osc.string_hammer_contact >= 0.5f && osc.string_hammer_contact <= 10.0f)) {
         return false;
     }
     // Pluck brightness is a plain scalar in [0,1] as well.

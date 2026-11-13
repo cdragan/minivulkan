@@ -555,12 +555,10 @@ constexpr size_t editor_resident_state_bytes =
     2 * Synth::instrument_max_lfos * sizeof(Synth::LFODescriptor) +
     4 * Synth::instrument_graph_layout_capacity * sizeof(Synth::InstrumentGraphLayout) +
     4096; // remaining editor scalar flags, constants and alignment
-// The two 1 MiB serialized-text dirty-tracking buffers exceed the old 130 MiB
-// bound.  The user-approved 140 MiB cap leaves about 9.16 MiB of headroom.
-// The oscillator graph pre-provisions thirty-one 12-slot target blocks per
-// node (max_node_slots 397).  The twenty live InstrumentEditorBank copies
-// include per-zone source rows; sizeof(InstrumentEditorBank) accounts for them.
-static_assert(editor_resident_state_bytes <= 140 * 1024 * 1024);
+// Each oscillator node reserves thirty-three target blocks and 421 slots.
+// The 144 MiB limit covers the static editor state and its bank copies.
+constexpr uint32_t editor_resident_state_limit = 144 * 1024 * 1024;
+static_assert(editor_resident_state_bytes <= editor_resident_state_limit);
 
 // Synth info panel data. The declaration in sculptor_instr_edit.h describes
 // what the panel shows; the synth runtime only exposes raw data.

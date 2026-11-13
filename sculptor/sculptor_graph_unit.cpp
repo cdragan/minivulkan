@@ -1018,7 +1018,7 @@ static void canvas_menu_adds_node(void* user_data)
 // hold every reachable state, not just the common one.
 static void test_connection_capacity_reaches_max()
 {
-    TEST(max_connections == 1320);
+    TEST(max_connections == 1404);
 
     Graph& g = reset_unit_graph(0);
     g.clear();
