@@ -328,6 +328,9 @@ constexpr const char* filter_type_names[num_filter_types] = { "off", "bandpass",
 constexpr uint32_t    num_source_ops                  = 2;
 constexpr const char* source_op_names[num_source_ops] = { "add", "multiply" };
 
+constexpr uint32_t    num_midi_source_ops                       = 3;
+constexpr const char* midi_source_op_names[num_midi_source_ops] = { "add", "multiply", "gain" };
+
 constexpr uint32_t    num_mod_sources                   = 8;
 constexpr const char* mod_source_names[num_mod_sources] = {
     "none", "pitch_bend", "mod_wheel", "channel_pressure", "velocity", "aftertouch", "pressure_combine", "cc"
@@ -388,6 +391,7 @@ constexpr const char* mod_target_names[Synth::num_mod_targets] = { "volume",
 static_assert(static_cast<uint32_t>(Synth::WaveType::string_wave) == num_waves - 1);
 static_assert(static_cast<uint32_t>(Synth::ModSource::cc) == num_mod_sources - 1);
 static_assert(static_cast<uint32_t>(Synth::SourceOp::multiply) == num_source_ops - 1);
+static_assert(static_cast<uint32_t>(Synth::SourceOp::gain) == num_midi_source_ops - 1);
 static_assert(static_cast<uint32_t>(Synth::EffectType::fir) == Synth::num_effect_types - 3);
 static_assert(static_cast<uint32_t>(Synth::EffectType::ring_mod) == Synth::num_effect_types - 2);
 static_assert(static_cast<uint32_t>(Synth::EffectType::fir_multiband) == Synth::num_effect_types - 1);
@@ -566,11 +570,15 @@ static bool routing_is_default(const Synth::TargetBinding& routing)
     return routing.base_value == 0.0f && routing.num_inputs == 0;
 }
 
-static void enc_mod_input(Out& o, const Synth::ModInput& in, bool ms = false)
+static void enc_mod_input(Out&                   o,
+                          const Synth::ModInput& in,
+                          const char* const*     op_names,
+                          uint32_t               num_ops,
+                          bool                   ms = false)
 {
     o.ch('{');
     key_enum(o, "source", mod_source_names, num_mod_sources, static_cast<uint32_t>(in.source));
-    key_enum(o, "op", source_op_names, num_source_ops, static_cast<uint32_t>(in.op));
+    key_enum(o, "op", op_names, num_ops, static_cast<uint32_t>(in.op));
     key_uint_nonzero(o, "cc_number", in.cc_number);
     key_float_nonzero(o, ms ? "scale_ms" : "scale", in.scale);
     o.ch('}');
@@ -607,7 +615,7 @@ static void enc_routing(Out& o, const Synth::TargetBinding& routing)
         o.ch('[');
         for (uint32_t i = 0; i < routing.num_inputs; i++) {
             o.sep();
-            enc_mod_input(o, routing.inputs[i]);
+            enc_mod_input(o, routing.inputs[i], midi_source_op_names, num_midi_source_ops);
         }
         o.ch(']');
     }
@@ -893,7 +901,7 @@ static void enc_binding(Out& o, const Synth::EffectParamBinding& binding, bool m
         o.ch('[');
         for (uint32_t i = 0; i < binding.num_inputs; i++) {
             o.sep();
-            enc_mod_input(o, binding.inputs[i], ms);
+            enc_mod_input(o, binding.inputs[i], source_op_names, num_source_ops, ms);
         }
         o.ch(']');
     }
@@ -977,7 +985,7 @@ static void enc_effect(Out& o, const Synth::EffectSlotBinding& slot, bool strict
     // the omission-normalized shape old banks load from.
     if (slot.enable_input.source != Synth::ModSource::none) {
         o.key("enable_input");
-        enc_mod_input(o, slot.enable_input);
+        enc_mod_input(o, slot.enable_input, source_op_names, num_source_ops);
     }
 
     if (slot.type != Synth::EffectType::none) {
@@ -2457,7 +2465,9 @@ static void decode_mod_input_fields(Walker&          w,
                                     Synth::ModInput& in,
                                     bool*            source_set,
                                     void (*unknown)(Walker&, uint32_t),
-                                    bool ms = false)
+                                    const char* const* op_names,
+                                    uint32_t           num_ops,
+                                    bool               ms = false)
 {
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
@@ -2467,7 +2477,7 @@ static void decode_mod_input_fields(Walker&          w,
             *source_set = true;
         }
         else if (key_eq(w, key_idx, "op")) {
-            want_enum(w, val_idx, source_op_names, num_source_ops, &value);
+            want_enum(w, val_idx, op_names, num_ops, &value);
             in.op = static_cast<Synth::SourceOp>(value);
         }
         else if (key_eq(w, key_idx, ms ? "scale_ms" : "scale")) {
@@ -2485,10 +2495,15 @@ static void decode_mod_input_fields(Walker&          w,
     });
 }
 
-static void decode_mod_input(Walker& w, uint32_t obj, Synth::ModInput& in, bool ms = false)
+static void decode_mod_input(Walker&            w,
+                             uint32_t           obj,
+                             Synth::ModInput&   in,
+                             const char* const* op_names,
+                             uint32_t           num_ops,
+                             bool               ms = false)
 {
     bool source_set; // unused: the bank format makes "source" optional
-    decode_mod_input_fields(w, obj, in, &source_set, unknown_field, ms);
+    decode_mod_input_fields(w, obj, in, &source_set, unknown_field, op_names, num_ops, ms);
 }
 
 static void decode_gen(Walker& w, uint32_t obj, Synth::TargetBinding& gen, bool* touched)
@@ -2606,7 +2621,7 @@ static void decode_routing(Walker&               w,
         }
         else if (key_eq(w, key_idx, "inputs"))
             walk_array(w, val_idx, Synth::max_mod_inputs, [&](uint32_t elem, uint32_t pos) {
-                decode_mod_input(w, elem, routing.inputs[pos]);
+                decode_mod_input(w, elem, routing.inputs[pos], midi_source_op_names, num_midi_source_ops);
                 routing.num_inputs = static_cast<uint16_t>(pos + 1);
             });
         else
@@ -3261,7 +3276,7 @@ static void decode_binding(Walker&                    w,
             want_float(w, val_idx, &binding.lfo_rate_scale);
         else if (key_eq(w, key_idx, "inputs"))
             walk_array(w, val_idx, Synth::max_mod_inputs, [&](uint32_t elem, uint32_t pos) {
-                decode_mod_input(w, elem, binding.inputs[pos], ms);
+                decode_mod_input(w, elem, binding.inputs[pos], source_op_names, num_source_ops, ms);
                 binding.num_inputs = static_cast<uint16_t>(pos + 1);
             });
         else
@@ -3434,7 +3449,7 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
                 unknown_field(w, key_idx);
         }
         else if (key_eq(w, key_idx, "enable_input")) {
-            decode_mod_input(w, val_idx, slot.enable_input);
+            decode_mod_input(w, val_idx, slot.enable_input, source_op_names, num_source_ops);
         }
         else if (key_eq(w, key_idx, "params")) {
             if (w.toks[val_idx].type != JSMN_OBJECT) {
@@ -5377,7 +5392,7 @@ static void decode_envelope_doc(Walker&                    w,
 static void decode_mod_input_doc(Walker& w, uint32_t obj, Synth::ModInput& input)
 {
     bool source_set = false;
-    decode_mod_input_fields(w, obj, input, &source_set, doc_unknown_field);
+    decode_mod_input_fields(w, obj, input, &source_set, doc_unknown_field, midi_source_op_names, num_midi_source_ops);
     if (w.failed || ! source_set)
         w.failed = true;
 }
@@ -6659,8 +6674,10 @@ static uint32_t encode_instrument_json_for_domain(char*                         
                 o.ch('[');
                 for (uint32_t input = 0; input < routing.num_inputs; input++) {
                     const Synth::ModInput& in = routing.inputs[input];
-                    if (in.op > Synth::SourceOp::multiply)
+                    if (in.op > Synth::SourceOp::gain) {
                         return 0;
+                    }
+
                     if (in.source == Synth::ModSource::cc) {
                         // The assignable cc source is admitted with
                         // cc_number 16..31, like the bank validator.
@@ -6672,7 +6689,7 @@ static uint32_t encode_instrument_json_for_domain(char*                         
                         // (canonicalization hole).
                         return 0;
                     o.sep();
-                    enc_mod_input(o, in);
+                    enc_mod_input(o, in, midi_source_op_names, num_midi_source_ops);
                 }
                 o.ch(']');
             }

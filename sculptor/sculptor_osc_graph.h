@@ -24,6 +24,34 @@
 
 namespace Sculptor {
 
+void append_mod_source_row(Graph*   graph,
+                           uint32_t node,
+                           uint32_t input_idx,
+                           uint8_t  row_group,
+                           uint32_t op_index,
+                           float    amount,
+                           uint8_t  level_base     = 1,
+                           bool     gain_available = false);
+void append_lfo_row(Graph*    graph,
+                    uint32_t  node,
+                    uint8_t   row_group,
+                    uint32_t  op_index,
+                    float     depth,
+                    uint32_t* op_slot,
+                    uint32_t* depth_slot,
+                    uint8_t   level_base = 1);
+
+// Effects and LFOs use only the first two source operators.
+extern const char* const source_op_names[3];
+// Option labels of the two-way LFO wave list (sine, sawtooth).
+extern const char* const lfo_wave_names[2];
+extern const char* const lfo_sync_names[6];
+extern const char* const lfo_start_names[3];
+
+// Labels and hover texts of the channel/note modulation source roles,
+// indexed by ModSource - 1 (pitch_bend first).
+extern const LabelTooltip mod_source_descs[6];
+
 // Only waveform/mode availability; connections, edit locks and ghosts are caller-owned.
 bool oscillator_slot_waveform_mode_disabled(const Node& node, uint32_t slot_index);
 
@@ -205,6 +233,11 @@ constexpr uint32_t osc_target_lfo_dot(uint32_t target)
 constexpr uint32_t osc_target_src_dot(uint32_t target, uint32_t input)
 {
     return osc_target_block_base(target) + 6u + 3u * input;
+}
+
+constexpr uint32_t osc_target_src_op(uint32_t target, uint32_t input)
+{
+    return osc_target_src_dot(target, input) + 1u;
 }
 
 // Last block end fits the slot pool; the twelve row slots are spaced far

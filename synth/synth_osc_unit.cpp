@@ -1609,7 +1609,11 @@ static void check_target_block_grammar(const Sculptor::Node&       osc,
         TEST(osc.slots.entries[dot + 2].child_level == level_base + 1);
         const Sculptor::Slot& op = osc.slots.entries[dot + 1];
         TEST(op.property_type == Sculptor::PropertyType::list);
-        TEST(op.num_list_options == 2);
+        TEST(op.num_list_options == 3);
+        TEST(op.radio_list);
+        TEST(strcmp(op.list_options[2], "gain") == 0);
+        TEST(strcmp(op.list_options[0], "+") == 0);
+        TEST(strcmp(op.list_options[1], "x") == 0);
         TEST(op.value.list_index == static_cast<uint32_t>(gen.inputs[i].op));
         const Sculptor::Slot& scale = osc.slots.entries[dot + 2];
         TEST(strncmp(scale.name, "Amount", sizeof(scale.name)) == 0);
@@ -4070,6 +4074,7 @@ static void osc_instrument_node_regressions()
         const Sculptor::Slot& voices_row = graph.node(mapping.instrument_node).slots.entries[voices_slot];
         TEST(voices_row.kind == Sculptor::SlotKind::property);
         TEST(voices_row.num_list_options == 3);
+        TEST(! voices_row.radio_list);
         TEST(strcmp(voices_row.list_options[0], "multiple") == 0);
         TEST(strcmp(voices_row.list_options[1], "reuse per-note") == 0);
         TEST(strcmp(voices_row.list_options[2], "single") == 0);
@@ -5047,8 +5052,52 @@ static void check_osc_inline_1()
     }
 }
 
+static void check_midi_gain_row_rebuild()
+{
+    static Synth::InstrumentEditorBank bank;
+    static Sculptor::Graph             graph;
+    Synth::Instrument                  instrument = {};
+    Sculptor::OscGraphMapping          mapping    = {};
+    build_binding_fixture(&bank, &instrument);
+    Synth::TargetBinding& binding     = instrument.layers[0].targets[Synth::mod_volume];
+    binding.num_inputs                = 1;
+    binding.inputs[0]                 = { Synth::ModSource::velocity, Synth::SourceOp::add, 0, 3.0f };
+    const uint32_t        op_slot     = Sculptor::osc_target_src_op(Synth::mod_volume, 0);
+    const uint32_t        amount_slot = op_slot + 1;
+    const Synth::SourceOp ops[]       = { Synth::SourceOp::gain, Synth::SourceOp::add, Synth::SourceOp::multiply };
+    const float           amounts[]   = { 3.0f, -2.0f };
+
+    for (Synth::SourceOp op : ops) {
+        for (float amount : amounts) {
+            TEST(Sculptor::project_instrument_to_graph(instrument, bank.bank, &graph, &mapping));
+            Sculptor::PropertyValue selection = {};
+            selection.list_index              = static_cast<uint8_t>(op);
+            graph.set_slot_value(mapping.osc_nodes[0], op_slot, selection);
+            Sculptor::PropertyValue value = {};
+            value.real                    = amount;
+            graph.set_slot_value(mapping.osc_nodes[0], amount_slot, value);
+            Synth::Instrument compiled = {};
+            TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+            const float expected = op == Synth::SourceOp::gain ? (amount > 1.0f ? 1.0f : 0.0f) : amount;
+            TEST(compiled.layers[0].targets[Synth::mod_volume].inputs[0].op == op);
+            TEST(compiled.layers[0].targets[Synth::mod_volume].inputs[0].scale == expected);
+
+            TEST(Sculptor::project_instrument_to_graph(compiled, bank.bank, &graph, &mapping));
+            const Sculptor::Slot& rebuilt = graph.node(mapping.osc_nodes[0]).slots.entries[amount_slot];
+            TEST(rebuilt.value.real == expected);
+            TEST(rebuilt.real_bounded == (op == Synth::SourceOp::gain));
+            if (op == Synth::SourceOp::gain) {
+                TEST(rebuilt.real_min == 0.0f && rebuilt.real_max == 1.0f);
+            }
+
+            instrument = compiled;
+        }
+    }
+}
+
 int main()
 {
+    check_midi_gain_row_rebuild();
     test_silence_stdout();
     osc_inputs_move_reprojection_regressions();
     osc_slot_disable_stamped_rules_regressions();

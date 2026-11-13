@@ -469,6 +469,12 @@ static void check_string_row_reuse()
     TEST(Sculptor::osc_change_restructures(mapping, change));
     change.slot_idx = 69; // wave b renames the duty b row (Pad Wander under pad)
     TEST(Sculptor::osc_change_restructures(mapping, change));
+    change.slot_idx = Sculptor::osc_target_src_op(Synth::mod_volume, 0);
+    TEST(Sculptor::osc_change_restructures(mapping, change));
+    change.slot_idx = Sculptor::osc_target_src_op(Synth::mod_volume, 1);
+    TEST(Sculptor::osc_change_restructures(mapping, change));
+    change.slot_idx = Sculptor::osc_target_row(Synth::mod_volume);
+    TEST(! Sculptor::osc_change_restructures(mapping, change));
     change.slot_idx = 96; // mix mode
     TEST(! Sculptor::osc_change_restructures(mapping, change));
 }

@@ -439,6 +439,15 @@
       ],
       "description": "How a value combines onto its target: added or multiplied."
     },
+    "midi_source_op": {
+      "type": "string",
+      "enum": [
+        "add",
+        "multiply",
+        "gain"
+      ],
+      "description": "Gain applies velocity sensitivity anchored at full velocity."
+    },
     "layer": {
       "type": "object",
       "description": "One oscillator. The shared routing (base, sources) may be set by the first layer that supplies base or sources for a target (a layer with only generators does not claim it); every layer has its own envelope and LFO generators.",
@@ -693,7 +702,7 @@
                 "$ref": "#/definitions/mod_source"
               },
               "op": {
-                "$ref": "#/definitions/source_op"
+                "$ref": "#/definitions/midi_source_op"
               },
               "cc_number": {
                 "type": "integer"
@@ -736,12 +745,12 @@
                 "$ref": "#/definitions/mod_source"
               },
               "op": {
-                "$ref": "#/definitions/source_op",
+                "$ref": "#/definitions/midi_source_op",
                 "default": "add"
               },
               "scale": {
                 "type": "number",
-                "description": "How much of the source applies; negative inverts."
+                "description": "How much of the source applies; negative inverts.  Gain clamps this value to [0,1]."
               },
               "cc": {
                 "type": "integer",

@@ -7498,8 +7498,63 @@ static void resilience_instrument_drop_layout_damage()
     }
 }
 
+static void check_midi_gain_bank_paths()
+{
+    static Synth::InstrumentEditorBank bank;
+    static Synth::InstrumentEditorBank decoded;
+    static char                        payload[Synth::library_payload_max];
+    Synth::Instrument                  instrument = {};
+    build_binding_fixture(&bank, &instrument);
+    Synth::TargetBinding& volume     = instrument.layers[0].targets[Synth::mod_volume];
+    volume.num_inputs                = 1;
+    volume.inputs[0]                 = { Synth::ModSource::velocity, Synth::SourceOp::gain, 0, 0.6f };
+    bank.bank.instruments.entries[0] = instrument;
+    TEST(Synth::validate_instrument_bank(&bank.bank));
+
+    const uint32_t length = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
+    TEST(length > 0);
+    TEST(strstr(payload, "\"gain\"") != nullptr);
+    TEST(Synth::decode_editor_bank_json(payload, length, &decoded));
+    const Synth::ModInput& input = decoded.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].inputs[0];
+    TEST(input.op == Synth::SourceOp::gain);
+    TEST(input.scale == 0.6f);
+
+    Synth::EffectChainBinding& chain   = bank.bank.channel_chains[0];
+    chain.num_effects                  = 1;
+    chain.effects[0].type              = Synth::EffectType::delay;
+    chain.effects[0].enabled           = true;
+    Synth::EffectParamBinding& binding = chain.effects[0].bindings[0];
+    binding.num_inputs                 = 1;
+    binding.inputs[0]                  = { Synth::ModSource::mod_wheel, Synth::SourceOp::add, 0, 0.6f };
+    TEST(Synth::validate_instrument_bank(&bank.bank));
+    binding.inputs[0].op = Synth::SourceOp::gain;
+    TEST(! Synth::validate_instrument_bank(&bank.bank));
+
+    static Synth::EffectsDocument effects;
+    effects       = {};
+    effects.chain = chain;
+    TEST(! Synth::validate_effects_document(&effects));
+    effects.chain.effects[0].bindings[0].inputs[0].op = Synth::SourceOp::add;
+    TEST(Synth::validate_effects_document(&effects));
+
+    char              effect_json[512];
+    const char* const ops[] = { "add", "gain" };
+
+    for (const char* op : ops) {
+        snprintf(effect_json,
+                 sizeof(effect_json),
+                 "{\"format\":\"synth-effects-v4\",\"effects\":[{\"type\":\"delay\",\"enabled\":true,"
+                 "\"params\":{\"time\":{\"base_value_ms\":100,\"inputs\":[{\"source\":\"mod_wheel\","
+                 "\"op\":\"%s\",\"scale_ms\":0.6}]}}}]}",
+                 op);
+        TEST(Synth::decode_effects_json(effect_json, static_cast<uint32_t>(strlen(effect_json)), &effects) ==
+             (strcmp(op, "add") == 0));
+    }
+}
+
 int main()
 {
+    check_midi_gain_bank_paths();
     test_silence_stdout();
     resilience_instrument_drop_layout_damage();
     resilience_addendum_regressions();

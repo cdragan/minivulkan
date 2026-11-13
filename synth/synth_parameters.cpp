@@ -360,6 +360,19 @@ float Synth::eval_envelope(const EnvelopeDescriptor& envelope, EnvelopeState* st
     return value;
 }
 
+static float apply_source(float value, float contribution, float scale, SourceOp op)
+{
+    if (op == SourceOp::add) {
+        return value + contribution;
+    }
+
+    if (op == SourceOp::gain) {
+        return value * (1.0f - scale + contribution);
+    }
+
+    return value * contribution;
+}
+
 void Synth::propagate_parameters(Parameter* params, const ParamDescriptor* descs, uint32_t num_params)
 {
     // Snapshot every parameter's value so all reads this step see a consistent previous
@@ -383,12 +396,8 @@ void Synth::propagate_parameters(Parameter* params, const ParamDescriptor* descs
         for (uint32_t source_idx = 0; source_idx < desc.plain.num_sources; source_idx++) {
             const SourceParam& source       = desc.plain.sources[source_idx];
             const float        contribution = source.scale * params[source.param_id].prev_value;
-            if (source.op == SourceOp::add) {
-                value += contribution;
-            }
-            else {
-                value *= contribution;
-            }
+
+            value = apply_source(value, contribution, source.scale, source.op);
         }
 
         params[param_idx].value = value;
@@ -438,7 +447,12 @@ void Synth::configure_plain(ParamDescriptor*   desc,
     }
 
     for (uint32_t input_idx = 0; input_idx < num_inputs; input_idx++) {
-        desc->plain.sources[num_sources++] = inputs[input_idx];
+        SourceParam source = inputs[input_idx];
+        if (source.op == SourceOp::gain) {
+            source.scale = vmath::clamp(source.scale, 0.0f, 1.0f);
+        }
+
+        desc->plain.sources[num_sources++] = source;
     }
 
     desc->plain.base_value  = base_value;
@@ -842,12 +856,8 @@ float Synth::param_onset_value(const Parameter* params, const ParamDescriptor* d
             for (uint32_t source_idx = 0; source_idx < desc.plain.num_sources; source_idx++) {
                 const SourceParam& source       = desc.plain.sources[source_idx];
                 const float        contribution = source.scale * param_onset_value(params, descs, source.param_id);
-                if (source.op == SourceOp::add) {
-                    value += contribution;
-                }
-                else {
-                    value *= contribution;
-                }
+
+                value = apply_source(value, contribution, source.scale, source.op);
             }
             return value;
         }

@@ -5354,8 +5354,29 @@ static void check_channel_category_persistence()
     TEST(remove(path) == 0);
 }
 
+static void check_midi_gain_clipboard_round_trip()
+{
+    static Synth::InstrumentEditorBank source;
+    static ClipboardDecode             decoded;
+    static char                        text[clipboard_capacity];
+    Synth::Instrument                  instrument = {};
+    build_binding_fixture(&source, &instrument);
+    Synth::TargetBinding& volume       = instrument.layers[0].targets[Synth::mod_volume];
+    volume.num_inputs                  = 1;
+    volume.inputs[0]                   = { Synth::ModSource::velocity, Synth::SourceOp::gain, 0, 0.6f };
+    source.bank.instruments.entries[0] = instrument;
+
+    TEST(export_clipboard_fixture(source, text, sizeof(text)));
+    TEST(strstr(text, "\"gain\"") != nullptr);
+    TEST(decode_clipboard(&decoded, text, max_portable_records));
+    const Synth::ModInput& input = decoded.instr.layers[0].targets[Synth::mod_volume].inputs[0];
+    TEST(input.op == Synth::SourceOp::gain);
+    TEST(input.scale == 0.6f);
+}
+
 int main()
 {
+    check_midi_gain_clipboard_round_trip();
     test_silence_stdout();
     check_channel_categories();
     check_channel_category_persistence();

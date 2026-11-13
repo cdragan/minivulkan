@@ -538,6 +538,102 @@ bool Sculptor::is_band_button_slot(const uint32_t slot_idx)
     return offset == 1u || offset == 2u;
 }
 
+const char* const Sculptor::source_op_names[3] = { "+", "x", "gain" };
+// Effect and oscillator LFO waves the runtime can evaluate (eval_lfo_mod);
+// pulse and noise would trip the runtime's palette assert, and bank
+// validation rejects them.
+const char* const Sculptor::lfo_wave_names[2]  = { "Sine", "Sawtooth" };
+const char* const Sculptor::lfo_sync_names[6]  = { "absolute (ms)", "1 note",   "1/2 note",
+                                                   "1/4 note",      "1/8 note", "1/16 note" };
+const char* const Sculptor::lfo_start_names[3] = { "middle", "lowest", "highest" };
+
+// Labels and hover texts of the channel/note modulation source roles,
+// indexed by ModSource - 1 (pitch_bend first).
+const Sculptor::LabelTooltip Sculptor::mod_source_descs[6] = {
+    { "Pitch bend", "Pitch bend wheel (-1..1)" },
+    { "Mod wheel", "Modulation wheel (0..1)" },
+    { "Channel press.", "Channel aftertouch pressure (0..1)" },
+    { "Velocity", "Note key strike velocity (0..1)" },
+    { "Aftertouch", "Polyphonic key aftertouch pressure (0..1)" },
+    { "Pressure (max)", "Greater of channel pressure and key aftertouch (0..1)" }
+};
+
+void Sculptor::append_mod_source_row(Sculptor::Graph* graph,
+                                     uint32_t         node,
+                                     uint32_t         input_idx,
+                                     uint8_t          row_group,
+                                     uint32_t         op_index,
+                                     float            amount,
+                                     uint8_t          level_base,
+                                     bool             gain_available)
+{
+    Sculptor::Slot src_dot = input_slot(input_idx == 0 ? "Source A Op" : "Source B Op");
+    src_dot.row_group      = row_group;
+    src_dot.child_row      = true;
+    src_dot.child_level    = level_base;
+    src_dot.tooltip        = "How MIDI input parameter is combined with parameter value (after envelope and LFO)";
+    graph->add_slot(node, src_dot);
+
+    const uint32_t num_ops = gain_available ? static_cast<uint32_t>(Synth::SourceOp::gain) + 1 : 2;
+
+    Sculptor::Slot src_op = list_slot("", source_op_names, num_ops, op_index);
+    src_op.row_group      = row_group;
+    src_op.child_row      = true;
+    src_op.child_level    = level_base;
+    src_op.tooltip        = src_dot.tooltip;
+    src_op.radio_list     = true;
+    graph->add_slot(node, src_op);
+
+    const bool     gain_op    = gain_available && op_index == static_cast<uint32_t>(Synth::SourceOp::gain);
+    Sculptor::Slot src_amount = gain_op ? bounded_real_slot("Amount", amount, 0.0f, 1.0f) : real_slot("Amount", amount);
+    src_amount.child_row      = true;
+    src_amount.child_level    = static_cast<uint8_t>(level_base + 1);
+    src_amount.tooltip = "Pre-multiplier for MIDI input parameter applied to this parameter's value.";
+    graph->add_slot(node, src_amount);
+}
+
+// Adds the LFO row shared by the oscillator and effect projections: the
+// LFO wire lands on the dot, Op picks how the wave combines with the
+// base, and Depth sets the strength on its own nested line.  Either
+// output pointer may be null.
+void Sculptor::append_lfo_row(Sculptor::Graph* graph,
+                              uint32_t         node,
+                              uint8_t          row_group,
+                              uint32_t         op_index,
+                              float            depth,
+                              uint32_t*        op_slot,
+                              uint32_t*        depth_slot,
+                              uint8_t          level_base)
+{
+    Sculptor::Slot lfo_dot = input_slot("LFO Op");
+    lfo_dot.row_group      = row_group;
+    lfo_dot.child_row      = true;
+    lfo_dot.child_level    = level_base;
+    lfo_dot.tooltip        = "How LFO value is combined with parameter value";
+    graph->add_slot(node, lfo_dot);
+
+    Sculptor::Slot lfo_op = list_slot("", source_op_names, 2, op_index);
+    lfo_op.row_group      = row_group;
+    lfo_op.child_row      = true;
+    lfo_op.child_level    = level_base;
+    lfo_op.tooltip        = lfo_dot.tooltip;
+    const uint32_t op_idx = graph->add_slot(node, lfo_op);
+
+    Sculptor::Slot lfo_depth = real_slot("Depth", depth);
+    lfo_depth.child_row      = true;
+    lfo_depth.child_level    = static_cast<uint8_t>(level_base + 1);
+    lfo_depth.tooltip = "Pre-multiplier for LFO value before it's combined with parameter value (after envelope)";
+    const uint32_t depth_idx = graph->add_slot(node, lfo_depth);
+
+    if (op_slot != nullptr) {
+        *op_slot = op_idx;
+    }
+
+    if (depth_slot != nullptr) {
+        *depth_slot = depth_idx;
+    }
+}
+
 // Connection families a target block's rows carry.
 enum TargetFamily {
     family_env,
@@ -596,7 +692,8 @@ static void append_target_block(Graph*                      graph,
                                         static_cast<uint8_t>(4 * t + 2 + i),
                                         static_cast<uint32_t>(op),
                                         scale,
-                                        level_base);
+                                        level_base,
+                                        true);
     }
 }
 
@@ -1612,6 +1709,14 @@ bool Sculptor::osc_change_restructures(const Sculptor::OscGraphMapping& mapping,
         // renames the duty b row (Pad Wander under the pad wave)
         return true;
     }
+    for (uint32_t target = 0; target < Synth::num_mod_targets; ++target) {
+        for (uint32_t input = 0; input < Synth::max_mod_inputs; ++input) {
+            if (change.slot_idx == Sculptor::osc_target_src_op(target, input)) {
+                return true;
+            }
+        }
+    }
+
     // A band [-]/[+] click rewrites the stored bands (insert after band N
     // as a copy, or remove band N with later bands shifting up), so the
     // graph rebuilds from the model like any structural edit.
@@ -2130,6 +2235,9 @@ static bool read_oscillator_layer(const Sculptor::Graph&           graph,
             }
             input.op    = static_cast<Synth::SourceOp>(op_index);
             input.scale = slots[dot + 2].value.real;
+            if (input.op == Synth::SourceOp::gain) {
+                input.scale = vmath::clamp(input.scale, 0.0f, 1.0f);
+            }
         }
         gen.num_inputs = static_cast<uint16_t>(num_inputs);
         osc.targets[t] = gen;

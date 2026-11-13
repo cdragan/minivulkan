@@ -773,6 +773,109 @@ static void check_core_inline_0()
         TEST(approx(params[dest_id].value, 1.0f, 0.001f)); // (0 + 2.0) * 0.5
     }
 
+    // Gain keeps the authored level at full velocity and preserves envelope silence.
+    {
+        constexpr uint16_t     dest_id            = 1;
+        constexpr uint16_t     env_id             = 2;
+        constexpr uint16_t     vel_id             = 3;
+        constexpr uint32_t     num_params         = 4;
+        const float            gain_scales[]      = { 0.0f, 0.5f, 1.0f, 3.0f, -2.0f };
+        const float            clamped_scales[]   = { 0.0f, 0.5f, 1.0f, 1.0f, 0.0f };
+        const float            velocities[]       = { 0.0f, 0.5f, 1.0f };
+        Synth::ParamDescriptor descs[num_params]  = {};
+        Synth::Parameter       params[num_params] = {};
+        descs[env_id].kind                        = Synth::ParamKind::envelope;
+        descs[env_id].envelope.num_points         = 2;
+        descs[env_id].envelope.min_max_delta      = 2.0f / 65535.0f;
+        descs[env_id].envelope.points[0]          = { 0, 0xFFFF };
+        descs[env_id].envelope.points[1]          = { 1, 0 };
+
+        for (uint32_t scale_index = 0; scale_index < sizeof(gain_scales) / sizeof(gain_scales[0]); ++scale_index) {
+            const Synth::SourceParam inputs[] = { { vel_id, gain_scales[scale_index], Synth::SourceOp::gain } };
+            Synth::configure_plain(&descs[dest_id], 1.0f, env_id, 1.0f, 0, Synth::SourceOp::add, inputs, 1);
+            TEST(descs[dest_id].plain.sources[1].scale == clamped_scales[scale_index]);
+
+            for (float velocity : velocities) {
+                params[vel_id].value      = velocity;
+                params[env_id].envelope   = {};
+                params[env_id].value      = Synth::eval_envelope_at(descs[env_id].envelope, params[env_id].envelope);
+                params[env_id].prev_value = params[env_id].value;
+
+                // The base 1.0 plus envelope 2.0 gives the authored level 3.0.
+                const float expected =
+                    3.0f * (1.0f - clamped_scales[scale_index] + clamped_scales[scale_index] * velocity);
+
+                Synth::propagate_parameters(params, descs, num_params);
+                TEST(approx(params[dest_id].value, expected, 0.001f));
+                TEST(approx(Synth::param_onset_value(params, descs, dest_id), expected, 0.001f));
+
+                if (clamped_scales[scale_index] == 1.0f) {
+                    const float              gain_value        = params[dest_id].value;
+                    const Synth::SourceParam multiply_inputs[] = { { vel_id, 1.0f, Synth::SourceOp::multiply } };
+                    Synth::ParamDescriptor   multiply_descs[num_params] = {};
+                    memcpy(multiply_descs, descs, sizeof(descs));
+                    Synth::configure_plain(&multiply_descs[dest_id],
+                                           1.0f,
+                                           env_id,
+                                           1.0f,
+                                           0,
+                                           Synth::SourceOp::add,
+                                           multiply_inputs,
+                                           1);
+                    Synth::propagate_parameters(params, multiply_descs, num_params);
+                    TEST(params[dest_id].value == gain_value);
+                    TEST(Synth::param_onset_value(params, multiply_descs, dest_id) == gain_value);
+                }
+            }
+
+            Synth::configure_plain(&descs[dest_id], 0.0f, env_id, 1.0f, 0, Synth::SourceOp::add, inputs, 1);
+            params[env_id].envelope.point = 1;
+            params[env_id].envelope.tick  = 1;
+            params[env_id].value          = Synth::eval_envelope_at(descs[env_id].envelope, params[env_id].envelope);
+            params[env_id].prev_value     = params[env_id].value;
+
+            Synth::propagate_parameters(params, descs, num_params);
+            TEST(params[dest_id].value == 0.0f);
+            TEST(Synth::param_onset_value(params, descs, dest_id) == 0.0f);
+        }
+    }
+
+    {
+        constexpr uint16_t     dest_id            = 1;
+        constexpr uint16_t     env_id             = 2;
+        constexpr uint16_t     source_id          = 3;
+        constexpr uint32_t     num_params         = 4;
+        Synth::ParamDescriptor descs[num_params]  = {};
+        Synth::Parameter       params[num_params] = {};
+        descs[env_id].kind                        = Synth::ParamKind::envelope;
+        descs[env_id].envelope.num_points         = 2;
+        descs[env_id].envelope.min_max_delta      = 2.0f / 65535.0f;
+        descs[env_id].envelope.points[0]          = { 0, 0xFFFF };
+        descs[env_id].envelope.points[1]          = { 1, 0 };
+        const Synth::SourceParam full_gain[]      = { { source_id, 1.0f, Synth::SourceOp::gain } };
+        Synth::configure_plain(&descs[dest_id], 0.0f, env_id, 1.0f, 0, Synth::SourceOp::add, full_gain, 1);
+        params[source_id].value       = 0.0f;
+        params[env_id].envelope.point = 1;
+        params[env_id].envelope.tick  = 1;
+        params[env_id].value          = Synth::eval_envelope_at(descs[env_id].envelope, params[env_id].envelope);
+        params[env_id].prev_value     = params[env_id].value;
+
+        Synth::propagate_parameters(params, descs, num_params);
+        TEST(params[env_id].value == 0.0f);
+        TEST(params[dest_id].value == 0.0f);
+        TEST(Synth::param_onset_value(params, descs, dest_id) == 0.0f);
+
+        Synth::configure_plain(&descs[dest_id], 2.0f, 0, 1.0f, 0, Synth::SourceOp::add, full_gain, 1);
+        params[source_id].prev_value = 0.25f;
+        params[source_id].value      = 0.75f;
+
+        // The snapshot uses value 0.75, not the old prev_value 0.25.
+        Synth::propagate_parameters(params, descs, num_params);
+        TEST(params[source_id].prev_value == 0.75f);
+        TEST(params[dest_id].value == 1.5f);
+        TEST(Synth::param_onset_value(params, descs, dest_id) == 1.5f);
+    }
+
     // eval_lfo_mod: add op swings bipolar within [-depth, depth] and reaches both ends;
     // depth 0 is the neutral contribution 0.  4 ticks = one period here.
     {

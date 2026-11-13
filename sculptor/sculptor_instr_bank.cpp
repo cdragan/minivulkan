@@ -141,6 +141,11 @@ static bool valid_source_op(uint32_t op)
     return op <= static_cast<uint32_t>(Synth::SourceOp::multiply);
 }
 
+static bool valid_midi_source_op(uint32_t op)
+{
+    return op <= static_cast<uint32_t>(Synth::SourceOp::gain);
+}
+
 // Effects route only channel-wide MIDI sources; per-voice sources have no voice in an
 // effect's context (the runtime applies the same restriction at expansion).
 static bool is_channel_effect_source(uint32_t source)
@@ -335,7 +340,7 @@ static bool validate_oscillator_body(const Synth::Oscillator& osc)
         }
         for (uint32_t input = 0; input < binding.num_inputs; input++) {
             const Synth::ModInput& in = binding.inputs[input];
-            if (! valid_source_op(static_cast<uint32_t>(in.op))) {
+            if (! valid_midi_source_op(static_cast<uint32_t>(in.op))) {
                 return false;
             }
             if (in.source == Synth::ModSource::cc) {

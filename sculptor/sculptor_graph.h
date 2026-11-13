@@ -52,6 +52,7 @@ struct Slot {
     bool          int_bounded;          // integer slots render as a slider clamped to [real_min, real_max]
     bool          real_logarithmic : 1; // bounded slider uses a logarithmic curve
     bool          drop_menu : 1;        // release-over-empty-canvas opens the caller creation menu (projection state)
+    bool          radio_list : 1;       // list renders as label plus radio buttons instead of a dropdown
     uint8_t       display_order;        // 0 = slot order; otherwise display position plus one
     char          list_options[8][32];
     const char*   tooltip; // hover text of the row; null = no tooltip
@@ -76,29 +77,6 @@ Slot toggle_slot(const char* name, bool value);
 
 // One slot with its hover text attached.
 Slot with_tooltip(Slot slot, const char* tooltip);
-void append_mod_source_row(Graph*   graph,
-                           uint32_t node,
-                           uint32_t input_idx,
-                           uint8_t  row_group,
-                           uint32_t op_index,
-                           float    amount,
-                           uint8_t  level_base = 1);
-void append_lfo_row(Graph*    graph,
-                    uint32_t  node,
-                    uint8_t   row_group,
-                    uint32_t  op_index,
-                    float     depth,
-                    uint32_t* op_slot,
-                    uint32_t* depth_slot,
-                    uint8_t   level_base = 1);
-
-// Option labels of the two-way source op list (SourceOp::add, SourceOp::multiply).
-extern const char* const source_op_names[2];
-// Option labels of the two-way LFO wave list (sine, sawtooth).
-extern const char* const lfo_wave_names[2];
-extern const char* const lfo_sync_names[6];
-extern const char* const lfo_start_names[3];
-
 // Sized for the widest projected node - the oscillator: 36 fixed slots
 // plus Filter Type and the Pluck Brightness and String Dispersion rows (string
 // damping reuses the duty/pad tone rows), then one uniform block per existing band (the "Band N" header label, its
@@ -113,10 +91,6 @@ struct LabelTooltip {
     const char* name;
     const char* tooltip;
 };
-
-// Labels and hover texts of the channel/note modulation source roles,
-// indexed by ModSource - 1 (pitch_bend first).
-extern const LabelTooltip mod_source_descs[6];
 
 // Draws the optional caller state widget at the bottom of a node.
 // Returns the widget height in drawn pixels at render_scale (cached one

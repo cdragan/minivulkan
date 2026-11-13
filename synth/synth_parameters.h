@@ -84,7 +84,8 @@ struct EnvelopeState {
 
 enum class SourceOp : uint8_t {
     add,
-    multiply
+    multiply,
+    gain
 };
 
 // One input of a parameter

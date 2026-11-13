@@ -98,6 +98,13 @@ static bool is_band_click_slot(const Sculptor::Slot& slot)
            slot.property_type == Sculptor::PropertyType::toggle;
 }
 
+static bool slot_is_radio_list(const Sculptor::Slot& slot)
+{
+    const uint32_t num_options = slot.num_list_options < 8 ? slot.num_list_options : 8;
+
+    return slot.property_type == Sculptor::PropertyType::list && (slot.radio_list || num_options == 2);
+}
+
 static float slot_widget_w(const Sculptor::Slot& slot)
 {
     // A band header row packs the header label and its two click slots
@@ -106,9 +113,16 @@ static float slot_widget_w(const Sculptor::Slot& slot)
     if (is_band_click_slot(slot)) {
         return ImGui::GetFrameHeight();
     }
-    if (slot.property_type == Sculptor::PropertyType::list && slot.num_list_options == 2) {
-        return ImGui::CalcTextSize(slot.list_options[0]).x + ImGui::CalcTextSize(slot.list_options[1]).x +
-               2.0f * ImGui::GetFrameHeight() + 3.0f * ImGui::GetStyle().ItemSpacing.x;
+    if (slot_is_radio_list(slot)) {
+        const uint32_t num_options = slot.num_list_options < 8 ? slot.num_list_options : 8;
+        float width = static_cast<float>(num_options > 1 ? num_options - 1 : 0) * ImGui::GetStyle().ItemSpacing.x;
+
+        for (uint32_t option = 0; option < num_options; ++option) {
+            width += ImGui::CalcTextSize(slot.list_options[option]).x + ImGui::GetFrameHeight() +
+                     ImGui::GetStyle().ItemSpacing.x;
+        }
+
+        return width;
     }
     return property_widget_w;
 }
@@ -965,20 +979,21 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                             // clamp so Combo never reads past the items array.
                             const int num_items =
                                 static_cast<int>(slot.num_list_options < 8 ? slot.num_list_options : 8);
-                            if (num_items == 2) {
-                                // Two-option lists are mode selectors (add vs
-                                // multiply): a horizontal radio pair reads
-                                // faster than a dropdown, with the option
+                            if (slot_is_radio_list(slot)) {
+                                // Radio lists are mode selectors: a horizontal group
+                                // reads faster than a dropdown, with each option
                                 // label ahead of its button.
                                 int radio_index = list_index;
-                                for (int option_i = 0; option_i < 2; ++option_i) {
+                                for (int option_i = 0; option_i < num_items; ++option_i) {
                                     if (option_i > 0) {
                                         ImGui::SameLine();
                                     }
                                     ImGui::AlignTextToFramePadding();
                                     ImGui::TextUnformatted(items[option_i]);
                                     ImGui::SameLine();
-                                    ImGui::RadioButton(option_i == 0 ? "##op0" : "##op1", &radio_index, option_i);
+                                    ImGui::PushID(option_i);
+                                    ImGui::RadioButton("##op", &radio_index, option_i);
+                                    ImGui::PopID();
                                 }
                                 if (radio_index != list_index) {
                                     node.slots.entries[slot_idx].value.list_index = static_cast<uint8_t>(radio_index);
