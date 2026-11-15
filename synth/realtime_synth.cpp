@@ -13,6 +13,7 @@
 #include "synth_effects.h"
 #include "synth_instrument.h"
 #include "synth_midi_cc.h"
+#include "synth_param_list.h"
 #include "synth_soundtrack.h"
 #include <algorithm>
 #include <atomic>
@@ -144,110 +145,13 @@ enum VoiceParamRole : uint32_t {
 };
 
 enum OscParamRole : uint32_t {
-    osc_pitch_dest,
-    osc_pitch_env,
-    osc_pitch_lfo,
-    osc_volume_dest,
-    osc_volume_env,
-    osc_volume_lfo,
-    osc_spread_dest,
-    osc_spread_env,
-    osc_spread_lfo,
-    osc_panning_dest,
-    osc_panning_env,
-    osc_panning_lfo,
-    osc_duty0_dest,
-    osc_duty0_env,
-    osc_duty0_lfo,
-    osc_duty1_dest,
-    osc_duty1_env,
-    osc_duty1_lfo,
-    osc_mix_dest,
-    osc_mix_env,
-    osc_mix_lfo,
-    osc_fm_index_dest,
-    osc_fm_index_env,
-    osc_fm_index_lfo,
-    osc_fm_ratio_dest,
-    osc_fm_ratio_env,
-    osc_fm_ratio_lfo,
-    osc_pad_tilt0_dest,
-    osc_pad_tilt0_env,
-    osc_pad_tilt0_lfo,
-    osc_pad_tilt1_dest,
-    osc_pad_tilt1_env,
-    osc_pad_tilt1_lfo,
-    osc_fir_slope_dest,
-    osc_fir_slope_env,
-    osc_fir_slope_lfo,
-    osc_fir_band0_offset_dest,
-    osc_fir_band0_offset_env,
-    osc_fir_band0_offset_lfo,
-    osc_fir_band0_gain_dest,
-    osc_fir_band0_gain_env,
-    osc_fir_band0_gain_lfo,
-    osc_fir_band1_offset_dest,
-    osc_fir_band1_offset_env,
-    osc_fir_band1_offset_lfo,
-    osc_fir_band1_spread_dest,
-    osc_fir_band1_spread_env,
-    osc_fir_band1_spread_lfo,
-    osc_fir_band1_gain_dest,
-    osc_fir_band1_gain_env,
-    osc_fir_band1_gain_lfo,
-    osc_fir_band1_slope_dest,
-    osc_fir_band1_slope_env,
-    osc_fir_band1_slope_lfo,
-    osc_fir_band2_offset_dest,
-    osc_fir_band2_offset_env,
-    osc_fir_band2_offset_lfo,
-    osc_fir_band2_spread_dest,
-    osc_fir_band2_spread_env,
-    osc_fir_band2_spread_lfo,
-    osc_fir_band2_gain_dest,
-    osc_fir_band2_gain_env,
-    osc_fir_band2_gain_lfo,
-    osc_fir_band2_slope_dest,
-    osc_fir_band2_slope_env,
-    osc_fir_band2_slope_lfo,
-    osc_fir_band3_offset_dest,
-    osc_fir_band3_offset_env,
-    osc_fir_band3_offset_lfo,
-    osc_fir_band3_spread_dest,
-    osc_fir_band3_spread_env,
-    osc_fir_band3_spread_lfo,
-    osc_fir_band3_gain_dest,
-    osc_fir_band3_gain_env,
-    osc_fir_band3_gain_lfo,
-    // clang-format off
-    osc_fir_band3_slope_dest, osc_fir_band3_slope_env, osc_fir_band3_slope_lfo,
-    osc_string_damping_dest,
-    osc_string_damping_env,
-    osc_string_damping_lfo,
-    osc_string_release_damping_dest,
-    osc_string_release_damping_env,
-    osc_string_release_damping_lfo,
-    osc_string_dispersion_dest,
-    osc_string_dispersion_env,
-    osc_string_dispersion_lfo,
-    // clang-format on
-    osc_string_brightness_dest,
-    osc_string_brightness_env,
-    osc_string_brightness_lfo,
-    osc_string_hammer_dest,
-    osc_string_hammer_env,
-    osc_string_hammer_lfo,
-
-    osc_string_hammer_contact_dest,
-    osc_string_hammer_contact_env,
-    osc_string_hammer_contact_lfo,
-    osc_string_hammer_gain_dest,
-    osc_string_hammer_gain_env,
-    osc_string_hammer_gain_lfo,
+#define X(name, ...) osc_##name##_dest, osc_##name##_env, osc_##name##_lfo,
+    SYNTH_MOD_TARGET_LIST(X)
+#undef X
     num_osc_roles
 };
 
-static_assert(num_osc_roles == 99);
+static_assert(num_osc_roles == 3 * Synth::num_mod_targets);
 
 constexpr uint32_t channel_block_base = 1;
 constexpr uint32_t voice_block_base   = channel_block_base + Synth::max_channels * num_channel_roles;
@@ -284,42 +188,10 @@ struct ModTargetNode {
 };
 
 constexpr ModTargetNode mod_target_nodes[] = {
-    { mod_pitch, osc_pitch_dest },
-    { mod_volume, osc_volume_dest },
-    { mod_fir_spread, osc_spread_dest },
-    { mod_panning, osc_panning_dest },
-    { mod_duty0, osc_duty0_dest },
-    { mod_duty1, osc_duty1_dest },
-    { mod_osc_mix, osc_mix_dest },
-    { mod_fm_index, osc_fm_index_dest },
-    { mod_fm_ratio, osc_fm_ratio_dest },
-    { mod_pad_tilt0, osc_pad_tilt0_dest },
-    { mod_pad_tilt1, osc_pad_tilt1_dest },
-    { mod_fir_slope, osc_fir_slope_dest },
-    { mod_fir_band0_offset, osc_fir_band0_offset_dest },
-    { mod_fir_band0_gain, osc_fir_band0_gain_dest },
-    { mod_fir_band1_offset, osc_fir_band1_offset_dest },
-    { mod_fir_band1_spread, osc_fir_band1_spread_dest },
-    { mod_fir_band1_gain, osc_fir_band1_gain_dest },
-    { mod_fir_band1_slope, osc_fir_band1_slope_dest },
-    { mod_fir_band2_offset, osc_fir_band2_offset_dest },
-    { mod_fir_band2_spread, osc_fir_band2_spread_dest },
-    { mod_fir_band2_gain, osc_fir_band2_gain_dest },
-    { mod_fir_band2_slope, osc_fir_band2_slope_dest },
-    { mod_fir_band3_offset, osc_fir_band3_offset_dest },
-    { mod_fir_band3_spread, osc_fir_band3_spread_dest },
-    { mod_fir_band3_gain, osc_fir_band3_gain_dest },
-    { mod_fir_band3_slope, osc_fir_band3_slope_dest },
-    { mod_string_damping, osc_string_damping_dest },
-    { mod_string_release_damping, osc_string_release_damping_dest },
-    { mod_string_dispersion, osc_string_dispersion_dest },
-    { mod_string_brightness, osc_string_brightness_dest },
-    { mod_string_hammer, osc_string_hammer_dest },
-    { mod_string_hammer_contact, osc_string_hammer_contact_dest },
-    { mod_string_hammer_gain, osc_string_hammer_gain_dest },
+#define X(name, ...) { mod_##name, osc_##name##_dest },
+    SYNTH_MOD_TARGET_LIST(X)
+#undef X
 };
-static_assert(sizeof(mod_target_nodes) / sizeof(mod_target_nodes[0]) == Synth::num_mod_targets,
-              "mod target table must cover every ModTarget");
 
 // Dest roles of bands 1..3, indexed [band - 1][param] in the uniform
 // offset/spread/gain/slope order.
@@ -611,7 +483,7 @@ struct RunningOscillator {
     float    panning;                // Current panning
     float    pitch;                  // Absolute equivalent MIDI pitch (69 = A4), resolved by update_modulation from
                                      // note + octave offset + pitch offset/skews + the modulated pitch target value
-    float    spread;                 // FIR Pitch Spread in semitones, from the spread target's dest
+    float    spread;                 // FIR spread in semitones, from the spread target's dest
                                      // node; <= 0 means the oscillator's FIR is off
     float    fir_slope;              // FIR window slope percent, from the slope target's dest node
     float    duty[2];                // Duty cycle for sawtooth and pulse oscillator (0..1)
@@ -2292,7 +2164,7 @@ static void update_modulation()
         osc.pitch              = Synth::oscillator_final_pitch(static_cast<int>(osc.note),
                                                                osc.octave_offset,
                                                                parameters[osc_param(osc_idx, osc_pitch_dest)].value);
-        const float new_spread = parameters[osc_param(osc_idx, osc_spread_dest)].value;
+        const float new_spread = parameters[osc_param(osc_idx, osc_fir_spread_dest)].value;
         osc.spread             = new_spread;
         osc.panning            = parameters[osc_param(osc_idx, osc_panning_dest)].value;
 
@@ -2331,17 +2203,17 @@ static void update_modulation()
             osc.decay_factor *= osc.decay_mult;
             osc.volume = dest_value * osc.decay_factor;
         }
-        osc.duty[0]        = parameters[osc_param(osc_idx, osc_duty0_dest)].value;
-        osc.duty[1]        = parameters[osc_param(osc_idx, osc_duty1_dest)].value;
-        osc.pad_tilt[0]    = parameters[osc_param(osc_idx, osc_pad_tilt0_dest)].value;
-        osc.pad_tilt[1]    = parameters[osc_param(osc_idx, osc_pad_tilt1_dest)].value;
+        osc.duty[0]        = parameters[osc_param(osc_idx, osc_duty_a_dest)].value;
+        osc.duty[1]        = parameters[osc_param(osc_idx, osc_duty_b_dest)].value;
+        osc.pad_tilt[0]    = parameters[osc_param(osc_idx, osc_pad_tone_a_dest)].value;
+        osc.pad_tilt[1]    = parameters[osc_param(osc_idx, osc_pad_tone_b_dest)].value;
         osc.string_damping = unit_range_clamp(parameters[osc_param(osc_idx, osc_string_damping_dest)].value);
         osc.string_release_damping =
             unit_range_clamp(parameters[osc_param(osc_idx, osc_string_release_damping_dest)].value);
         osc.string_dispersion = unit_range_clamp(parameters[osc_param(osc_idx, osc_string_dispersion_dest)].value);
         osc.string_brightness = unit_range_clamp(parameters[osc_param(osc_idx, osc_string_brightness_dest)].value);
-        osc.osc_mix           = parameters[osc_param(osc_idx, osc_mix_dest)].value;
-        osc.fm_index          = parameters[osc_param(osc_idx, osc_fm_index_dest)].value;
+        osc.osc_mix           = parameters[osc_param(osc_idx, osc_osc_mix_dest)].value;
+        osc.fm_index          = parameters[osc_param(osc_idx, osc_fm_depth_dest)].value;
         // The ratio clamps like the static row: stored 0 ratios play at the
         // slider floor and hand-written out-of-range values stay in bounds.
         const float ratio_dest = parameters[osc_param(osc_idx, osc_fm_ratio_dest)].value;

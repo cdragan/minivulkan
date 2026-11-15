@@ -3,6 +3,7 @@
 #include "sculptor_bank_json.h"
 
 #include "../synth/synth_effect_expansion.h"
+#include "../synth/synth_param_list.h"
 #include "sculptor_atomic_file.h"
 #include <sys/stat.h>
 #ifdef _WIN32
@@ -357,39 +358,11 @@ static constexpr const char* effect_param_keys[Synth::num_effect_types][Synth::m
 
 constexpr const char* param_kind_names[num_param_kinds] = { "external", "envelope", "lfo", "plain" };
 
-constexpr const char* mod_target_names[Synth::num_mod_targets] = { "volume",
-                                                                   "pitch",
-                                                                   "panning",
-                                                                   "duty_a",
-                                                                   "duty_b",
-                                                                   "osc_mix",
-                                                                   "fm_index",
-                                                                   "fir_pitch_spread",
-                                                                   "fm_ratio",
-                                                                   "pad_tone_a",
-                                                                   "pad_tone_b",
-                                                                   "fir_slope",
-                                                                   "fir_band0_offset",
-                                                                   "fir_band0_gain",
-                                                                   "fir_band1_offset",
-                                                                   "fir_band1_spread",
-                                                                   "fir_band1_gain",
-                                                                   "fir_band1_slope",
-                                                                   "fir_band2_offset",
-                                                                   "fir_band2_spread",
-                                                                   "fir_band2_gain",
-                                                                   "fir_band2_slope",
-                                                                   "fir_band3_offset",
-                                                                   "fir_band3_spread",
-                                                                   "fir_band3_gain",
-                                                                   "fir_band3_slope",
-                                                                   "string_damping",
-                                                                   "string_release_damping",
-                                                                   "string_dispersion",
-                                                                   "string_brightness",
-                                                                   "string_hammer",
-                                                                   "string_hammer_contact",
-                                                                   "string_hammer_gain" };
+constexpr const char* mod_target_names[Synth::num_mod_targets] = {
+#define X(name, ...) #name,
+    SYNTH_MOD_TARGET_LIST(X)
+#undef X
+};
 
 static bool hammer_scalar_target(uint32_t target)
 {
@@ -5263,7 +5236,7 @@ static void doc_unknown_field(Walker& w, uint32_t key_idx)
 }
 
 // Point levels are the envelope's output values in the target's display units;
-// the descriptor stores them scaled to bank units (fm_index: radians).
+// the descriptor stores them scaled to bank units (fm_depth: radians).
 // Sustain defaults to the last point.
 static void decode_envelope_doc(Walker&                    w,
                                 uint32_t                   obj,
@@ -5387,7 +5360,7 @@ static void decode_envelope_doc(Walker&                    w,
 
     // The runtime evaluates min_value + raw_value * min_max_delta, so the delta
     // spans the level range across the 16-bit raw values, and both fields are
-    // stored in bank units (fm_index: radians).
+    // stored in bank units (fm_depth: radians).
     env.min_value     = min_level * view.bank_scale;
     env.min_max_delta = (max_level - min_level) * view.bank_scale / 65535.0f;
     if (! std::isfinite(env.min_value) || ! std::isfinite(env.min_max_delta)) {
@@ -5515,7 +5488,7 @@ static void decode_lfo_doc(Walker&               w,
     lfo.duty      = static_cast<uint8_t>(duty * 255.0f + 0.5f);
     lfo.period_ms = static_cast<uint16_t>(period_ms + 0.5f);
     // The runtime sweeps min_value..min_value+delta with a normalized wave, so
-    // the levels store bank units directly (fm_index: radians).
+    // the levels store bank units directly (fm_depth: radians).
     lfo.min_value     = min_level * view.bank_scale;
     lfo.min_max_delta = (max_level - min_level) * view.bank_scale;
     if (! std::isfinite(lfo.min_value) || ! std::isfinite(lfo.min_max_delta)) {

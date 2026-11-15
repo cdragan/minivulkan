@@ -868,7 +868,7 @@ void build_named_fm_fixture(Synth::InstrumentEditorBank* bank)
     }
     // Bank-side writes seed every layer (fixture uniformity, no bridge).
     for (uint32_t layer = 0; layer < instrument.layer_count; ++layer) {
-        instrument.layers[layer].targets[Synth::mod_fm_index].base_value = 0.625f * 6.2831853f;
+        instrument.layers[layer].targets[Synth::mod_fm_depth].base_value = 0.625f * 6.2831853f;
     }
 
     bank->bank.instruments.entries[0] = instrument;

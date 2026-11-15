@@ -3,6 +3,7 @@
 
 #include "sculptor_osc_graph.h"
 #include "../core/d_printf.h"
+#include "../synth/synth_param_list.h"
 #include "sculptor_bank_json.h"
 #include "sculptor_effect_graph.h"
 #include "sculptor_instr_envelope_edit.h"
@@ -106,50 +107,19 @@ static char                        clipboard_destination_name[Synth::max_name_le
 
 // The projection arithmetic relies on this exact ModTarget ordering.
 static_assert(static_cast<uint32_t>(Synth::mod_panning) == 2);
-static_assert(static_cast<uint32_t>(Synth::mod_duty0) == 3);
-static_assert(static_cast<uint32_t>(Synth::mod_fm_index) == 6);
+static_assert(static_cast<uint32_t>(Synth::mod_duty_a) == 3);
+static_assert(static_cast<uint32_t>(Synth::mod_fm_depth) == 6);
 static_assert(Synth::num_mod_targets == 33);
 static_assert(static_cast<uint32_t>(Synth::mod_fm_ratio) == 8);
-static_assert(static_cast<uint32_t>(Synth::mod_pad_tilt0) == 9);
+static_assert(static_cast<uint32_t>(Synth::mod_pad_tone_a) == 9);
 static_assert(Synth::max_mod_inputs == 2);
 
-// One target row's label and hover text, indexed by ModTarget.  The labels
-// are display-only: serialization keys live in sculptor_bank_json.cpp
-// (mod_target_names), so label text is free to change.
+// Row label and hover text of each target.  They come from SYNTH_MOD_TARGET_LIST.
+// The label is display-only.  The JSON key is the name column of the table.
 const LabelTooltip target_descs[Synth::num_mod_targets] = {
-    { "Volume", "Amplitude of the output oscillator wave" },
-    { "Pitch", "Tuning of the oscillator waves (in semitones, -24..24)" },
-    { "Pan", "Stereo position of the output (0 = left, 0.5 = center, 1 = right)" },
-    { "Duty A", "Shape adjustment of oscillator wave (sawtooth ramp point, pulse width, pad wander)" },
-    { "Duty B", "Shape adjustment of oscillator wave (sawtooth ramp point, pulse width, pad wander)" },
-    { "Waveform Mix", "Balance between primary and secondary oscillator wave (0 = waveform A, 1 = Waveform B)" },
-    { "FM Depth", "Amount of frequency modulation applied by secondary wave to primary wave" },
-    { "Band spread", "Band width around its center (in semitones)" },
-    { "FM Ratio", "Secondary oscillator wave frequency ratio to the note pitch" },
-    { "Pad Tone A", "Pad wave harmonic tilt (-1 flat, +1 mellow)" },
-    { "Pad Tone B", "Pad wave harmonic tilt (-1 flat, +1 mellow)" },
-    { "FIR Slope", "Filter edge sharpness" },
-    { "Offset", "Band center offset from the note pitch, in semitones" },
-    { "Gain", "Band's output amplitude" },
-    { "Offset", "Band center offset from the note pitch, in semitones" },
-    { "Spread", "Band width around its center (in semitones)" },
-    { "Gain", "Band's output amplitude" },
-    { "FIR Slope", "Filter edge sharpness" },
-    { "Offset", "Band center offset from the note pitch, in semitones" },
-    { "Spread", "Band width around its center (in semitones)" },
-    { "Gain", "Band's output amplitude" },
-    { "FIR Slope", "Filter edge sharpness" },
-    { "Offset", "Band center offset from the note pitch, in semitones" },
-    { "Spread", "Band width around its center (in semitones)" },
-    { "Gain", "Band's output amplitude" },
-    { "FIR Slope", "Filter edge sharpness" },
-    { "Sustain Damping", "How fast the string vibration decays and darkens while the key is held" },
-    { "Release Damping", "Extra string damping applied while the key is released" },
-    { "String Dispersion", "Stiff-string inharmonicity: raises the upper partials, strongest on low notes (0 = off)" },
-    { "Pluck Brightness", "Pluck part only.  Scaled by 1 - Hammer." },
-    { "Hammer", "Mix the pluck with the shaped hammer source.  Routing is captured at note-on." },
-    { "Hammer Contact", "Hammer contact window in milliseconds.  Routing is captured at note-on." },
-    { "Hammer Gain", "Hammer source gain.  Routing is captured at note-on.  Velocity has no implicit effect." },
+#define X(name, label, min, max, scale, log, default_value, description) { label, description },
+    SYNTH_MOD_TARGET_LIST(X)
+#undef X
 };
 const char* const wave_names[7]       = { "off", "sine", "sawtooth", "pulse", "noise", "pad", "string" };
 const char* const voice_mode_names[3] = { "multiple", "reuse per-note", "single" };
@@ -184,41 +154,11 @@ const char* const band_header_names[Sculptor::osc_band_max_bands] = { "Band 1", 
 // Per-target presentation views: the single source of truth for value
 // bounds, bank-unit scaling and slider curve.  Oscillator rows and
 // parameter base values show display units; the bank stores scaled
-// units (radians for fm depth).
+// units (radians for fm depth).  The scale column holds the bank scale.
 constexpr Sculptor::OscTargetView osc_target_views[Synth::num_mod_targets] = {
-    { 0.0f, 1.0f, 1.0f, false },                                         // volume
-    { -24.0f, 24.0f, 1.0f, false },                                      // pitch (semitones)
-    { 0.0f, 1.0f, 1.0f, false },                                         // pan (0.5 = center)
-    { 0.0f, 1.0f, 1.0f, false },                                         // duty a
-    { 0.0f, 1.0f, 1.0f, false },                                         // duty b
-    { 0.0f, 1.0f, 1.0f, false },                                         // waveform mix
-    { 0.0f, 1.0f, 6.2831853f, false },                                   // fm depth (1.0 == 2*pi radians)
-    { 0.0f, 36.0f, 1.0f, false },                                        // fir pitch spread (semitones)
-    { Synth::osc_mod_ratio_min, Synth::osc_mod_ratio_max, 1.0f, false }, // fm ratio
-    { -1.0f, 1.0f, 1.0f, false },                                        // pad tone a
-    { -1.0f, 1.0f, 1.0f, false },                                        // pad tone b
-    { 1.0f, 100.0f, 1.0f, false },                                       // fir slope (percent)
-    { -36.0f, 36.0f, 1.0f, false },                                      // band 0 offset (semitones)
-    { 0.01f, 1.0f, 1.0f, false },                                        // band 0 gain
-    { -36.0f, 36.0f, 1.0f, false },                                      // band 1 offset (semitones)
-    { 0.0f, 36.0f, 1.0f, false },                                        // band 1 spread (semitones)
-    { 0.01f, 1.0f, 1.0f, false },                                        // band 1 gain
-    { 1.0f, 100.0f, 1.0f, false },                                       // band 1 slope (percent)
-    { -36.0f, 36.0f, 1.0f, false },                                      // band 2 offset (semitones)
-    { 0.0f, 36.0f, 1.0f, false },                                        // band 2 spread (semitones)
-    { 0.01f, 1.0f, 1.0f, false },                                        // band 2 gain
-    { 1.0f, 100.0f, 1.0f, false },                                       // band 2 slope (percent)
-    { -36.0f, 36.0f, 1.0f, false },                                      // band 3 offset (semitones)
-    { 0.0f, 36.0f, 1.0f, false },                                        // band 3 spread (semitones)
-    { 0.01f, 1.0f, 1.0f, false },                                        // band 3 gain
-    { 1.0f, 100.0f, 1.0f, false },                                       // band 3 slope (percent)
-    { 0.0f, 1.0f, 1.0f, false },                                         // string damping
-    { 0.0f, 1.0f, 1.0f, false },                                         // string release damping
-    { 0.0f, 1.0f, 1.0f, false },                                         // string dispersion
-    { 0.0f, 1.0f, 1.0f, false },                                         // string brightness
-    { 0.0f, 1.0f, 1.0f, false },                                         // string hammer
-    { 0.5f, 10.0f, 1.0f, false },                                        // hammer contact
-    { 0.0f, 4.0f, 1.0f, false },                                         // hammer gain
+#define X(name, label, min, max, scale, log, default_value, description) { min, max, scale, log },
+    SYNTH_MOD_TARGET_LIST(X)
+#undef X
 };
 
 // Low-pass and high-pass cutoff slider.  The editor writes a zero cutoff (edge off)
@@ -267,12 +207,12 @@ bool Sculptor::oscillator_slot_waveform_mode_disabled(const Sculptor::Node& node
     }
     const uint32_t wave_b = node.slots.entries[osc_waveform_b_prop].value.list_index;
     const uint32_t mode   = node.slots.entries[osc_mode_prop].value.list_index;
-    const uint32_t duty0  = osc_target_row_slot[static_cast<uint32_t>(Synth::mod_duty0)];
-    const uint32_t duty1  = osc_target_row_slot[static_cast<uint32_t>(Synth::mod_duty1)];
+    const uint32_t duty0  = osc_target_row_slot[static_cast<uint32_t>(Synth::mod_duty_a)];
+    const uint32_t duty1  = osc_target_row_slot[static_cast<uint32_t>(Synth::mod_duty_b)];
     const uint32_t mix    = osc_target_row_slot[static_cast<uint32_t>(Synth::mod_osc_mix)];
-    const uint32_t fm     = osc_target_row_slot[static_cast<uint32_t>(Synth::mod_fm_index)];
-    const uint32_t tone0  = osc_target_row_slot[static_cast<uint32_t>(Synth::mod_pad_tilt0)];
-    const uint32_t tone1  = osc_target_row_slot[static_cast<uint32_t>(Synth::mod_pad_tilt1)];
+    const uint32_t fm     = osc_target_row_slot[static_cast<uint32_t>(Synth::mod_fm_depth)];
+    const uint32_t tone0  = osc_target_row_slot[static_cast<uint32_t>(Synth::mod_pad_tone_a)];
+    const uint32_t tone1  = osc_target_row_slot[static_cast<uint32_t>(Synth::mod_pad_tone_b)];
     // Waveform a's list starts at sine, so pad sits one below the stored value.
     const uint32_t wave_a = node.slots.entries[osc_waveform_a_prop].value.list_index;
     if (wave_a != static_cast<uint32_t>(Synth::WaveType::string_wave) - 1u &&
@@ -481,10 +421,10 @@ static uint32_t osc_band_model_count(const Synth::Oscillator& osc)
 // Damping.  Other targets pass through.
 static Synth::ModTarget osc_row_target_for_wave(bool string_wave, Synth::ModTarget target)
 {
-    if (string_wave && target == Synth::mod_duty0) {
+    if (string_wave && target == Synth::mod_duty_a) {
         return Synth::mod_string_dispersion;
     }
-    if (string_wave && target == Synth::mod_pad_tilt0) {
+    if (string_wave && target == Synth::mod_pad_tone_a) {
         return Synth::mod_string_damping;
     }
     return target;
@@ -500,7 +440,7 @@ static bool osc_target_owns_row(bool string_wave, uint32_t target)
                              target == Synth::mod_string_release_damping || target == Synth::mod_string_brightness ||
                              target == Synth::mod_string_hammer || target == Synth::mod_string_hammer_contact ||
                              target == Synth::mod_string_hammer_gain;
-    const bool shared      = target == Synth::mod_duty0 || target == Synth::mod_pad_tilt0;
+    const bool shared      = target == Synth::mod_duty_a || target == Synth::mod_pad_tone_a;
     return string_wave ? ! shared : ! string_only;
 }
 
@@ -1030,8 +970,8 @@ static void project_osc_node(Sculptor::Graph*           graph,
     // With the string wave the duty a row projects as String Dispersion (target 28) and
     // the pad tone a row as Sustain Damping (target 26).
     const bool             string_wave     = osc.osc_type[0] == Synth::WaveType::string_wave;
-    const Synth::ModTarget duty_row_target = osc_row_target_for_wave(string_wave, Synth::mod_duty0);
-    const Synth::ModTarget tone_row_target = osc_row_target_for_wave(string_wave, Synth::mod_pad_tilt0);
+    const Synth::ModTarget duty_row_target = osc_row_target_for_wave(string_wave, Synth::mod_duty_a);
+    const Synth::ModTarget tone_row_target = osc_row_target_for_wave(string_wave, Synth::mod_pad_tone_a);
     // One 12-slot modulation block per ModTarget, directly after the
     // target's value row, seeded from the layer's own binding
     // (display-unit fields carry the raw values; only the base rows are
@@ -1096,16 +1036,16 @@ static void project_osc_node(Sculptor::Graph*           graph,
                                  "Secondary oscillator wave shape"));
     graph->add_slot(node,
                     osc_duty_row_slot(target_descs[4].name,
-                                      osc.targets[Synth::mod_duty1].base_value,
-                                      Synth::mod_duty1,
+                                      osc.targets[Synth::mod_duty_b].base_value,
+                                      Synth::mod_duty_b,
                                       osc.osc_type[1]));
-    append_target_block(graph, node, Synth::mod_duty1, osc.targets[Synth::mod_duty1], 2);
+    append_target_block(graph, node, Synth::mod_duty_b, osc.targets[Synth::mod_duty_b], 2);
     graph->add_slot(node,
                     osc_view_connectable_slot(target_descs[10].name,
-                                              osc.targets[Synth::mod_pad_tilt1].base_value,
-                                              Synth::mod_pad_tilt1,
+                                              osc.targets[Synth::mod_pad_tone_b].base_value,
+                                              Synth::mod_pad_tone_b,
                                               true));
-    append_target_block(graph, node, Synth::mod_pad_tilt1, osc.targets[Synth::mod_pad_tilt1], 2);
+    append_target_block(graph, node, Synth::mod_pad_tone_b, osc.targets[Synth::mod_pad_tone_b], 2);
     graph->add_slot(node,
                     with_tooltip(list_slot("Mix Mode", osc_mode_names, 4, static_cast<uint32_t>(osc.osc_mode)),
                                  "How the two oscillator waves are combined"));
@@ -1117,11 +1057,11 @@ static void project_osc_node(Sculptor::Graph*           graph,
     append_target_block(graph, node, Synth::mod_osc_mix, osc.targets[Synth::mod_osc_mix], 2);
     graph->add_slot(node,
                     osc_view_connectable_slot(target_descs[6].name,
-                                              osc.targets[Synth::mod_fm_index].base_value /
-                                                  osc_target_views[Synth::mod_fm_index].bank_scale,
-                                              Synth::mod_fm_index,
+                                              osc.targets[Synth::mod_fm_depth].base_value /
+                                                  osc_target_views[Synth::mod_fm_depth].bank_scale,
+                                              Synth::mod_fm_depth,
                                               true));
-    append_target_block(graph, node, Synth::mod_fm_index, osc.targets[Synth::mod_fm_index], 2);
+    append_target_block(graph, node, Synth::mod_fm_depth, osc.targets[Synth::mod_fm_depth], 2);
     graph->add_slot(node,
                     osc_view_connectable_slot(target_descs[8].name,
                                               osc.targets[Synth::mod_fm_ratio].base_value,

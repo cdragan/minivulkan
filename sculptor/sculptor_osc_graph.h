@@ -174,7 +174,7 @@ constexpr uint32_t osc_target_row_slot[Synth::num_mod_targets] = {
     94,  // duty b
     121, // waveform mix
     134, // fm depth
-    217, // fir pitch spread (band 0 Spread row)
+    217, // fir spread (band 0 Spread row)
     147, // fm ratio
     15,  // pad tone a
     107, // pad tone b
@@ -251,10 +251,11 @@ constexpr uint32_t osc_target_src_op(uint32_t target, uint32_t input)
 static_assert(osc_target_row_slot[Synth::mod_fir_band3_slope] + osc_target_block_stride <= max_node_slots);
 static_assert(osc_target_row_slot[Synth::mod_fir_band3_offset] + osc_target_block_stride <= max_node_slots);
 static_assert(osc_band_header_slot(osc_band_max_bands - 1u) + osc_band_block_stride <= max_node_slots);
-static_assert(osc_target_row_slot[Synth::mod_string_dispersion] == osc_target_row_slot[Synth::mod_duty0]);
-static_assert(osc_target_row_slot[Synth::mod_string_damping] == osc_target_row_slot[Synth::mod_pad_tilt0]);
+static_assert(osc_target_row_slot[Synth::mod_string_dispersion] == osc_target_row_slot[Synth::mod_duty_a]);
+static_assert(osc_target_row_slot[Synth::mod_string_damping] == osc_target_row_slot[Synth::mod_pad_tone_a]);
 static_assert(osc_target_row_slot[Synth::mod_string_release_damping] == osc_string_extras_first_slot);
-static_assert(osc_string_extras_first_slot == osc_target_row_slot[Synth::mod_pad_tilt0] + osc_target_block_stride + 1u);
+static_assert(osc_string_extras_first_slot ==
+              osc_target_row_slot[Synth::mod_pad_tone_a] + osc_target_block_stride + 1u);
 static_assert(osc_brightness_slot ==
               osc_target_row_slot[Synth::mod_string_release_damping] + osc_target_block_stride + 1u);
 static_assert(osc_hammer_slot == osc_target_row_slot[Synth::mod_string_brightness] + osc_target_block_stride + 1u);
@@ -263,9 +264,9 @@ static_assert(osc_target_block_base(Synth::mod_string_hammer) == 55);
 static_assert(osc_hammer_contact_slot == osc_hammer_slot + osc_target_block_stride + 1u);
 static_assert(osc_target_row_slot[Synth::mod_string_hammer_contact] == osc_hammer_contact_slot);
 static_assert(osc_target_row_slot[Synth::mod_string_hammer_gain] == osc_hammer_gain_slot);
-static_assert(osc_string_extras_last_slot + 2u == osc_target_row_slot[Synth::mod_duty1]);
+static_assert(osc_string_extras_last_slot + 2u == osc_target_row_slot[Synth::mod_duty_b]);
 static_assert(osc_band_header_slot(osc_band_max_bands - 1u) + osc_band_block_stride == max_node_slots);
-static_assert(osc_target_row_slot[Synth::mod_pad_tilt1] + osc_target_block_stride <
+static_assert(osc_target_row_slot[Synth::mod_pad_tone_b] + osc_target_block_stride <
               osc_target_row_slot[Synth::mod_osc_mix]);
 static_assert(osc_target_row_slot[Synth::mod_fm_ratio] + osc_target_block_stride <
               osc_target_row_slot[Synth::mod_volume]);

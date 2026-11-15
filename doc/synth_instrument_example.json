@@ -62,7 +62,7 @@
       "panning": {
         "base": 0.5
       },
-      "fm_index": {
+      "fm_depth": {
         "base": 0.75
       }
     },

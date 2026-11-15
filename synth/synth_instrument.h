@@ -6,6 +6,7 @@
 #include "../core/pool.h"
 #include "synth_config.h"
 #include "synth_effects.h"
+#include "synth_param_list.h"
 #include "synth_parameters.h"
 
 #include <stdint.h>
@@ -14,39 +15,9 @@ namespace Synth {
 
 // Per-oscillator modulated quantities; an instrument binds each independently.
 enum ModTarget : uint8_t {
-    mod_volume,
-    mod_pitch,
-    mod_panning,
-    mod_duty0,
-    mod_duty1,
-    mod_osc_mix,
-    mod_fm_index,
-    mod_fir_spread,
-    mod_fm_ratio,
-    mod_pad_tilt0,
-    mod_pad_tilt1,
-    mod_fir_slope,
-    mod_fir_band0_offset,
-    mod_fir_band0_gain,
-    mod_fir_band1_offset,
-    mod_fir_band1_spread,
-    mod_fir_band1_gain,
-    mod_fir_band1_slope,
-    mod_fir_band2_offset,
-    mod_fir_band2_spread,
-    mod_fir_band2_gain,
-    mod_fir_band2_slope,
-    mod_fir_band3_offset,
-    mod_fir_band3_spread,
-    mod_fir_band3_gain,
-    mod_fir_band3_slope,
-    mod_string_damping,
-    mod_string_release_damping,
-    mod_string_dispersion,
-    mod_string_brightness,
-    mod_string_hammer,
-    mod_string_hammer_contact,
-    mod_string_hammer_gain,
+#define X(name, ...) mod_##name,
+    SYNTH_MOD_TARGET_LIST(X)
+#undef X
     num_mod_targets
 };
 

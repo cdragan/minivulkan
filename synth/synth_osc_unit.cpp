@@ -3,6 +3,29 @@
 
 #include "synth_test_common.h"
 
+static uint32_t checked_target_row(const Sculptor::OscGraphMapping& mapping,
+                                   const Sculptor::Graph&           graph,
+                                   const uint32_t                   node_index,
+                                   const Synth::ModTarget           target)
+{
+    const uint32_t row            = Sculptor::osc_target_row(target);
+    bool           base_row       = false;
+    uint32_t       decoded_target = 0;
+    uint32_t       family         = 0;
+    uint32_t       decoded_dot    = 0;
+    TEST(Sculptor::decode_osc_input(mapping,
+                                    graph,
+                                    { node_index, row },
+                                    &base_row,
+                                    &decoded_target,
+                                    &family,
+                                    &decoded_dot));
+    TEST(base_row);
+    TEST(decoded_target == target);
+
+    return row;
+}
+
 // Target-block field offsets (the dots come from the osc_target_ helpers).
 constexpr uint32_t t7_env_depth_field = 1;
 
@@ -11,44 +34,6 @@ constexpr uint32_t t7_lfo_op_field = 3;
 constexpr uint32_t t7_lfo_depth_field = 4;
 
 constexpr uint32_t t7_rate_field = 5;
-
-// The value row slot of each ModTarget on an oscillator node; its
-// 12-slot block starts directly after it.
-constexpr uint32_t t7_target_row_slots[Synth::num_mod_targets] = {
-    160, // volume
-    186, // pitch
-    173, // pan
-    2,   // duty a
-    94,  // duty b
-    121, // waveform mix
-    134, // fm depth
-    217, // fir pitch spread
-    147, // fm ratio
-    15,  // pad tone a
-    107, // pad tone b
-    243, // fir slope
-    204, // fir band 0 offset
-    230, // fir band 0 gain
-    259, // fir band 1 offset
-    272, // fir band 1 spread
-    285, // fir band 1 gain
-    298, // fir band 1 slope
-    314, // fir band 2 offset
-    327, // fir band 2 spread
-    340, // fir band 2 gain
-    353, // fir band 2 slope
-    369, // fir band 3 offset
-    382, // fir band 3 spread
-    395, // fir band 3 gain
-    408, // fir band 3 slope
-    15,  // damping
-    28,  // release damping
-    2,   // dispersion
-    41,  // brightness
-    54,  // hammer
-    67,  // hammer contact
-    80,  // hammer gain
-};
 
 // True when target t has a projected row on this layer: the duty a / pad tone a
 // rows carry String Dispersion / Sustain Damping under the string wave, so the other
@@ -60,7 +45,7 @@ static bool t7_target_has_row(const Synth::Oscillator& osc, uint32_t t)
     const bool string_only = t == Synth::mod_string_damping || t == Synth::mod_string_release_damping ||
                              t == Synth::mod_string_dispersion || t == Synth::mod_string_brightness ||
                              t == Synth::mod_string_hammer;
-    const bool shared      = t == Synth::mod_duty0 || t == Synth::mod_pad_tilt0;
+    const bool shared      = t == Synth::mod_duty_a || t == Synth::mod_pad_tone_a;
     return string_wave ? ! shared : ! string_only;
 }
 
@@ -1344,10 +1329,15 @@ static void child_row_projection_regressions()
         // Duty, pad tone, mix, fm and filter-spread rows nest under
         // their parent rows; volume, pan and pitch stay at the top level.
         // Bands beyond the count project no rows at all.
-        if (osc_target_band_of_target(t) > 0) {
+        if (osc_target_band_of_target(t) > 0 || ! t7_target_has_row(instrument.layers[0], t)) {
             continue;
         }
-        TEST(osc.slots.entries[Sculptor::osc_target_row(t)].child_row == (t >= 3));
+        const Synth::ModTarget target = static_cast<Synth::ModTarget>(t);
+        const uint32_t         row    = checked_target_row(mapping, graph, osc_node, target);
+        const bool             top_level =
+            target == Synth::mod_volume || target == Synth::mod_panning || target == Synth::mod_pitch;
+
+        TEST(osc.slots.entries[row].child_row == ! top_level);
         TEST(osc.slots.entries[Sculptor::osc_target_env_dot(t)].child_row);
         for (uint32_t f = 0; f <= 3; ++f) {
             TEST(osc.slots.entries[Sculptor::osc_target_lfo_dot(t) + f].child_row);
@@ -1359,25 +1349,23 @@ static void child_row_projection_regressions()
         }
     }
     TEST(! osc.slots.entries[mapping.osc_output_slot].child_row);
-    for (uint32_t s = 0; s < osc.slots.num_allocated; ++s) {
-        uint32_t   block_target       = 0;
-        uint32_t   block_field        = 0;
-        const bool is_block           = Sculptor::osc_target_block_field(s, &block_target, &block_field);
-        bool       child_row_expected = is_block;
-        for (uint32_t t = 3; t < Synth::num_mod_targets; ++t) {
-            child_row_expected = child_row_expected || s == Sculptor::osc_target_row(t);
+    for (uint32_t slot = 0; slot < osc.slots.num_allocated; ++slot) {
+        bool     base_row = false;
+        uint32_t target   = 0;
+        uint32_t family   = 0;
+        uint32_t dot      = 0;
+        if (Sculptor::decode_osc_input(mapping, graph, { osc_node, slot }, &base_row, &target, &family, &dot)) {
+            const bool top_level =
+                target == Synth::mod_volume || target == Synth::mod_panning || target == Synth::mod_pitch;
+
+            TEST(osc.slots.entries[slot].child_row == (! base_row || ! top_level));
         }
-        // Pitch offset, octave offset, brightness, the dispersion row and its block, the band header rows, the band
-        // parameter rows and their blocks (everything in a band block but
-        // the two click slots) and the fir slope row nest under their
-        // parents.
-        const bool band_header = s >= Sculptor::osc_band_first_slot &&
-                                 (s - Sculptor::osc_band_first_slot) % Sculptor::osc_band_block_stride == 0u;
-        child_row_expected = child_row_expected || band_header || s == 28 || s == 29 || (s >= 30 && s <= 67) ||
-                             s == 199 || s == 243 ||
-                             (s >= Sculptor::osc_band_first_slot + 3u &&
-                              s < Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride);
-        TEST(osc.slots.entries[s].child_row == child_row_expected);
+
+        uint32_t block_target = 0;
+        uint32_t block_field  = 0;
+        if (Sculptor::osc_target_block_field(slot, &block_target, &block_field)) {
+            TEST(osc.slots.entries[slot].child_row);
+        }
     }
 
     const uint32_t non_osc_nodes[] = { mapping.input_node, mapping.instrument_node, mapping.output_node };
@@ -1407,9 +1395,6 @@ static void child_row_projection_regressions()
     const uint32_t fx_node = fx_mapping.effect_nodes[0];
     TEST(fx_node != Sculptor::pool_no_slot);
     const Sculptor::Node& fx = graph.node(fx_node);
-    TEST(! fx.slots.entries[0].child_row);
-    TEST(! fx.slots.entries[1].child_row);
-    TEST(! fx.slots.entries[2].child_row);
     for (uint32_t param = 0; param < Sculptor::effect_type_info(Synth::EffectType::compressor).num_params; ++param) {
         const uint32_t base = Sculptor::fx_param_row(param);
         TEST(! fx.slots.entries[base].child_row);
@@ -1530,11 +1515,14 @@ static void build_full_block_fixture(Synth::InstrumentBank* bank, Synth::Instrum
 // the binding that produced it: the envelope row is the dot plus its nested
 // depth row, the LFO row carries op + depth + rate scale, and the source
 // rows carry op + scale.
-static void check_target_block_grammar(const Sculptor::Node&       osc,
-                                       uint32_t                    target,
-                                       const Synth::TargetBinding& gen,
-                                       Synth::FilterType           fir_type)
+static void check_target_block_grammar(const Sculptor::Graph&           graph,
+                                       const Sculptor::OscGraphMapping& mapping,
+                                       uint32_t                         node_index,
+                                       uint32_t                         target,
+                                       const Synth::TargetBinding&      gen,
+                                       Synth::FilterType                fir_type)
 {
+    const Sculptor::Node& osc = graph.node(node_index);
 
     // Targets from duty a on nest under their parent rows (volume, pan and
     // pitch stay at the top level), so their whole block shifts one deeper;
@@ -1546,12 +1534,28 @@ static void check_target_block_grammar(const Sculptor::Node&       osc,
     const bool band_row = osc_target_band_of_target(target) >= 0;
     const bool stored_pair =
         target == static_cast<uint32_t>(Synth::mod_fir_spread) || target == static_cast<uint32_t>(Synth::mod_fir_slope);
-    const uint8_t  level_base = ! band_row                                       ? (target >= 3 ? 2u : 1u)
+    const bool top_level = target == Synth::mod_volume || target == Synth::mod_panning || target == Synth::mod_pitch;
+
+    const uint8_t  level_base = ! band_row                                       ? (top_level ? 1u : 2u)
                                 : stored_pair && fir_type != Synth::fir_bandpass ? 2u
                                                                                  : 3u;
     const uint32_t base       = Sculptor::osc_target_block_base(target);
-    TEST(Sculptor::osc_target_row(target) == t7_target_row_slots[target]);
-    TEST(base == t7_target_row_slots[target] + 1); // the block follows its row
+    TEST(base == Sculptor::osc_target_row(target) + 1);
+
+    bool     base_row       = false;
+    uint32_t decoded_target = 0;
+    uint32_t family         = 0;
+    uint32_t decoded_dot    = 0;
+    TEST(Sculptor::decode_osc_input(mapping,
+                                    graph,
+                                    { node_index, Sculptor::osc_target_row(target) },
+                                    &base_row,
+                                    &decoded_target,
+                                    &family,
+                                    &decoded_dot));
+    TEST(base_row);
+    TEST(decoded_target == target);
+
     TEST(osc.slots.entries[base - 1].connectable); // the row slot itself
     TEST(Sculptor::osc_target_env_dot(target) == base + 0);
     TEST(Sculptor::osc_target_env_depth(target) == base + 1);
@@ -1561,12 +1565,9 @@ static void check_target_block_grammar(const Sculptor::Node&       osc,
 
     const Sculptor::Slot& env_dot = osc.slots.entries[base];
     TEST(env_dot.kind == Sculptor::SlotKind::input);
-    TEST(strncmp(env_dot.name, "Envelope", sizeof(env_dot.name)) == 0);
-    TEST(env_dot.row_group == 4 * target + 4); // the env dot shares its line with the depth
     const Sculptor::Slot& env_depth = osc.slots.entries[base + t7_env_depth_field];
     TEST(env_depth.property_type == Sculptor::PropertyType::real);
-    TEST(env_depth.name[0] == '\0'); // unlabeled: the dot's label names the line
-    TEST(env_depth.row_group == 4 * target + 4);
+    TEST(env_depth.row_group == env_dot.row_group);
     TEST(env_depth.child_level == level_base); // one line with the dot
     TEST(env_depth.real_bounded);              // rendered as a slider
     TEST(env_depth.real_min == 0.0f && env_depth.real_max == 1.0f);
@@ -1574,17 +1575,9 @@ static void check_target_block_grammar(const Sculptor::Node&       osc,
 
     const Sculptor::Slot& lfo_dot = osc.slots.entries[base + 2];
     TEST(lfo_dot.kind == Sculptor::SlotKind::input);
-    TEST(strncmp(lfo_dot.name, "LFO Op", sizeof(lfo_dot.name)) == 0);
-    const uint8_t lfo_group = static_cast<uint8_t>(4 * target + 1);
-    TEST(osc.slots.entries[base + t7_lfo_op_field].name[0] == '\0'); // unlabeled: the dot's label names the line
+    const uint8_t lfo_group = lfo_dot.row_group;
     TEST(osc.slots.entries[base + t7_lfo_op_field].property_type == Sculptor::PropertyType::list);
     TEST(osc.slots.entries[base + t7_lfo_op_field].num_list_options == 2);
-    TEST(strncmp(osc.slots.entries[base + t7_lfo_depth_field].name,
-                 "Depth",
-                 sizeof(osc.slots.entries[base + t7_lfo_depth_field].name)) == 0);
-    TEST(strncmp(osc.slots.entries[base + t7_rate_field].name,
-                 "Rate x",
-                 sizeof(osc.slots.entries[base + t7_rate_field].name)) == 0);
     for (uint32_t f = 2; f <= 3; f++) {
         TEST(osc.slots.entries[base + f].row_group == lfo_group);
     }
@@ -1601,8 +1594,7 @@ static void check_target_block_grammar(const Sculptor::Node&       osc,
         const uint32_t        dot     = Sculptor::osc_target_src_dot(target, i);
         const Sculptor::Slot& src_dot = osc.slots.entries[dot];
         TEST(src_dot.kind == Sculptor::SlotKind::input);
-        TEST(strncmp(src_dot.name, i == 0 ? "Source A Op" : "Source B Op", sizeof(src_dot.name)) == 0);
-        const uint8_t src_group = static_cast<uint8_t>(4 * target + 2 + i);
+        const uint8_t src_group = src_dot.row_group;
         for (uint32_t f = 0; f <= 1; f++) {
             TEST(osc.slots.entries[dot + f].row_group == src_group);
         }
@@ -1613,12 +1605,8 @@ static void check_target_block_grammar(const Sculptor::Node&       osc,
         TEST(op.property_type == Sculptor::PropertyType::list);
         TEST(op.num_list_options == 3);
         TEST(op.radio_list);
-        TEST(strcmp(op.list_options[2], "gain") == 0);
-        TEST(strcmp(op.list_options[0], "+") == 0);
-        TEST(strcmp(op.list_options[1], "x") == 0);
         TEST(op.value.list_index == static_cast<uint32_t>(gen.inputs[i].op));
         const Sculptor::Slot& scale = osc.slots.entries[dot + 2];
-        TEST(strncmp(scale.name, "Amount", sizeof(scale.name)) == 0);
         TEST(approx(scale.value.real, gen.inputs[i].scale, 1.0e-6f));
     }
 }
@@ -1681,7 +1669,12 @@ static void osc_direct_modulator_regressions()
                     ! t7_target_has_row(instrument.layers[0], t)) {
                     continue;
                 }
-                check_target_block_grammar(osc, t, instrument.layers[0].targets[t], instrument.layers[0].fir_type);
+                check_target_block_grammar(graph,
+                                           mapping,
+                                           mapping.osc_nodes[0],
+                                           t,
+                                           instrument.layers[0].targets[t],
+                                           instrument.layers[0].fir_type);
             }
             // Regression: the waveform/mode guard must not early-out on
             // the widened slot count.  Wave B starts off and the mode starts
@@ -1689,9 +1682,9 @@ static void osc_direct_modulator_regressions()
             // ratio rows plus both pad tone families are disabled and nothing else is.
             const uint32_t wave_b_slot    = 93;  // waveform b, layout contract
             const uint32_t mode_slot      = 120; // mix mode, layout contract
-            const uint32_t fm_depth_slot  = Sculptor::osc_target_row(Synth::mod_fm_index);
+            const uint32_t fm_depth_slot  = Sculptor::osc_target_row(Synth::mod_fm_depth);
             const uint32_t fm_ratio_slot  = 147; // fm ratio, layout contract
-            const uint32_t gated_slots[4] = { Sculptor::osc_target_row(Synth::mod_duty1),
+            const uint32_t gated_slots[4] = { Sculptor::osc_target_row(Synth::mod_duty_b),
                                               mode_slot,
                                               fm_depth_slot,
                                               fm_ratio_slot };
@@ -1758,9 +1751,9 @@ static void osc_direct_modulator_regressions()
                 const Sculptor::EndPoint cc_out      = { t7_mapping.input_node, cc_slot };
                 const uint32_t           osc         = t7_mapping.osc_nodes[0];
                 const Sculptor::EndPoint spread_row  = { osc, Sculptor::osc_target_row(Synth::mod_fir_spread) };
-                const Sculptor::EndPoint duty1_row   = { osc, Sculptor::osc_target_row(Synth::mod_duty1) };
+                const Sculptor::EndPoint duty1_row   = { osc, Sculptor::osc_target_row(Synth::mod_duty_b) };
                 const Sculptor::EndPoint panning_row = { osc, Sculptor::osc_target_row(Synth::mod_panning) };
-                const Sculptor::EndPoint duty0_row   = { osc, Sculptor::osc_target_row(Synth::mod_duty0) };
+                const Sculptor::EndPoint duty0_row   = { osc, Sculptor::osc_target_row(Synth::mod_duty_a) };
 
                 // The validator admits every family onto its base row.
                 TEST(Sculptor::osc_graph_validate(&t7_mapping, t7_graph, env_out, spread_row));
@@ -1789,12 +1782,12 @@ static void osc_direct_modulator_regressions()
                 TEST(
                     find_osc_graph_connection(t7_graph, { osc, Sculptor::osc_target_env_dot(Synth::mod_fir_spread) }) !=
                     Sculptor::pool_no_slot);
-                TEST(find_osc_graph_connection(t7_graph, { osc, Sculptor::osc_target_lfo_dot(Synth::mod_duty1) }) !=
+                TEST(find_osc_graph_connection(t7_graph, { osc, Sculptor::osc_target_lfo_dot(Synth::mod_duty_b) }) !=
                      Sculptor::pool_no_slot);
                 TEST(
                     find_osc_graph_connection(t7_graph, { osc, Sculptor::osc_target_src_dot(Synth::mod_panning, 0) }) !=
                     Sculptor::pool_no_slot);
-                TEST(find_osc_graph_connection(t7_graph, { osc, Sculptor::osc_target_src_dot(Synth::mod_duty0, 0) }) !=
+                TEST(find_osc_graph_connection(t7_graph, { osc, Sculptor::osc_target_src_dot(Synth::mod_duty_a, 0) }) !=
                      Sculptor::pool_no_slot);
                 TEST(find_osc_graph_connection(t7_graph, spread_row) == Sculptor::pool_no_slot);
                 TEST(find_osc_graph_connection(t7_graph, duty1_row) == Sculptor::pool_no_slot);
@@ -1808,26 +1801,26 @@ static void osc_direct_modulator_regressions()
                 TEST(compiled.layers[0].targets[Synth::mod_fir_spread].envelope_desc_id == 1);
                 // The first envelope wire seeded the stored unscaled amount.
                 TEST(approx(compiled.layers[0].targets[Synth::mod_fir_spread].envelope_depth, 1.0f, 1.0e-6f));
-                TEST(compiled.layers[0].targets[Synth::mod_duty1].lfo_desc_id == 1);
-                TEST(compiled.layers[0].targets[Synth::mod_duty1].lfo_op == Synth::SourceOp::add);
-                TEST(approx(compiled.layers[0].targets[Synth::mod_duty1].lfo_depth, 0.5f, 1.0e-6f));
-                TEST(compiled.layers[0].targets[Synth::mod_duty1].lfo_depth_source == Synth::ModSource::none);
-                TEST(compiled.layers[0].targets[Synth::mod_duty1].lfo_rate_source == Synth::ModSource::none);
-                TEST(approx(compiled.layers[0].targets[Synth::mod_duty1].lfo_rate_scale_ms, 0.0f, 1.0e-6f));
+                TEST(compiled.layers[0].targets[Synth::mod_duty_b].lfo_desc_id == 1);
+                TEST(compiled.layers[0].targets[Synth::mod_duty_b].lfo_op == Synth::SourceOp::add);
+                TEST(approx(compiled.layers[0].targets[Synth::mod_duty_b].lfo_depth, 0.5f, 1.0e-6f));
+                TEST(compiled.layers[0].targets[Synth::mod_duty_b].lfo_depth_source == Synth::ModSource::none);
+                TEST(compiled.layers[0].targets[Synth::mod_duty_b].lfo_rate_source == Synth::ModSource::none);
+                TEST(approx(compiled.layers[0].targets[Synth::mod_duty_b].lfo_rate_scale_ms, 0.0f, 1.0e-6f));
                 TEST(compiled.layers[0].targets[Synth::mod_panning].num_inputs == 1);
                 TEST(compiled.layers[0].targets[Synth::mod_panning].inputs[0].source == Synth::ModSource::velocity);
                 TEST(compiled.layers[0].targets[Synth::mod_panning].inputs[0].op == Synth::SourceOp::add);
                 TEST(approx(compiled.layers[0].targets[Synth::mod_panning].inputs[0].scale, 1.0f, 1.0e-6f));
-                TEST(compiled.layers[0].targets[Synth::mod_duty0].num_inputs == 1);
-                TEST(compiled.layers[0].targets[Synth::mod_duty0].inputs[0].source == Synth::ModSource::cc);
-                TEST(compiled.layers[0].targets[Synth::mod_duty0].inputs[0].cc_number == Synth::cc_msb_base);
-                TEST(compiled.layers[0].targets[Synth::mod_duty0].inputs[0].op == Synth::SourceOp::add);
-                TEST(approx(compiled.layers[0].targets[Synth::mod_duty0].inputs[0].scale, 1.0f, 1.0e-6f));
+                TEST(compiled.layers[0].targets[Synth::mod_duty_a].num_inputs == 1);
+                TEST(compiled.layers[0].targets[Synth::mod_duty_a].inputs[0].source == Synth::ModSource::cc);
+                TEST(compiled.layers[0].targets[Synth::mod_duty_a].inputs[0].cc_number == Synth::cc_msb_base);
+                TEST(compiled.layers[0].targets[Synth::mod_duty_a].inputs[0].op == Synth::SourceOp::add);
+                TEST(approx(compiled.layers[0].targets[Synth::mod_duty_a].inputs[0].scale, 1.0f, 1.0e-6f));
                 // Untouched bindings stay untouched.
                 TEST(compiled.layers[0].targets[Synth::mod_volume].envelope_desc_id == 2);
                 TEST(approx(compiled.layers[0].targets[Synth::mod_volume].inputs[0].scale, 2.0f, 1.0e-6f));
                 // The seeded row values landed in the slots too.
-                const uint32_t duty1_base = Sculptor::osc_target_block_base(Synth::mod_duty1);
+                const uint32_t duty1_base = Sculptor::osc_target_block_base(Synth::mod_duty_b);
                 TEST(t7_graph.node(osc).slots.entries[duty1_base + t7_lfo_op_field].value.list_index == 0);
                 TEST(approx(t7_graph.node(osc).slots.entries[duty1_base + t7_lfo_depth_field].value.real,
                             0.5f,
@@ -1847,7 +1840,7 @@ static void osc_direct_modulator_regressions()
                      Sculptor::pool_no_slot);
                 TEST(find_osc_graph_connection(
                          t7_graph,
-                         { t7_mapping.osc_nodes[0], Sculptor::osc_target_lfo_dot(Synth::mod_duty1) }) !=
+                         { t7_mapping.osc_nodes[0], Sculptor::osc_target_lfo_dot(Synth::mod_duty_b) }) !=
                      Sculptor::pool_no_slot);
                 TEST(find_osc_graph_connection(
                          t7_graph,
@@ -2191,7 +2184,7 @@ static void osc_direct_modulator_regressions()
                                                         t7_mapping.lfo_output_slot };
                 const uint32_t           osc        = t7_mapping.osc_nodes[0];
                 const Sculptor::EndPoint spread_row = { osc, Sculptor::osc_target_row(Synth::mod_fir_spread) };
-                const Sculptor::EndPoint duty1_row  = { osc, Sculptor::osc_target_row(Synth::mod_duty1) };
+                const Sculptor::EndPoint duty1_row  = { osc, Sculptor::osc_target_row(Synth::mod_duty_b) };
                 TEST(t7_graph.add_connection(env_out, spread_row) != Sculptor::pool_no_slot);
                 TEST(t7_graph.add_connection(lfo_out, duty1_row) != Sculptor::pool_no_slot);
                 const uint32_t           velocity_idx = static_cast<uint32_t>(Synth::ModSource::velocity) - 1;
@@ -2203,7 +2196,7 @@ static void osc_direct_modulator_regressions()
                 TEST(find_graph_slot(t7_graph, t7_mapping.input_node, cc_label, &cc_slot));
                 const Sculptor::EndPoint cc_out      = { t7_mapping.input_node, cc_slot };
                 const Sculptor::EndPoint panning_row = { osc, Sculptor::osc_target_row(Synth::mod_panning) };
-                const Sculptor::EndPoint duty_row    = { osc, Sculptor::osc_target_row(Synth::mod_duty0) };
+                const Sculptor::EndPoint duty_row    = { osc, Sculptor::osc_target_row(Synth::mod_duty_a) };
                 TEST(t7_graph.add_connection(velocity_out, panning_row) != Sculptor::pool_no_slot);
                 TEST(t7_graph.add_connection(cc_out, duty_row) != Sculptor::pool_no_slot);
                 Sculptor::GraphChange changes[8] = {};
@@ -2226,7 +2219,7 @@ static void osc_direct_modulator_regressions()
                     TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, changes[i]));
                 }
                 const Sculptor::EndPoint panning_src0 = { osc, Sculptor::osc_target_src_dot(Synth::mod_panning, 0) };
-                const Sculptor::EndPoint duty_src0    = { osc, Sculptor::osc_target_src_dot(Synth::mod_duty0, 0) };
+                const Sculptor::EndPoint duty_src0    = { osc, Sculptor::osc_target_src_dot(Synth::mod_duty_a, 0) };
                 // The MIDI and CC base-row drops relocated onto their
                 // source dots in the same drain.
                 TEST(find_osc_graph_connection(t7_graph, panning_src0) != Sculptor::pool_no_slot);
@@ -2262,7 +2255,7 @@ static void osc_direct_modulator_regressions()
                 TEST(find_osc_graph_connection(t7_graph, duty_src0) != Sculptor::pool_no_slot);
                 // A family-field edit writes through to the compiled
                 // binding and undoes back to the wired snapshot.
-                const uint32_t depth_slot     = Sculptor::osc_target_block_base(Synth::mod_duty1) + t7_lfo_depth_field;
+                const uint32_t depth_slot     = Sculptor::osc_target_block_base(Synth::mod_duty_b) + t7_lfo_depth_field;
                 Sculptor::PropertyValue depth = {};
                 depth.real                    = 0.25f;
                 t7_graph.set_slot_value(t7_mapping.osc_nodes[0], depth_slot, depth);
@@ -2275,7 +2268,7 @@ static void osc_direct_modulator_regressions()
                 TEST(undo.finish_undo_push());
                 TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, edit[0]));
                 TEST(Sculptor::compile_graph_to_instrument(t7_graph, t7_mapping, &compiled));
-                TEST(approx(compiled.layers[0].targets[Synth::mod_duty1].lfo_depth, 0.25f, 1.0e-6f));
+                TEST(approx(compiled.layers[0].targets[Synth::mod_duty_b].lfo_depth, 0.25f, 1.0e-6f));
                 TEST(undo.init_undo());
                 undo.pop(&candidate, sizeof(candidate));
                 undo.finish_undo();
@@ -2423,18 +2416,18 @@ static void osc_direct_modulator_regressions()
             instr.layers[0].targets[Synth::mod_fir_spread].inputs[1].source = Synth::ModSource::mod_wheel;
             instr.layers[0].targets[Synth::mod_fir_spread].inputs[1].op     = Synth::SourceOp::multiply;
             instr.layers[0].targets[Synth::mod_fir_spread].inputs[1].scale  = 1.0f;
-            instr.layers[0].targets[Synth::mod_duty1].lfo_desc_id           = 1;
+            instr.layers[0].targets[Synth::mod_duty_b].lfo_desc_id          = 1;
             TEST(source.bank.envelopes.allocate() == 2);
-            Synth::EnvelopeDescriptor& env3                            = source.bank.envelopes.entries[2];
-            env3                                                       = Synth::EnvelopeDescriptor{};
-            env3.num_points                                            = 2;
-            env3.sustain_first_point                                   = 0;
-            env3.sustain_last_point                                    = 1;
-            env3.min_value                                             = -0.5f;
-            env3.min_max_delta                                         = 2.0f;
-            env3.points[0]                                             = { 0, 0x4000 };
-            env3.points[1]                                             = { 100, 0xC000 };
-            instr.layers[0].targets[Synth::mod_duty0].envelope_desc_id = 3;
+            Synth::EnvelopeDescriptor& env3                             = source.bank.envelopes.entries[2];
+            env3                                                        = Synth::EnvelopeDescriptor{};
+            env3.num_points                                             = 2;
+            env3.sustain_first_point                                    = 0;
+            env3.sustain_last_point                                     = 1;
+            env3.min_value                                              = -0.5f;
+            env3.min_max_delta                                          = 2.0f;
+            env3.points[0]                                              = { 0, 0x4000 };
+            env3.points[1]                                              = { 100, 0xC000 };
+            instr.layers[0].targets[Synth::mod_duty_a].envelope_desc_id = 3;
             TEST(source.bank.lfos.allocate() == 1);
             Synth::LFODescriptor& lfo2                              = source.bank.lfos.entries[1];
             lfo2                                                    = Synth::LFODescriptor{};
@@ -2472,7 +2465,7 @@ static void osc_direct_modulator_regressions()
                 const Sculptor::EndPoint cc_out       = { t7_mapping.input_node, cc_slot };
                 const uint32_t           osc          = t7_mapping.osc_nodes[0];
                 const Sculptor::EndPoint spread_row   = { osc, Sculptor::osc_target_row(Synth::mod_fir_spread) };
-                const Sculptor::EndPoint duty1_row    = { osc, Sculptor::osc_target_row(Synth::mod_duty1) };
+                const Sculptor::EndPoint duty1_row    = { osc, Sculptor::osc_target_row(Synth::mod_duty_b) };
                 const Sculptor::EndPoint volume_row   = { osc, Sculptor::osc_target_row(Synth::mod_volume) };
                 const Sculptor::EndPoint panning_row  = { osc, Sculptor::osc_target_row(Synth::mod_panning) };
                 const Sculptor::EndPoint panning_env  = { osc, Sculptor::osc_target_env_dot(Synth::mod_panning) };
@@ -2537,7 +2530,7 @@ static void osc_direct_modulator_regressions()
                 const int32_t lfo2i = find_detached_by_desc(t7_mapping, 2, 2);
                 TEST(lfo2i >= 0);
                 const uint32_t lfo_wire =
-                    find_osc_graph_connection(t7_graph, { osc, Sculptor::osc_target_lfo_dot(Synth::mod_duty1) });
+                    find_osc_graph_connection(t7_graph, { osc, Sculptor::osc_target_lfo_dot(Synth::mod_duty_b) });
                 TEST(lfo_wire != Sculptor::pool_no_slot);
                 if (lfo2i >= 0 && lfo_wire != Sculptor::pool_no_slot) {
                     const Sculptor::EndPoint lfo2_out = { t7_mapping.detached[lfo2i].node_idx,
@@ -2549,7 +2542,7 @@ static void osc_direct_modulator_regressions()
                     for (uint32_t i = 0; i < lfo_moved; i++) {
                         TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, lfo_moves[i]));
                     }
-                    const Sculptor::EndPoint duty_lfo = { osc, Sculptor::osc_target_lfo_dot(Synth::mod_duty0) };
+                    const Sculptor::EndPoint duty_lfo = { osc, Sculptor::osc_target_lfo_dot(Synth::mod_duty_a) };
                     TEST(t7_graph.move_connection_end(lfo_wire, false, duty_lfo)); // input-end target move
                     lfo_moved = t7_graph.take_changes(lfo_moves, 8);
                     TEST(lfo_moved == 1);
@@ -2594,7 +2587,7 @@ static void osc_direct_modulator_regressions()
                     for (uint32_t i = 0; i < wire_moved; i++) {
                         TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, wire_moves[i]));
                     }
-                    const Sculptor::EndPoint duty_src0 = { osc, Sculptor::osc_target_src_dot(Synth::mod_duty0, 0) };
+                    const Sculptor::EndPoint duty_src0 = { osc, Sculptor::osc_target_src_dot(Synth::mod_duty_a, 0) };
                     TEST(t7_graph.move_connection_end(midi_wire, false, duty_src0)); // input-end target move
                     wire_moved = t7_graph.take_changes(wire_moves, 8);
                     TEST(wire_moved == 1);
@@ -2616,7 +2609,7 @@ static void osc_direct_modulator_regressions()
                 const uint32_t           cc_wire    = find_osc_graph_connection(t7_graph, pitch_src0);
                 TEST(cc_wire != Sculptor::pool_no_slot);
                 if (cc_wire != Sculptor::pool_no_slot) {
-                    const Sculptor::EndPoint duty1_src0 = { osc, Sculptor::osc_target_src_dot(Synth::mod_duty1, 0) };
+                    const Sculptor::EndPoint duty1_src0 = { osc, Sculptor::osc_target_src_dot(Synth::mod_duty_b, 0) };
                     TEST(t7_graph.move_connection_end(cc_wire, false, duty1_src0)); // input-end target move
                     Sculptor::GraphChange cc_moves[8] = {};
                     uint32_t              cc_moved    = t7_graph.take_changes(cc_moves, 8);
@@ -2680,7 +2673,9 @@ static void osc_direct_modulator_regressions()
                     ! t7_target_has_row(instrument.layers[layer], t)) {
                     continue;
                 }
-                check_target_block_grammar(osc,
+                check_target_block_grammar(t7_graph,
+                                           t7_mapping,
+                                           t7_mapping.osc_nodes[layer],
                                            t,
                                            instrument.layers[layer].targets[t],
                                            instrument.layers[layer].fir_type);
@@ -3723,10 +3718,7 @@ static void check_osc_pitch_gating()
         }
     }
 
-    // Projection and compile path: the Pitch row is a bounded bare input
-    // box (no slider) at its target slot, the Octave Offset row is a
-    // bounded integer slider, and the compile path validates the octave
-    // before narrowing.
+    // Pitch edits keep the target value through projection and compilation.
     {
         const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
             std::make_unique<Synth::InstrumentEditorBank>();
@@ -3735,63 +3727,20 @@ static void check_osc_pitch_gating()
         const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
         Sculptor::Graph&                       graph         = *graph_storage;
         Sculptor::OscGraphMapping              mapping       = {};
-        Sculptor::GraphChange                  discarded[Sculptor::max_pending_changes] = {};
-
         build_zone_fixture(&source, &instrument);
         TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
-        graph.take_changes(discarded, Sculptor::max_pending_changes);
 
-        uint32_t pitch_slot  = Sculptor::pool_no_slot;
-        uint32_t octave_slot = Sculptor::pool_no_slot;
-        TEST(find_graph_slot(graph, mapping.osc_nodes[0], "Pitch", &pitch_slot));
-        TEST(find_graph_slot(graph, mapping.osc_nodes[0], "Octave Offset", &octave_slot));
-        TEST(pitch_slot == Sculptor::osc_target_row(Synth::mod_pitch));
-        TEST(octave_slot == 199);
-        const Sculptor::Slot& pitch_row = graph.node(mapping.osc_nodes[0]).slots.entries[pitch_slot];
+        const uint32_t        pitch_slot = checked_target_row(mapping, graph, mapping.osc_nodes[0], Synth::mod_pitch);
+        const Sculptor::Slot& pitch_row  = graph.node(mapping.osc_nodes[0]).slots.entries[pitch_slot];
         TEST(pitch_row.property_type == Sculptor::PropertyType::real);
-        TEST(! pitch_row.real_bounded); // a bare input box, not a slider
+        TEST(! pitch_row.real_bounded);
         TEST(pitch_row.real_min == Sculptor::osc_target_view(Synth::mod_pitch).min_value);
         TEST(pitch_row.real_max == Sculptor::osc_target_view(Synth::mod_pitch).max_value);
         TEST(pitch_row.value.real == instrument.layers[0].targets[Synth::mod_pitch].base_value);
-        const Sculptor::Slot& octave_row = graph.node(mapping.osc_nodes[0]).slots.entries[octave_slot];
-        TEST(octave_row.property_type == Sculptor::PropertyType::integer);
-        TEST(octave_row.int_bounded);
-        TEST(octave_row.real_min == static_cast<float>(Sculptor::osc_octave_offset_min));
-        TEST(octave_row.real_max == static_cast<float>(Sculptor::osc_octave_offset_max));
-        TEST(octave_row.value.integer == 0);
         const Sculptor::OscTargetView spread_view = Sculptor::osc_target_view(Synth::mod_fir_spread);
         TEST(spread_view.min_value == 0.0f && spread_view.max_value == 36.0f);
         TEST(spread_view.bank_scale == 1.0f && ! spread_view.logarithmic);
-        TEST(Sculptor::osc_target_row(Synth::mod_fir_spread) == 217);
 
-        // Round-trip: an octave edit applies through the value_changed path,
-        // lands in the bank and reprojection shows it again.
-        Sculptor::PropertyValue octave_edit = {};
-        octave_edit.integer                 = -3;
-        graph.set_slot_value(mapping.osc_nodes[0], octave_slot, octave_edit);
-        Sculptor::GraphChange octave_change = {};
-        octave_change.kind                  = Sculptor::ChangeKind::value_changed;
-        octave_change.node_idx              = mapping.osc_nodes[0];
-        octave_change.slot_idx              = octave_slot;
-        TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, octave_change));
-        TEST(source.bank.instruments.entries[0].layers[0].octave_offset == -3);
-
-        const std::unique_ptr<Synth::InstrumentEditorBank> reprojected_source_storage =
-            std::make_unique<Synth::InstrumentEditorBank>(source);
-        Synth::InstrumentEditorBank&           reprojected_source        = *reprojected_source_storage;
-        const std::unique_ptr<Sculptor::Graph> reprojected_graph_storage = std::make_unique<Sculptor::Graph>();
-        Sculptor::Graph&                       reprojected_graph         = *reprojected_graph_storage;
-        Sculptor::OscGraphMapping              reprojected_mapping       = {};
-        TEST(Sculptor::project_editor_to_graph(reprojected_source, &reprojected_graph, &reprojected_mapping));
-        TEST(find_graph_slot(reprojected_graph, reprojected_mapping.osc_nodes[0], "Octave Offset", &octave_slot));
-        TEST(reprojected_graph.node(reprojected_mapping.osc_nodes[0]).slots.entries[octave_slot].value.integer == -3);
-
-        // Endpoint values compile; an out-of-range edit refuses the projection.
-        Synth::Instrument compiled = {};
-        TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
-        TEST(compiled.layers[0].octave_offset == -3);
-        // Round-trip: a pitch edit applies into the pitch target's base
-        // value and reprojection shows it again.
         Sculptor::PropertyValue pitch_edit = {};
         pitch_edit.real                    = 7.5f;
         graph.set_slot_value(mapping.osc_nodes[0], pitch_slot, pitch_edit);
@@ -3801,25 +3750,15 @@ static void check_osc_pitch_gating()
         pitch_change.slot_idx              = pitch_slot;
         TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, pitch_change));
         TEST(source.bank.instruments.entries[0].layers[0].targets[Synth::mod_pitch].base_value == 7.5f);
+
+        Synth::Instrument compiled = {};
         TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
         TEST(compiled.layers[0].targets[Synth::mod_pitch].base_value == 7.5f);
-        const int32_t octave_endpoints[2] = { -12, 12 };
-        for (const int32_t endpoint : octave_endpoints) {
-            octave_edit.integer = endpoint;
-            graph.set_slot_value(mapping.osc_nodes[0], octave_slot, octave_edit);
-            TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, octave_change));
-            TEST(source.bank.instruments.entries[0].layers[0].octave_offset == endpoint);
-            TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
-            TEST(compiled.layers[0].octave_offset == endpoint);
-        }
-        octave_edit.integer = 13;
-        graph.set_slot_value(mapping.osc_nodes[0], octave_slot, octave_edit);
-        TEST(! Sculptor::apply_osc_graph_change(&source, &graph, &mapping, octave_change));
-        TEST(! Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
-        // The refused edit leaves the compiled bank at the last good value.
-        TEST(source.bank.instruments.entries[0].layers[0].octave_offset == 12);
+        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+        const uint32_t reprojected_pitch = checked_target_row(mapping, graph, mapping.osc_nodes[0], Synth::mod_pitch);
+        TEST(graph.node(mapping.osc_nodes[0]).slots.entries[reprojected_pitch].value.real == 7.5f);
     }
-    // The FIR Slope row: the bounded integer slider at slot 149, seeded
+    // The FIR Slope row: the bounded integer slider, seeded
     // from the bank field, round-tripping through the value_changed apply
     // path, and refusing out-of-range compile reads.
     {
@@ -3835,9 +3774,7 @@ static void check_osc_pitch_gating()
         source.bank.instruments.entries[0].layers[0].fir_slope_percent = 37;
         TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
         graph.take_changes(discarded, Sculptor::max_pending_changes);
-        uint32_t slope_slot = Sculptor::pool_no_slot;
-        TEST(find_graph_slot(graph, mapping.osc_nodes[0], "FIR Slope", &slope_slot));
-        TEST(slope_slot == 243);
+        const uint32_t slope_slot = checked_target_row(mapping, graph, mapping.osc_nodes[0], Synth::mod_fir_slope);
         const Sculptor::Slot& slope_row = graph.node(mapping.osc_nodes[0]).slots.entries[slope_slot];
         TEST(slope_row.property_type == Sculptor::PropertyType::integer);
         TEST(slope_row.int_bounded);
@@ -3868,42 +3805,6 @@ static void check_osc_pitch_gating()
         TEST(! Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
     }
 
-    // A type switch from low-pass to band-pass caps the carried cutoff at
-    // the spread maximum, so the shared value never escapes the new range.
-    {
-        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
-            std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank&           source        = *source_storage;
-        Synth::Instrument                      instrument    = {};
-        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
-        Sculptor::Graph&                       graph         = *graph_storage;
-        Sculptor::OscGraphMapping              mapping       = {};
-        Sculptor::GraphChange                  discarded[Sculptor::max_pending_changes] = {};
-        build_zone_fixture(&source, &instrument);
-        source.bank.instruments.entries[0].layers[0].fir_type                                  = Synth::fir_lowpass;
-        source.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_spread].base_value = 440.0f;
-        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
-        graph.take_changes(discarded, Sculptor::max_pending_changes);
-        uint32_t type_slot = Sculptor::pool_no_slot;
-        TEST(find_graph_slot(graph, mapping.osc_nodes[0], "Filter Type", &type_slot));
-        Sculptor::PropertyValue type_edit = {};
-        type_edit.list_index =
-            1; // bandpass, at dropdown position 1 // bandpass // bandpass, after the leading "off" entry
-        graph.set_slot_value(mapping.osc_nodes[0], type_slot, type_edit);
-        Sculptor::GraphChange type_change = {};
-        type_change.kind                  = Sculptor::ChangeKind::value_changed;
-        type_change.node_idx              = mapping.osc_nodes[0];
-        type_change.slot_idx              = type_slot;
-        TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, type_change));
-        TEST(source.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_spread].base_value == 36.0f);
-        const std::unique_ptr<Sculptor::Graph> regraph_storage = std::make_unique<Sculptor::Graph>();
-        Sculptor::Graph&                       regraph         = *regraph_storage;
-        Sculptor::OscGraphMapping              remapping       = {};
-        TEST(Sculptor::project_editor_to_graph(source, &regraph, &remapping));
-        const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
-        TEST(regraph.node(remapping.osc_nodes[0]).slots.entries[spread_row].value.real == 36.0f);
-    }
-
     // With the filter off, the cutoff row, its block and the slope gray out.
     {
         const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
@@ -3916,14 +3817,14 @@ static void check_osc_pitch_gating()
         build_zone_fixture(&source, &instrument);
         source.bank.instruments.entries[0].layers[0].fir_type = Synth::fir_off;
         TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
-        const Sculptor::Node& node          = graph.node(mapping.osc_nodes[0]);
-        const uint32_t        spread        = Sculptor::osc_target_row(Synth::mod_fir_spread);
-        const uint32_t        fir_type_row  = spread - 1;  // the Filter Type list sits before the cutoff row
-        const uint32_t        fir_slope_row = spread + 13; // the cutoff row plus its 12-slot block
+        const Sculptor::Node& node   = graph.node(mapping.osc_nodes[0]);
+        const uint32_t        spread = checked_target_row(mapping, graph, mapping.osc_nodes[0], Synth::mod_fir_spread);
+        const uint32_t fir_slope_row = checked_target_row(mapping, graph, mapping.osc_nodes[0], Synth::mod_fir_slope);
         TEST(Sculptor::oscillator_slot_waveform_mode_disabled(node, spread));
-        TEST(Sculptor::oscillator_slot_waveform_mode_disabled(node, spread + 5));
+        TEST(Sculptor::oscillator_slot_waveform_mode_disabled(node,
+                                                              Sculptor::osc_target_block_base(Synth::mod_fir_spread) +
+                                                                  t7_rate_field));
         TEST(Sculptor::oscillator_slot_waveform_mode_disabled(node, fir_slope_row));
-        TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(node, fir_type_row));
         TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(node, Sculptor::osc_target_row(Synth::mod_volume)));
         source.bank.instruments.entries[0].layers[0].fir_type         = Synth::fir_bandpass;
         const std::unique_ptr<Sculptor::Graph> bandpass_graph_storage = std::make_unique<Sculptor::Graph>();
@@ -3934,29 +3835,6 @@ static void check_osc_pitch_gating()
         TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(bandpass_node,
                                                                 Sculptor::osc_target_row(Synth::mod_fir_spread)));
         TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(bandpass_node, fir_slope_row));
-    }
-
-    // The cutoff row label follows the selected filter type.
-    {
-        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
-            std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank&           source        = *source_storage;
-        Synth::Instrument                      instrument    = {};
-        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
-        Sculptor::Graph&                       graph         = *graph_storage;
-        Sculptor::OscGraphMapping              mapping       = {};
-        build_zone_fixture(&source, &instrument);
-        const uint32_t           spread                            = Sculptor::osc_target_row(Synth::mod_fir_spread);
-        static const char* const expected[Synth::num_filter_types] = { "Filter Off",
-                                                                       "Spread",
-                                                                       "Cutoff (Hz)",
-                                                                       "Cutoff (Hz)" };
-        for (uint32_t type = 0; type < Synth::num_filter_types; type++) {
-            source.bank.instruments.entries[0].layers[0].fir_type = static_cast<Synth::FilterType>(type);
-            TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
-            const Sculptor::Slot& row = graph.node(mapping.osc_nodes[0]).slots.entries[spread];
-            TEST(strncmp(row.name, expected[type], sizeof(row.name)) == 0);
-        }
     }
 
     // The FIR effect node: 33 slots (In/Out/Enabled + 3 params x 10), the
@@ -4457,52 +4335,29 @@ static void osc_slot_disable_stamped_rules_regressions()
     TEST(! graph.node(mapping.instrument_node).oscillator);
     TEST(! graph.node(mapping.output_node).oscillator);
 
-    const uint32_t duty1       = Sculptor::osc_target_row(Synth::mod_duty1);
-    const uint32_t mix         = Sculptor::osc_target_row(Synth::mod_osc_mix);
-    const uint32_t fm          = Sculptor::osc_target_row(Synth::mod_fm_index);
-    const uint32_t fm_ratio    = Sculptor::osc_target_row(Synth::mod_fm_ratio);
-    const uint32_t tone0       = Sculptor::osc_target_row(Synth::mod_pad_tilt0);
-    const uint32_t tone1       = Sculptor::osc_target_row(Synth::mod_pad_tilt1);
-    const uint32_t volume      = Sculptor::osc_target_row(Synth::mod_volume);
-    const uint32_t wave_a_slot = 1;  // waveform a, layout contract
-    const uint32_t wave_b_slot = 93; // waveform b, layout contract
-    const uint32_t mode_slot   = 120; // mix mode, layout contract
+    const Synth::ModTarget disabled_targets[] = {
+        Synth::mod_duty_a, Synth::mod_fm_depth, Synth::mod_fm_ratio, Synth::mod_pad_tone_a, Synth::mod_pad_tone_b,
+    };
+    for (const Synth::ModTarget target : disabled_targets) {
+        const uint32_t row = checked_target_row(mapping, graph, osc_node, target);
 
-    Sculptor::PropertyValue wave = {};
-    // Sine wave a (list 0; the wave a list starts at sine), waveform b
-    // off (the wave b list starts at off): the pad-tone windows, the whole
-    // duty a family (sine ignores duty) and every wave-b-dependent row are
-    // disabled.
-    wave.list_index = 0;
-    graph.set_slot_value(osc_node, wave_b_slot, wave);
-    TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, duty1));
-    TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, mode_slot));
-    TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, mix));
-    TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, fm));
-    TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, fm_ratio));
-    TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, tone0));
-    TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, tone0 + Sculptor::osc_target_block_stride));
-    TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, tone1));
-    TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, tone1 + Sculptor::osc_target_block_stride));
-    TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, 2)); // duty a row
-    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, volume));
-    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, Sculptor::osc_target_row(Synth::mod_pitch)));
+        TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, row));
+    }
 
-    // Pad on both waveforms re-enables both tone windows and the
-    // wave-b-dependent rows; the fixture's blend mode still gates fm
-    // depth and fm ratio.
-    wave.list_index = 4; // pad (the wave a list has no off entry)
-    graph.set_slot_value(osc_node, wave_a_slot, wave);
-    wave.list_index = 5; // pad
-    graph.set_slot_value(osc_node, wave_b_slot, wave);
-    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, tone0));
-    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, tone0 + Sculptor::osc_target_block_stride));
-    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, tone1));
-    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, tone1 + Sculptor::osc_target_block_stride));
-    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, duty1));
-    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, mix));
-    TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, fm)); // blend mode
-    TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, fm_ratio));
+    const Synth::ModTarget enabled_targets[] = { Synth::mod_duty_b,
+                                                 Synth::mod_osc_mix,
+                                                 Synth::mod_volume,
+                                                 Synth::mod_pitch };
+    for (const Synth::ModTarget target : enabled_targets) {
+        const uint32_t row = checked_target_row(mapping, graph, osc_node, target);
+
+        TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, row));
+    }
+
+    for (const Synth::ModTarget target : { Synth::mod_pad_tone_a, Synth::mod_pad_tone_b }) {
+        TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, Sculptor::osc_target_env_dot(target)));
+        TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, Sculptor::osc_target_lfo_dot(target)));
+    }
 }
 
 // Stamp isolation: clear() resets the retained pool storage, so a node

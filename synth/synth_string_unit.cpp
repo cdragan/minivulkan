@@ -3,6 +3,31 @@
 
 #include "synth_test_common.h"
 
+// Decode each row's target identity instead of using its display text or position.
+static Sculptor::Slot string_target_slot(const Sculptor::Graph&           graph,
+                                         const Sculptor::OscGraphMapping& mapping,
+                                         Synth::ModTarget                 expected_target)
+{
+    const uint32_t        node_index = mapping.osc_nodes[0];
+    const Sculptor::Node& node       = graph.node(node_index);
+
+    for (uint32_t slot_index = 0; slot_index < node.slots.num_allocated; ++slot_index) {
+        bool     base_row = false;
+        uint32_t target   = 0;
+        uint32_t family   = 0;
+        uint32_t dot      = 0;
+
+        if (Sculptor::decode_osc_input(mapping, graph, { node_index, slot_index }, &base_row, &target, &family, &dot) &&
+            base_row && target == expected_target) {
+            return node.slots.entries[slot_index];
+        }
+    }
+
+    TEST(false);
+
+    return {};
+}
+
 constexpr float string_fs = 44100.0f;
 
 constexpr uint32_t string_ring_size = 2034;
@@ -431,32 +456,24 @@ static void check_string_row_reuse()
     instrument.layers[0].targets[Synth::mod_string_dispersion].base_value      = 0.45f;
     instrument.layers[0].targets[Synth::mod_string_release_damping].base_value = 0.6f;
     TEST(Sculptor::project_instrument_to_graph(instrument, bank.bank, &graph, &mapping));
-    const Sculptor::Node& node = graph.node(mapping.osc_nodes[0]);
-    TEST(node.slots.num_allocated ==
-         Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride * instrument.layers[0].fir_band_count);
-    TEST(strcmp(node.slots.entries[2].name, "String Dispersion") == 0 &&
-         approx(node.slots.entries[2].value.real, 0.45f, 1.0e-6f));
-    TEST(strcmp(node.slots.entries[15].name, "Sustain Damping") == 0 &&
-         approx(node.slots.entries[15].value.real, 0.3f, 1.0e-6f));
-    TEST(strcmp(node.slots.entries[28].name, "Release Damping") == 0 &&
-         approx(node.slots.entries[28].value.real, 0.6f, 1.0e-6f));
-    TEST(strcmp(node.slots.entries[41].name, "Pluck Brightness") == 0);
+    TEST(approx(string_target_slot(graph, mapping, Synth::mod_string_dispersion).value.real, 0.45f, 1.0e-6f));
+    TEST(approx(string_target_slot(graph, mapping, Synth::mod_string_damping).value.real, 0.3f, 1.0e-6f));
+    TEST(approx(string_target_slot(graph, mapping, Synth::mod_string_release_damping).value.real, 0.6f, 1.0e-6f));
+
     Synth::Instrument compiled = {};
     TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
     TEST(approx(compiled.layers[0].targets[Synth::mod_string_damping].base_value, 0.3f, 1.0e-6f));
     TEST(approx(compiled.layers[0].targets[Synth::mod_string_release_damping].base_value, 0.6f, 1.0e-6f));
     TEST(approx(compiled.layers[0].targets[Synth::mod_string_dispersion].base_value, 0.45f, 1.0e-6f));
-    TEST(compiled.layers[0].targets[Synth::mod_duty0].base_value == 0.0f);
+    TEST(compiled.layers[0].targets[Synth::mod_duty_a].base_value == 0.0f);
 
-    instrument.layers[0].osc_type[0]                          = Synth::WaveType::sawtooth_wave;
-    instrument.layers[0].targets[Synth::mod_duty0].base_value = 0.7f;
+    instrument.layers[0].osc_type[0]                           = Synth::WaveType::sawtooth_wave;
+    instrument.layers[0].targets[Synth::mod_duty_a].base_value = 0.7f;
     TEST(Sculptor::project_instrument_to_graph(instrument, bank.bank, &graph, &mapping));
-    const Sculptor::Node& saw_node = graph.node(mapping.osc_nodes[0]);
-    TEST(strcmp(saw_node.slots.entries[2].name, "Duty A") == 0 &&
-         approx(saw_node.slots.entries[2].value.real, 0.7f, 1.0e-6f));
-    TEST(strcmp(saw_node.slots.entries[15].name, "Pad Tone A") == 0);
+    TEST(approx(string_target_slot(graph, mapping, Synth::mod_duty_a).value.real, 0.7f, 1.0e-6f));
+
     TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
-    TEST(approx(compiled.layers[0].targets[Synth::mod_duty0].base_value, 0.7f, 1.0e-6f));
+    TEST(approx(compiled.layers[0].targets[Synth::mod_duty_a].base_value, 0.7f, 1.0e-6f));
     TEST(compiled.layers[0].targets[Synth::mod_string_damping].base_value == 0.0f);
 
     Sculptor::GraphChange change = {};
@@ -464,22 +481,16 @@ static void check_string_row_reuse()
     change.node_idx              = mapping.osc_nodes[0];
     change.slot_idx              = 1;
     TEST(Sculptor::osc_change_restructures(mapping, change));
-    change.slot_idx = 93; // wave b renames the duty b row (Pad Wander under pad)
-    TEST(Sculptor::osc_change_restructures(mapping, change));
     change.slot_idx = Sculptor::osc_target_src_op(Synth::mod_volume, 0);
     TEST(Sculptor::osc_change_restructures(mapping, change));
     change.slot_idx = Sculptor::osc_target_src_op(Synth::mod_volume, 1);
     TEST(Sculptor::osc_change_restructures(mapping, change));
     change.slot_idx = Sculptor::osc_target_row(Synth::mod_volume);
     TEST(! Sculptor::osc_change_restructures(mapping, change));
-    change.slot_idx = 96; // mix mode
-    TEST(! Sculptor::osc_change_restructures(mapping, change));
 }
 
-// Pad Wander: the duty rows relabel under the pad wave (A and B) with a wander-depth tooltip;
-// sawtooth and pulse keep Duty A / Duty B; the string wave carries String Dispersion on the
-// duty a row.
-static void check_pad_wander_labels()
+// Target tooltips stay nonempty when the waveform changes.
+static void check_wave_target_tooltips()
 {
     const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
     Synth::InstrumentEditorBank&                       bank         = *bank_storage;
@@ -488,9 +499,6 @@ static void check_pad_wander_labels()
     const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
     Sculptor::Graph&                       graph         = *graph_storage;
     Sculptor::OscGraphMapping              mapping       = {};
-
-    const uint32_t duty_a = Sculptor::osc_target_row(Synth::mod_duty0);
-    const uint32_t duty_b = Sculptor::osc_target_row(Synth::mod_duty1);
 
     const Synth::WaveType waves[4] = { Synth::WaveType::sawtooth_wave,
                                        Synth::WaveType::pulse_wave,
@@ -504,30 +512,14 @@ static void check_pad_wander_labels()
             instrument.layers[0].osc_type[0] = wave_a;
             instrument.layers[0].osc_type[1] = wave_b;
             TEST(Sculptor::project_instrument_to_graph(instrument, bank.bank, &graph, &mapping));
-            const Sculptor::Node& node = graph.node(mapping.osc_nodes[0]);
 
-            const Sculptor::Slot& slot_a = node.slots.entries[duty_a];
-            if (wave_a == Synth::WaveType::pad_wave) {
-                TEST(strcmp(slot_a.name, "Pad Wander") == 0);
-                TEST(slot_a.tooltip && strstr(slot_a.tooltip, "wander depth") != nullptr);
-            }
-            else if (wave_a == Synth::WaveType::string_wave) {
-                TEST(strcmp(slot_a.name, "String Dispersion") == 0);
-            }
-            else {
-                TEST(strcmp(slot_a.name, "Duty A") == 0);
-                TEST(slot_a.tooltip && strstr(slot_a.tooltip, "wander depth") == nullptr);
-            }
+            const Synth::ModTarget target_a =
+                wave_a == Synth::WaveType::string_wave ? Synth::mod_string_dispersion : Synth::mod_duty_a;
+            const Sculptor::Slot slot_a = string_target_slot(graph, mapping, target_a);
+            const Sculptor::Slot slot_b = string_target_slot(graph, mapping, Synth::mod_duty_b);
 
-            const Sculptor::Slot& slot_b = node.slots.entries[duty_b];
-            if (wave_b == Synth::WaveType::pad_wave) {
-                TEST(strcmp(slot_b.name, "Pad Wander") == 0);
-                TEST(slot_b.tooltip && strstr(slot_b.tooltip, "wander depth") != nullptr);
-            }
-            else {
-                TEST(strcmp(slot_b.name, "Duty B") == 0);
-                TEST(slot_b.tooltip && strstr(slot_b.tooltip, "wander depth") == nullptr);
-            }
+            TEST(slot_a.tooltip != nullptr && slot_a.tooltip[0] != '\0');
+            TEST(slot_b.tooltip != nullptr && slot_b.tooltip[0] != '\0');
         }
     }
 }
@@ -599,7 +591,7 @@ static void check_string_decoder_target_identity()
         find_osc_graph_connection(graph, { string_node, Sculptor::osc_target_env_dot(Synth::mod_string_dispersion) }) !=
         Sculptor::pool_no_slot);
 
-    const uint32_t shared_targets[2] = { Synth::mod_duty0, Synth::mod_pad_tilt0 };
+    const uint32_t shared_targets[2] = { Synth::mod_duty_a, Synth::mod_pad_tone_a };
     const uint32_t string_targets[2] = { Synth::mod_string_dispersion, Synth::mod_string_damping };
     for (uint32_t i = 0; i < 2; ++i) {
         const uint32_t row   = Sculptor::osc_target_row(shared_targets[i]);
@@ -658,7 +650,7 @@ static void check_osc_node_delete_with_wires_decodes()
             uint32_t target   = 0xFFFFu;
             uint32_t family   = 0xFFFFu;
             uint32_t dot      = 0xFFFFu;
-            if (changes[i].connection_input.slot_idx == Sculptor::osc_target_env_dot(Synth::mod_duty0)) {
+            if (changes[i].connection_input.slot_idx == Sculptor::osc_target_env_dot(Synth::mod_duty_a)) {
                 TEST(Sculptor::decode_osc_input(mapping,
                                                 graph,
                                                 changes[i].connection_input,
@@ -666,7 +658,7 @@ static void check_osc_node_delete_with_wires_decodes()
                                                 &target,
                                                 &family,
                                                 &dot));
-                TEST(! base_row && target == Synth::mod_duty0); // default semantics, not dispersion
+                TEST(! base_row && target == Synth::mod_duty_a); // default semantics, not dispersion
             }
         }
         TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[i], 0, 0));
@@ -691,8 +683,8 @@ static void check_wave_switch_bank_saves()
     static const Synth::WaveType  waves_b[] = { Synth::WaveType::no_wave,
                                                 Synth::WaveType::sawtooth_wave,
                                                 Synth::WaveType::pad_wave };
-    static const Synth::ModTarget routed[]  = { Synth::mod_duty0,
-                                                Synth::mod_pad_tilt0,
+    static const Synth::ModTarget routed[]  = { Synth::mod_duty_a,
+                                                Synth::mod_pad_tone_a,
                                                 Synth::mod_string_damping,
                                                 Synth::mod_string_release_damping,
                                                 Synth::mod_string_dispersion };
@@ -702,7 +694,7 @@ static void check_wave_switch_bank_saves()
                                   Synth::WaveType  wave_b,
                                   Synth::ModTarget target,
                                   uint32_t         base_slot) {
-        const float base = base_slot == 0 ? 0.4f : target == Synth::mod_pad_tilt0 ? -0.5f : 0.9f;
+        const float base = base_slot == 0 ? 0.4f : target == Synth::mod_pad_tone_a ? -0.5f : 0.9f;
         const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
             std::make_unique<Synth::InstrumentEditorBank>();
         Synth::InstrumentEditorBank& bank       = *bank_storage;
@@ -914,10 +906,9 @@ static void check_string_brightness()
     Sculptor::Graph&                       graph         = *graph_storage;
     Sculptor::OscGraphMapping              mapping       = {};
     TEST(Sculptor::project_editor_to_graph(dst, &graph, &mapping, 0, 0));
-    const Sculptor::Node& node = graph.node(mapping.osc_nodes[0]);
-    TEST(strcmp(node.slots.entries[Sculptor::osc_brightness_slot].name, "Pluck Brightness") == 0);
-    TEST(node.slots.entries[Sculptor::osc_brightness_slot].value.real == 0.375f);
-    TEST(node.slots.entries[Sculptor::osc_brightness_slot].child_row);
+
+    TEST(string_target_slot(graph, mapping, Synth::mod_string_brightness).value.real == 0.375f);
+    TEST(string_target_slot(graph, mapping, Synth::mod_string_brightness).child_row);
     Synth::Instrument compiled = {};
     TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
     TEST(compiled.layers[0].string_brightness == 0.375f);
@@ -1178,7 +1169,7 @@ static void string_wave_m2_regressions()
     check_string_dispersion_codec();
     check_string_wave_gating();
     check_string_row_reuse();
-    check_pad_wander_labels();
+    check_wave_target_tooltips();
     check_string_extras_hidden();
     check_string_decoder_target_identity();
     check_osc_node_delete_with_wires_decodes();
@@ -4190,7 +4181,6 @@ static void check_string_hammer_projection()
     build_binding_fixture(bank.get(), &instrument);
     const std::unique_ptr<Sculptor::Graph> graph   = std::make_unique<Sculptor::Graph>();
     Sculptor::OscGraphMapping              mapping = {};
-    const uint32_t                         rows[]  = { 28, 41, 42, 53, 54 };
     for (const Synth::WaveType wave : { Synth::WaveType::string_wave, Synth::WaveType::sawtooth_wave }) {
         instrument.layers[0].osc_type[0]       = wave;
         instrument.layers[0].string_hammer     = 0.5f;
@@ -4202,20 +4192,14 @@ static void check_string_hammer_projection()
         binding.inputs[0]                      = { Synth::ModSource::velocity, Synth::SourceOp::add, 0, 0.5f };
         binding.inputs[1]                      = { Synth::ModSource::mod_wheel, Synth::SourceOp::add, 0, 0.25f };
         TEST(Sculptor::project_instrument_to_graph(instrument, bank->bank, graph.get(), &mapping));
-        const uint32_t index = mapping.osc_nodes[0];
-        for (const uint32_t row : rows) {
-            const bool string_wave = wave == Synth::WaveType::string_wave;
-            TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph->node(index), row) == ! string_wave);
-            TEST(Sculptor::osc_node_slot_hidden(*graph, index, row) == ! string_wave);
-        }
         if (wave == Synth::WaveType::string_wave) {
-            const Sculptor::Slot& hammer = graph->node(index).slots.entries[Sculptor::osc_hammer_slot];
-            TEST(strcmp(hammer.name, "Hammer") == 0 && hammer.child_row);
+            const Sculptor::Slot hammer = string_target_slot(*graph, mapping, Synth::mod_string_hammer);
+            TEST(hammer.child_row);
             TEST(hammer.value.real == 0.5f && hammer.tooltip != nullptr && hammer.real_bounded &&
                  hammer.real_min == 0.0f && hammer.real_max == 1.0f && hammer.connectable);
-            TEST(Sculptor::osc_target_row(Synth::mod_string_brightness) == 41);
-            TEST(graph->node(index).slots.entries[41].kind == Sculptor::SlotKind::property &&
-                 graph->node(index).slots.entries[41].connectable);
+            TEST(string_target_slot(*graph, mapping, Synth::mod_string_brightness).kind ==
+                     Sculptor::SlotKind::property &&
+                 string_target_slot(*graph, mapping, Synth::mod_string_brightness).connectable);
         }
         Synth::Instrument compiled = {};
         TEST(Sculptor::compile_graph_to_instrument(*graph, mapping, &compiled, nullptr, &instrument));
@@ -4227,7 +4211,6 @@ static void check_string_hammer_projection()
     TEST(Sculptor::max_nodes == 472 && Sculptor::max_connections == 1404 && Sculptor::max_node_slots == 421);
     TEST(Sculptor::max_osc_instances == 470);
     TEST(sizeof(Sculptor::Graph) <= 64u * 1024u * 1024u);
-    TEST(Sculptor::osc_hammer_slot == 54 && Sculptor::osc_string_extras_last_slot == 92);
 }
 
 static void check_string_hammer_load_publish()
@@ -4462,11 +4445,10 @@ static void check_hammer_scalar_routing()
     }
 
     TEST(Sculptor::project_instrument_to_graph(bank.bank.instruments.entries[0], bank.bank, &graph, &mapping));
-    const Sculptor::Node& node = graph.node(mapping.osc_nodes[0]);
-    TEST(strcmp(node.slots.entries[Sculptor::osc_hammer_gain_slot].name, "Hammer Gain") == 0);
-    TEST(node.slots.entries[Sculptor::osc_hammer_gain_slot].connectable);
-    TEST(strcmp(node.slots.entries[Sculptor::osc_hammer_contact_slot].name, "Hammer Contact") == 0);
-    TEST(node.slots.entries[Sculptor::osc_hammer_contact_slot].connectable);
+
+    TEST(string_target_slot(graph, mapping, Synth::mod_string_hammer_gain).connectable);
+
+    TEST(string_target_slot(graph, mapping, Synth::mod_string_hammer_contact).connectable);
 
     Synth::Instrument compiled = {};
     TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));

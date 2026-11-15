@@ -1643,7 +1643,7 @@ static void effects_clipboard_regressions()
             mode_osc.osc_mode                               = Synth::osc_mode_ring_mod;
             mode_osc.mod_ratio                              = 1.5f;
             mode_osc.osc_type[1]                            = Synth::WaveType::sawtooth_wave;
-            mode_osc.targets[Synth::mod_duty1].base_value   = 0.25f;
+            mode_osc.targets[Synth::mod_duty_b].base_value  = 0.25f;
             mode_osc.targets[Synth::mod_osc_mix].base_value = 0.75f;
             TEST(Synth::validate_instrument_bank(&mode_bank.bank));
 
@@ -1665,7 +1665,7 @@ static void effects_clipboard_regressions()
             TEST(mode_back.osc_mode == Synth::osc_mode_ring_mod);
             TEST(mode_back.mod_ratio == 1.5f);
             TEST(mode_back.osc_type[1] == Synth::WaveType::sawtooth_wave);
-            TEST(mode_back.targets[Synth::mod_duty1].base_value == 0.25f);
+            TEST(mode_back.targets[Synth::mod_duty_b].base_value == 0.25f);
             TEST(mode_back.targets[Synth::mod_osc_mix].base_value == 0.75f);
 
             // Clipboard codec: the same fixture through the instrument
@@ -1681,7 +1681,7 @@ static void effects_clipboard_regressions()
             TEST(clip.instr.layers[0].osc_mode == Synth::osc_mode_ring_mod);
             TEST(clip.instr.layers[0].mod_ratio == 1.5f);
             TEST(clip.instr.layers[0].osc_type[1] == Synth::WaveType::sawtooth_wave);
-            TEST(clip.instr.layers[0].targets[Synth::mod_duty1].base_value == 0.25f);
+            TEST(clip.instr.layers[0].targets[Synth::mod_duty_b].base_value == 0.25f);
             TEST(clip.instr.layers[0].targets[Synth::mod_osc_mix].base_value == 0.75f);
 
             // Key-order independence: the mode key may follow the target
@@ -1696,7 +1696,7 @@ static void effects_clipboard_regressions()
             TEST(reordered.instr.layers[0].osc_mode == Synth::osc_mode_ring_mod);
             TEST(reordered.instr.layers[0].mod_ratio == 1.5f);
             TEST(reordered.instr.layers[0].osc_type[1] == Synth::WaveType::sawtooth_wave);
-            TEST(reordered.instr.layers[0].targets[Synth::mod_duty1].base_value == 0.25f);
+            TEST(reordered.instr.layers[0].targets[Synth::mod_duty_b].base_value == 0.25f);
             TEST(reordered.instr.layers[0].targets[Synth::mod_osc_mix].base_value == 0.75f);
         }
         // fm_ratio: the hookable FM Ratio target round-trips through both

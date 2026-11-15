@@ -162,7 +162,7 @@ static bool library_file_matches_snapshot(const char*                       path
 // Model/predicate evidence combines waveform/mode availability with caller-owned gates.
 static bool fm_widget_enabled(const Sculptor::Graph& graph, uint32_t node_index)
 {
-    const uint32_t        fm_depth = Sculptor::osc_target_row(Synth::mod_fm_index);
+    const uint32_t        fm_depth = Sculptor::osc_target_row(Synth::mod_fm_depth);
     const Sculptor::Node& node     = graph.node(node_index);
     return ! Sculptor::oscillator_slot_waveform_mode_disabled(node, fm_depth) &&
            ! graph.slot_edit_disabled(node_index, fm_depth) && ! graph.slot_is_connected(node_index, fm_depth) &&
@@ -182,7 +182,7 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
     const uint32_t           slot       = bank.bank.channel_zones[channel][zone].instrument;
     const Synth::Instrument& instrument = bank.bank.instruments.entries[slot];
     TEST(instrument.layer_count == 3);
-    TEST(approx(instrument.layers[0].targets[Synth::mod_fm_index].base_value, 0.625f * 6.2831853f, 0.00001f));
+    TEST(approx(instrument.layers[0].targets[Synth::mod_fm_depth].base_value, 0.625f * 6.2831853f, 0.00001f));
     TEST(instrument.layers[0].targets[Synth::mod_volume].num_inputs == 1);
     TEST(instrument.layers[0].targets[Synth::mod_volume].inputs[0].source == Synth::ModSource::velocity);
     TEST(instrument.layers[0].targets[Synth::mod_volume].inputs[0].op == Synth::SourceOp::add);
@@ -207,7 +207,7 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
                     0.01f));
         TEST(bank.bank.lfos.entries[generator.lfo_desc_id - 1].period_ms == 300);
         TEST(fm_widget_enabled(graph, node_index));
-        TEST(approx(node.slots.entries[Sculptor::osc_target_row(Synth::mod_fm_index)].value.real, 0.625f, 0.000001f));
+        TEST(approx(node.slots.entries[Sculptor::osc_target_row(Synth::mod_fm_depth)].value.real, 0.625f, 0.000001f));
         TEST(graph.slot_is_connected(node_index, Sculptor::osc_target_lfo_dot(Synth::mod_volume)));
     }
     const Sculptor::Node& oscillator = graph.node(mapping.osc_nodes[0]);
@@ -232,7 +232,7 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
     TEST(sum.content_width_override == 360 && sum.content_height_override == 270);
     const uint32_t          wave_b_slot   = 93;  // waveform b, layout contract
     const uint32_t          mode_slot     = 120; // mix mode, layout contract
-    const uint32_t          fm_depth_slot = Sculptor::osc_target_row(Synth::mod_fm_index);
+    const uint32_t          fm_depth_slot = Sculptor::osc_target_row(Synth::mod_fm_depth);
     const uint32_t          fm_ratio_slot = 147; // fm ratio, layout contract
     Sculptor::PropertyValue wave          = {};
     wave.list_index                       = 0;
@@ -260,12 +260,12 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
         // fixture, so the duty a family stays gated-off.
         const uint32_t wave_a_list  = graph.node(node_index).slots.entries[1].value.list_index;
         const bool     tone_a_gated = wave_a_list != static_cast<uint32_t>(Synth::WaveType::pad_wave) - 1;
-        const uint32_t tone0        = Sculptor::osc_target_row(Synth::mod_pad_tilt0);
-        const uint32_t tone1        = Sculptor::osc_target_row(Synth::mod_pad_tilt1);
+        const uint32_t tone0        = Sculptor::osc_target_row(Synth::mod_pad_tone_a);
+        const uint32_t tone1        = Sculptor::osc_target_row(Synth::mod_pad_tone_b);
         for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
             const bool gated =
                 (row >= Sculptor::osc_string_extras_first_slot && row <= Sculptor::osc_string_extras_last_slot) ||
-                row == Sculptor::osc_target_row(Synth::mod_duty1) || row == mode_slot ||
+                row == Sculptor::osc_target_row(Synth::mod_duty_b) || row == mode_slot ||
                 row == Sculptor::osc_target_row(Synth::mod_osc_mix) || row == fm_depth_slot || row == fm_ratio_slot ||
                 (tone_a_gated && row >= tone0 && row <= tone0 + Sculptor::osc_target_block_stride) ||
                 (row >= tone1 && row <= tone1 + Sculptor::osc_target_block_stride) ||
@@ -282,9 +282,9 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
     // Mode 1 keeps fm depth and fm ratio live; both tone families and the
     // spread family stay gated.
     {
-        const uint32_t duty1_row  = Sculptor::osc_target_row(Synth::mod_duty1);
-        const uint32_t tone0      = Sculptor::osc_target_row(Synth::mod_pad_tilt0);
-        const uint32_t tone1      = Sculptor::osc_target_row(Synth::mod_pad_tilt1);
+        const uint32_t duty1_row  = Sculptor::osc_target_row(Synth::mod_duty_b);
+        const uint32_t tone0      = Sculptor::osc_target_row(Synth::mod_pad_tone_a);
+        const uint32_t tone1      = Sculptor::osc_target_row(Synth::mod_pad_tone_b);
         const uint32_t mix_row    = Sculptor::osc_target_row(Synth::mod_osc_mix);
         const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
         for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
@@ -306,13 +306,13 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
     wave.list_index = 0;
     graph.set_slot_value(node_index, wave_b_slot, wave);
     {
-        const uint32_t tone_b_row = Sculptor::osc_target_row(Synth::mod_pad_tilt1);
+        const uint32_t tone_b_row = Sculptor::osc_target_row(Synth::mod_pad_tone_b);
         const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
         for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
             const bool gated =
                 (row >= Sculptor::osc_string_extras_first_slot && row <= Sculptor::osc_string_extras_last_slot) ||
                 (row >= tone_b_row && row <= tone_b_row + Sculptor::osc_target_block_stride) ||
-                row == Sculptor::osc_target_row(Synth::mod_duty1) || row == mode_slot ||
+                row == Sculptor::osc_target_row(Synth::mod_duty_b) || row == mode_slot ||
                 row == Sculptor::osc_target_row(Synth::mod_osc_mix) || row == fm_depth_slot || row == fm_ratio_slot ||
                 (row >= spread_row &&
                  row <= Sculptor::osc_target_row(Synth::mod_fir_slope) + Sculptor::osc_target_block_stride);
@@ -339,8 +339,8 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
     wave.list_index = 3;
     graph.set_slot_value(node_index, 1, wave);
     {
-        const uint32_t duty0_row  = Sculptor::osc_target_row(Synth::mod_duty0);
-        const uint32_t tone0      = Sculptor::osc_target_row(Synth::mod_pad_tilt0);
+        const uint32_t duty0_row  = Sculptor::osc_target_row(Synth::mod_duty_a);
+        const uint32_t tone0      = Sculptor::osc_target_row(Synth::mod_pad_tone_a);
         const uint32_t mix_row    = Sculptor::osc_target_row(Synth::mod_osc_mix);
         const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
         for (uint32_t row = 0; row < graph.node(node_index).slots.num_allocated; ++row) {
@@ -358,12 +358,12 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
     wave.list_index = 5;
     graph.set_slot_value(node_index, 1, wave);
     TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index),
-                                                            Sculptor::osc_target_row(Synth::mod_duty0)));
+                                                            Sculptor::osc_target_row(Synth::mod_duty_a)));
     TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index),
-                                                            Sculptor::osc_target_row(Synth::mod_duty0) +
+                                                            Sculptor::osc_target_row(Synth::mod_duty_a) +
                                                                 Sculptor::osc_target_block_stride));
     TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index),
-                                                            Sculptor::osc_target_row(Synth::mod_pad_tilt0)));
+                                                            Sculptor::osc_target_row(Synth::mod_pad_tone_a)));
     TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), Sculptor::osc_brightness_slot));
     // Restore the contract state for the following widget tests.
     wave.list_index = 0;
@@ -965,7 +965,7 @@ static void check_zero_fm_clipboard_library_round_trips()
             Synth::Instrument& fixture = source.bank.instruments.entries[0];
             // Bank-side writes seed every layer (fixture uniformity, no bridge).
             for (uint32_t l = 0; l < fixture.layer_count; ++l) {
-                fixture.layers[l].targets[Synth::mod_fm_index].base_value = depth * 6.2831853f;
+                fixture.layers[l].targets[Synth::mod_fm_depth].base_value = depth * 6.2831853f;
             }
             for (uint32_t l = 0; l < source.bank.instruments.entries[0].layer_count; ++l) {
                 Synth::Oscillator& osc = source.bank.instruments.entries[0].layers[l];
@@ -979,7 +979,7 @@ static void check_zero_fm_clipboard_library_round_trips()
             TEST(export_clipboard_fixture(source, text, sizeof(text)));
             TEST(decode_clipboard(&decoded, text, max_portable_records));
             check_routing_fan_out(decoded.instr);
-            TEST(decoded.instr.layers[0].targets[Synth::mod_fm_index].base_value == depth * 6.2831853f);
+            TEST(decoded.instr.layers[0].targets[Synth::mod_fm_depth].base_value == depth * 6.2831853f);
             TEST(decoded.instr.layers[0].mod_ratio == ratio);
 
             destination = source;
@@ -1009,7 +1009,7 @@ static void check_zero_fm_clipboard_library_round_trips()
                 const uint32_t           channel = transport ? 2 : 0;
                 const Synth::Instrument& instr =
                     installed.bank.instruments.entries[installed.bank.channel_zones[channel][0].instrument];
-                TEST(instr.layers[0].targets[Synth::mod_fm_index].base_value == depth * 6.2831853f);
+                TEST(instr.layers[0].targets[Synth::mod_fm_depth].base_value == depth * 6.2831853f);
                 const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
                 Sculptor::Graph&                       graph         = *graph_storage;
                 Sculptor::OscGraphMapping              mapping       = {};
@@ -1020,7 +1020,7 @@ static void check_zero_fm_clipboard_library_round_trips()
                          (active ? Synth::WaveType::sine_wave : Synth::WaveType::no_wave));
                     TEST(instr.layers[l].osc_mode == (active ? Synth::osc_mode_fm : Synth::osc_mode_blend));
                     const Sculptor::Node& node = graph.node(mapping.osc_nodes[l]);
-                    TEST(node.slots.entries[Sculptor::osc_target_row(Synth::mod_fm_index)].value.real == depth);
+                    TEST(node.slots.entries[Sculptor::osc_target_row(Synth::mod_fm_depth)].value.real == depth);
                     TEST(node.slots.entries[147].value.real == ratio); // fm ratio, layout contract
                     TEST(fm_widget_enabled(graph, mapping.osc_nodes[l]) == (active != 0));
                 }
@@ -1044,10 +1044,10 @@ static void check_zero_fm_clipboard_library_round_trips()
     TEST(decoded.instr.layers[0].mod_ratio == 1);
 
     const char* const explicit_zero =
-        "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"mod_ratio\":0,\"fm_index\":{\"base\":0}}]}";
+        "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"mod_ratio\":0,\"fm_depth\":{\"base\":0}}]}";
     TEST(decode_clipboard(&decoded, explicit_zero, max_portable_records));
     TEST(decoded.instr.layers[0].mod_ratio == 0);
-    TEST(decoded.instr.layers[0].targets[Synth::mod_fm_index].base_value == 0);
+    TEST(decoded.instr.layers[0].targets[Synth::mod_fm_depth].base_value == 0);
     remove(path);
 }
 
@@ -1328,7 +1328,7 @@ static void check_decoded_fm_lfo_binding_survives_compile()
     Synth::InstrumentEditorBank&                       bank         = *bank_storage;
     Synth::Instrument                                  instrument   = {};
     build_binding_fixture(&bank, &instrument);
-    Synth::TargetBinding& fm         = instrument.layers[0].targets[Synth::mod_fm_index];
+    Synth::TargetBinding& fm         = instrument.layers[0].targets[Synth::mod_fm_depth];
     fm.lfo_desc_id                   = 1;
     fm.lfo_op                        = Synth::SourceOp::add;
     fm.lfo_depth                     = 0.5f;
@@ -1353,12 +1353,12 @@ static void check_decoded_fm_lfo_binding_survives_compile()
     Sculptor::OscGraphMapping              mapping       = {};
     TEST(Sculptor::project_editor_to_graph(decoded, &graph, &mapping, 0, 0));
     TEST(
-        find_osc_graph_connection(graph, { mapping.osc_nodes[0], Sculptor::osc_target_lfo_dot(Synth::mod_fm_index) }) !=
+        find_osc_graph_connection(graph, { mapping.osc_nodes[0], Sculptor::osc_target_lfo_dot(Synth::mod_fm_depth) }) !=
         Sculptor::pool_no_slot);
     TEST(Sculptor::refresh_osc_graph_compilation(&decoded, graph, mapping, 0, 0));
     const Synth::TargetBinding& compiled = decoded.bank.instruments.entries[decoded.bank.channel_zones[0][0].instrument]
                                                .layers[0]
-                                               .targets[Synth::mod_fm_index];
+                                               .targets[Synth::mod_fm_depth];
     TEST(compiled.lfo_desc_id == 1);
     TEST(compiled.lfo_op == Synth::SourceOp::add);
     TEST(compiled.lfo_depth == 0.5f);
@@ -2269,7 +2269,7 @@ static void check_pad_json_codec()
         fill_clipboard_sentinels(&decoded);
         TEST(decode_clipboard(&decoded, pad_a_doc, max_portable_records));
         TEST(decoded.instr.layers[0].osc_type[0] == static_cast<Synth::WaveType>(5));
-        TEST(decoded.instr.layers[0].targets[Synth::mod_duty0].base_value == 0.5f);
+        TEST(decoded.instr.layers[0].targets[Synth::mod_duty_a].base_value == 0.5f);
     }
 
     // "pad" decodes in the oscillator B position too.
@@ -2324,7 +2324,7 @@ static void check_pad_json_codec()
                                            &rt_back_lfo_count));
         TEST(rt_back.layers[0].osc_type[0] == static_cast<Synth::WaveType>(5));
         TEST(rt_back.layers[0].osc_type[1] == static_cast<Synth::WaveType>(5));
-        TEST(rt_back.layers[0].targets[Synth::mod_duty0].base_value == 0.5f);
+        TEST(rt_back.layers[0].targets[Synth::mod_duty_a].base_value == 0.5f);
     }
 
     // The stored LFO acceptance set stays closed: the inline layer LFO decode
@@ -2398,14 +2398,14 @@ static void check_pad_tilt_json_codec()
                                        "\"pad_tone_a\":{\"base\":0.5},\"pad_tone_b\":{\"base\":-1}}]}";
         fill_clipboard_sentinels(&decoded);
         TEST(decode_clipboard(&decoded, tilt_doc, max_portable_records));
-        const Sculptor::OscTargetView tilt_view0 = Sculptor::osc_target_view(Synth::mod_pad_tilt0);
-        const Sculptor::OscTargetView tilt_view1 = Sculptor::osc_target_view(Synth::mod_pad_tilt1);
+        const Sculptor::OscTargetView tilt_view0 = Sculptor::osc_target_view(Synth::mod_pad_tone_a);
+        const Sculptor::OscTargetView tilt_view1 = Sculptor::osc_target_view(Synth::mod_pad_tone_b);
         TEST(tilt_view0.min_value == -1.0f && tilt_view0.max_value == 1.0f && tilt_view0.bank_scale == 1.0f);
         TEST(tilt_view1.min_value == -1.0f && tilt_view1.max_value == 1.0f && tilt_view1.bank_scale == 1.0f);
-        TEST(approx(decoded.instr.layers[0].targets[Synth::mod_pad_tilt0].base_value,
+        TEST(approx(decoded.instr.layers[0].targets[Synth::mod_pad_tone_a].base_value,
                     0.5f * tilt_view0.bank_scale,
                     1.0e-5f));
-        TEST(approx(decoded.instr.layers[0].targets[Synth::mod_pad_tilt1].base_value,
+        TEST(approx(decoded.instr.layers[0].targets[Synth::mod_pad_tone_b].base_value,
                     -1.0f * tilt_view1.bank_scale,
                     1.0e-5f));
     }
@@ -2451,15 +2451,15 @@ static void check_pad_tilt_json_codec()
                                            &rt_back_env_count,
                                            rt_back_lfos,
                                            &rt_back_lfo_count));
-        TEST(approx(rt_back.layers[0].targets[Synth::mod_pad_tilt0].base_value, 0.5f, 1.0e-5f));
-        TEST(approx(rt_back.layers[0].targets[Synth::mod_pad_tilt1].base_value, -1.0f, 1.0e-5f));
+        TEST(approx(rt_back.layers[0].targets[Synth::mod_pad_tone_a].base_value, 0.5f, 1.0e-5f));
+        TEST(approx(rt_back.layers[0].targets[Synth::mod_pad_tone_b].base_value, -1.0f, 1.0e-5f));
     }
 
     // The eight stored target names keep their frozen enum values 0..7; the
     // array size is fixed so appending targets later cannot shift these.
     {
         static const char* const stored_names[8] = { "volume", "pitch",   "panning",  "duty_a",
-                                                     "duty_b", "osc_mix", "fm_index", "fir_pitch_spread" };
+                                                     "duty_b", "osc_mix", "fm_depth", "fir_spread" };
         char                     stored_doc[192] = {};
         for (uint32_t t = 0; t < 8; ++t) {
             const int written = snprintf(stored_doc,
@@ -2474,6 +2474,127 @@ static void check_pad_tilt_json_codec()
             TEST(approx(decoded.instr.layers[0].targets[static_cast<Synth::ModTarget>(t)].base_value,
                         0.25f * view.bank_scale,
                         1.0e-5f));
+        }
+    }
+
+    // old-key regression.  Old files need migration because unknown target keys are ignored.
+    {
+        static const char* const      old_keys[]        = { "fm_index", "fir_pitch_spread" };
+        static const Synth::ModTarget renamed_targets[] = { Synth::mod_fm_depth, Synth::mod_fir_spread };
+        constexpr uint32_t            old_key_count     = sizeof(old_keys) / sizeof(old_keys[0]);
+        constexpr uint32_t            ignored_capacity  = 8;
+        char                          old_doc[192]      = {};
+        char                          ignored_names[ignored_capacity][48] = {};
+
+        for (uint32_t key_index = 0; key_index < old_key_count; ++key_index) {
+            Synth::take_ignored_fields(ignored_names, ignored_capacity);
+
+            // v2 keeps the format tag out of the ignored-fields list.
+            const int written = snprintf(old_doc,
+                                         sizeof(old_doc),
+                                         "{\"format\":\"synth-instrument-v2\",\"layers\":[{\"wave_a\":\"sine\","
+                                         "\"%s\":{\"base\":0.25}}]}",
+                                         old_keys[key_index]);
+            TEST(written > 0 && static_cast<uint32_t>(written) < sizeof(old_doc));
+            TEST(decode_clipboard(&decoded, old_doc, max_portable_records));
+            TEST(decoded.instr.layers[0].targets[renamed_targets[key_index]].base_value == 0.0f);
+
+            const uint32_t ignored_count = Synth::take_ignored_fields(ignored_names, ignored_capacity);
+            TEST(ignored_count == 1);
+            TEST(strcmp(ignored_names[0], old_keys[key_index]) == 0);
+        }
+    }
+
+    // JSON key and index oracle.  These keys are a frozen copy of the serializer JSON keys.
+    // Keep them independent of SYNTH_MOD_TARGET_LIST so a table change cannot hide a key or index swap.
+    {
+        static const char* const     expected_keys[Synth::num_mod_targets] = { "volume",
+                                                                               "pitch",
+                                                                               "panning",
+                                                                               "duty_a",
+                                                                               "duty_b",
+                                                                               "osc_mix",
+                                                                               "fm_depth",
+                                                                               "fir_spread",
+                                                                               "fm_ratio",
+                                                                               "pad_tone_a",
+                                                                               "pad_tone_b",
+                                                                               "fir_slope",
+                                                                               "fir_band0_offset",
+                                                                               "fir_band0_gain",
+                                                                               "fir_band1_offset",
+                                                                               "fir_band1_spread",
+                                                                               "fir_band1_gain",
+                                                                               "fir_band1_slope",
+                                                                               "fir_band2_offset",
+                                                                               "fir_band2_spread",
+                                                                               "fir_band2_gain",
+                                                                               "fir_band2_slope",
+                                                                               "fir_band3_offset",
+                                                                               "fir_band3_spread",
+                                                                               "fir_band3_gain",
+                                                                               "fir_band3_slope",
+                                                                               "string_damping",
+                                                                               "string_release_damping",
+                                                                               "string_dispersion",
+                                                                               "string_brightness",
+                                                                               "string_hammer",
+                                                                               "string_hammer_contact",
+                                                                               "string_hammer_gain" };
+        static Synth::InstrumentBank oracle_bank;
+        static Synth::Instrument     oracle_instrument;
+        static char                  oracle_text[clipboard_capacity];
+        char                         oracle_doc[512] = {};
+        char                         oracle_key[80]  = {};
+
+        for (uint32_t target = 0; target < Synth::num_mod_targets; ++target) {
+            const int written = snprintf(oracle_doc,
+                                         sizeof(oracle_doc),
+                                         "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
+                                         "\"fir_type\":\"bandpass\",\"fir_bands\":4,"
+                                         "\"%s\":{\"sources\":[{\"source\":\"mod_wheel\"}]}}]}",
+                                         expected_keys[target]);
+            TEST(written > 0 && static_cast<uint32_t>(written) < sizeof(oracle_doc));
+            TEST(decode_clipboard(&decoded, oracle_doc, max_portable_records));
+
+            for (uint32_t other = 0; other < Synth::num_mod_targets; ++other) {
+                TEST(decoded.instr.layers[0].targets[other].num_inputs == (other == target ? 1 : 0));
+            }
+
+            oracle_instrument = decoded.instr;
+
+            for (uint32_t other = 0; other < Synth::num_mod_targets; ++other) {
+                oracle_instrument.layers[0].targets[other].num_inputs = 0;
+            }
+
+            oracle_instrument.layers[0].targets[target].num_inputs       = 1;
+            oracle_instrument.layers[0].targets[target].inputs[0].source = Synth::ModSource::mod_wheel;
+            oracle_instrument.layers[0].targets[target].inputs[0].op     = Synth::SourceOp::add;
+            oracle_instrument.layers[0].targets[target].inputs[0].scale  = 1.0f;
+
+            const uint32_t encoded_length =
+                Synth::encode_instrument_json(oracle_text, sizeof(oracle_text), &oracle_instrument, &oracle_bank);
+            TEST(encoded_length > 0 && encoded_length < sizeof(oracle_text));
+            oracle_text[encoded_length] = '\0';
+
+            const int key_length = snprintf(oracle_key, sizeof(oracle_key), "\"%s\":{", expected_keys[target]);
+            TEST(key_length > 0 && static_cast<uint32_t>(key_length) < sizeof(oracle_key));
+
+            const char* key_position     = strstr(oracle_text, oracle_key);
+            const char* sources_position = strstr(oracle_text, "\"sources\"");
+            TEST(key_position != nullptr && sources_position != nullptr);
+
+            if (key_position != nullptr && sources_position != nullptr) {
+                const char* object_start = key_position + key_length;
+                const char* object_end   = strchr(object_start, '}');
+                TEST(object_start <= sources_position && object_end != nullptr && sources_position < object_end);
+            }
+
+            TEST(decode_clipboard(&decoded, oracle_text, max_portable_records));
+
+            for (uint32_t other = 0; other < Synth::num_mod_targets; ++other) {
+                TEST(decoded.instr.layers[0].targets[other].num_inputs == (other == target ? 1 : 0));
+            }
         }
     }
 
@@ -3796,7 +3917,7 @@ static void check_bank_inline_0()
                                                                              0,
                                                                              0.2f };
             routed_instr.layers[1].targets[Synth::mod_pitch].base_value  = 1.5f;
-            routed_instr.layers[1].targets[Synth::mod_duty0].base_value  = 0.4f;
+            routed_instr.layers[1].targets[Synth::mod_duty_a].base_value = 0.4f;
             // Layer 2 carries no routing at all: omitted layers decode to the
             // zeroed binding.
             routed.bank.channel_zones[0][0] = { 1, 0 };
@@ -3825,12 +3946,12 @@ static void check_bank_inline_0()
             TEST(dec.layers[1].targets[Synth::mod_volume].inputs[0].source == Synth::ModSource::velocity);
             TEST(dec.layers[1].targets[Synth::mod_volume].inputs[0].scale == 0.2f);
             TEST(dec.layers[1].targets[Synth::mod_pitch].base_value == 1.5f);
-            TEST(dec.layers[1].targets[Synth::mod_duty0].base_value == 0.4f);
+            TEST(dec.layers[1].targets[Synth::mod_duty_a].base_value == 0.4f);
             TEST(dec.layers[1].targets[Synth::mod_pitch].num_inputs == 0);
             TEST(dec.layers[2].targets[Synth::mod_volume].base_value == 0.0f);
             TEST(dec.layers[2].targets[Synth::mod_volume].num_inputs == 0);
             TEST(dec.layers[2].targets[Synth::mod_pitch].base_value == 0.0f);
-            TEST(dec.layers[2].targets[Synth::mod_duty0].base_value == 0.0f);
+            TEST(dec.layers[2].targets[Synth::mod_duty_a].base_value == 0.0f);
             TEST(dec.layers[3].targets[Synth::mod_volume].base_value == 0.0f);
         }
 
@@ -5872,6 +5993,7 @@ static void portability_examples()
                                            Synth::instrument_graph_layout_capacity,
                                            &layout_count));
         TEST(instrument.layer_count == 2 && instrument.layers[0].osc_mode == Synth::osc_mode_fm);
+        TEST(approx(instrument.layers[0].targets[Synth::mod_fm_depth].base_value, 0.75f * 6.2831853f, 0.00001f));
         TEST(env_count == 2 && lfo_count == 2 && layout_count == 1 && layout[0].kind == 0);
     }
     char        ignored[32][48];

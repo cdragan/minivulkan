@@ -15,7 +15,7 @@ const char clipboard_doc_head[] =
     "\"depth_source\":\"velocity\",\"rate_source\":\"mod_wheel\",\"rate_scale_ms\":20}},"
     "\"pitch\":{\"base\":0,\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0.25},"
     "{\"time_seconds\":0.5,\"level\":-0.25}],\"sustain_start\":0,\"sustain_end\":1}},"
-    "\"panning\":{\"base\":0.5},\"fir_pitch_spread\":{\"base\":3}}],";
+    "\"panning\":{\"base\":0.5},\"fir_spread\":{\"base\":3}}],";
 
 // The same instrument with a volume envelope byte-identical to the pitch
 // envelope's, which the decoder interns into one descriptor and the projection
@@ -72,29 +72,47 @@ static void sweep_tooltips(const Sculptor::Graph& graph,
     }
 }
 
-// Oscillator-pane exemptions: the sum node Layer rows, the Band N header
-// label rows and the band rows that the descriptors leave without text
-// under the off/lowpass/highpass filter types.
+struct OscTooltipContext {
+    const Sculptor::Graph*           graph;
+    const Sculptor::OscGraphMapping* mapping;
+};
+
+// Exempt structural rows and inactive filter parameters by identity.
 static bool osc_tooltip_exempt(uint32_t node_idx, const Sculptor::Slot& slot, void* user_data)
 {
-    const Sculptor::OscGraphMapping& mapping = *static_cast<const Sculptor::OscGraphMapping*>(user_data);
-    if (node_idx == mapping.output_node && strncmp(slot.name, "Layer ", 6) == 0) {
+    const OscTooltipContext&         context = *static_cast<const OscTooltipContext*>(user_data);
+    const Sculptor::OscGraphMapping& mapping = *context.mapping;
+    if (node_idx == mapping.output_node ||
+        (slot.kind == Sculptor::SlotKind::property && slot.property_type == Sculptor::PropertyType::unused)) {
         return true;
     }
 
-    if (strncmp(slot.name, "Band ", 5) == 0) {
-        return true;
-    }
+    for (uint32_t layer = 0; layer < Synth::max_layers; ++layer) {
+        if (node_idx != mapping.osc_nodes[layer]) {
+            continue;
+        }
 
-    if (node_idx == mapping.osc_nodes[0] &&
-        (strcmp(slot.name, "Filter Off") == 0 || strcmp(slot.name, "FIR Slope") == 0 ||
-         strcmp(slot.name, "Offset") == 0 || strcmp(slot.name, "Gain") == 0)) {
-        return true;
-    }
+        uint32_t       target     = 0;
+        const uint32_t slot_index = static_cast<uint32_t>(&slot - context.graph->node(node_idx).slots.entries);
+        bool           base_row   = false;
+        uint32_t       family     = 0;
+        uint32_t       dot        = 0;
 
-    if ((node_idx == mapping.osc_nodes[2] || node_idx == mapping.osc_nodes[3]) &&
-        (strcmp(slot.name, "Offset") == 0 || strcmp(slot.name, "Gain") == 0)) {
-        return true;
+        if (! Sculptor::decode_osc_input(mapping,
+                                         *context.graph,
+                                         { node_idx, slot_index },
+                                         &base_row,
+                                         &target,
+                                         &family,
+                                         &dot) ||
+            ! base_row) {
+            return false;
+        }
+
+        const bool inactive_band = target == Synth::mod_fir_band0_offset || target == Synth::mod_fir_band0_gain;
+
+        return (layer == 0 && (inactive_band || target == Synth::mod_fir_spread || target == Synth::mod_fir_slope)) ||
+               ((layer == 2 || layer == 3) && inactive_band);
     }
 
     return false;
@@ -274,12 +292,12 @@ static uint32_t build_clipboard_max_fixture(Synth::InstrumentBank*        bank,
         routing.inputs[1].op     = Synth::SourceOp::multiply;
         routing.inputs[1].scale  = -0.25f;
     }
-    instrument->layers[0].targets[Synth::mod_duty0].base_value     = 0.25f;
-    instrument->layers[0].targets[Synth::mod_duty1].base_value     = 0.5f;
-    instrument->layers[0].targets[Synth::mod_osc_mix].base_value   = 0.75f;
-    instrument->layers[0].targets[Synth::mod_fm_index].base_value  = 0.5f * 6.2831853f;
-    instrument->layers[0].targets[Synth::mod_pad_tilt0].base_value = 0.25f;
-    instrument->layers[0].targets[Synth::mod_pad_tilt1].base_value = -0.5f;
+    instrument->layers[0].targets[Synth::mod_duty_a].base_value     = 0.25f;
+    instrument->layers[0].targets[Synth::mod_duty_b].base_value     = 0.5f;
+    instrument->layers[0].targets[Synth::mod_osc_mix].base_value    = 0.75f;
+    instrument->layers[0].targets[Synth::mod_fm_depth].base_value   = 0.5f * 6.2831853f;
+    instrument->layers[0].targets[Synth::mod_pad_tone_a].base_value = 0.25f;
+    instrument->layers[0].targets[Synth::mod_pad_tone_b].base_value = -0.5f;
     fan_out_routing(*instrument);
     instrument->note_skew_semitones  = 0.25f;
     instrument->layer_skew_semitones = 0.5f;
@@ -774,7 +792,7 @@ static void check_clipboard_inline_0()
                                 "\"pitch\":{\"base\":1.0},"
                                 "\"panning\":{\"base\":0.5},"
                                 "\"duty_b\":{\"base\":0.5},"
-                                "\"fm_index\":{\"base\":0.75}"
+                                "\"fm_depth\":{\"base\":0.75}"
                                 "}"
                                 "]"
                                 "}";
@@ -815,9 +833,9 @@ static void check_clipboard_inline_0()
         // The pitch block base plus the folded stored key: 1.0 + (-12.0).
         TEST(instr.layers[0].targets[Synth::mod_pitch].base_value == -11.0f);
         TEST(instr.layers[0].targets[Synth::mod_panning].base_value == 0.5f);
-        TEST(instr.layers[0].targets[Synth::mod_duty1].base_value == 0.5f);
-        // fm_index is 0..1 in the document, 0..2*pi radians in the bank.
-        TEST(instr.layers[0].targets[Synth::mod_fm_index].base_value == 0.75f * 6.2831853f);
+        TEST(instr.layers[0].targets[Synth::mod_duty_b].base_value == 0.5f);
+        // fm_depth is 0..1 in the document, 0..2*pi radians in the bank.
+        TEST(instr.layers[0].targets[Synth::mod_fm_depth].base_value == 0.75f * 6.2831853f);
         // Envelope: seconds -> ticks, levels 0..1 -> 16-bit values, min normalized to 0.
         TEST(osc.targets[Synth::mod_volume].envelope_desc_id == 1);
         TEST(env_count == 1);
@@ -888,7 +906,7 @@ static void check_clipboard_inline_0()
         TEST(decoded.layers[0].targets[Synth::mod_volume].inputs[1].source == Synth::ModSource::mod_wheel);
         TEST(decoded.layers[0].targets[Synth::mod_volume].inputs[1].op == Synth::SourceOp::multiply);
         TEST(decoded.layers[0].targets[Synth::mod_volume].inputs[1].scale == 0.25f);
-        TEST(decoded.layers[0].targets[Synth::mod_fm_index].base_value == 0.75f * 6.2831853f);
+        TEST(decoded.layers[0].targets[Synth::mod_fm_depth].base_value == 0.75f * 6.2831853f);
         TEST(decoded_osc.targets[Synth::mod_volume].envelope_desc_id == 1);
         TEST(decoded_env_count == 1);
         TEST(decoded_envs[0].points[1].position == env.points[1].position);
@@ -1129,7 +1147,7 @@ static void check_clipboard_inline_0()
                 // low-pass spread base is a Hz value up to 22050 while band-pass stays 0..36.
                 TEST(plain_instr.layers[0].fir_type == Synth::fir_bandpass);
                 const char* const lowpass_doc = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
-                                                "\"fir_pitch_spread\":{\"base\":440.0},\"fir_type\":\"lowpass\"}]}";
+                                                "\"fir_spread\":{\"base\":440.0},\"fir_type\":\"lowpass\"}]}";
                 TEST(Synth::decode_instrument_json(lowpass_doc,
                                                    static_cast<uint32_t>(strlen(lowpass_doc)),
                                                    &plain_instr,
@@ -1141,7 +1159,7 @@ static void check_clipboard_inline_0()
                 TEST(plain_instr.layers[0].targets[Synth::mod_fir_spread].base_value == 440.0f);
                 const char* const bandpass_hz_doc =
                     "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
-                    "\"fir_pitch_spread\":{\"base\":440.0}}]}";
+                    "\"fir_spread\":{\"base\":440.0}}]}";
                 TEST(! Synth::decode_instrument_json(bandpass_hz_doc,
                                                      static_cast<uint32_t>(strlen(bandpass_hz_doc)),
                                                      &plain_instr,
@@ -1650,7 +1668,7 @@ static void check_clipboard_inline_0()
             }
         }
 
-        // fm_index levels are document units 0..1; the bank stores radians, so the
+        // fm_depth levels are document units 0..1; the bank stores radians, so the
         // envelope's min/delta and the LFO's min/delta scale by 2*pi. The envelope's
         // 16-bit values still span the level range across the delta.
         {
@@ -1660,7 +1678,7 @@ static void check_clipboard_inline_0()
                 "\"layers\":[{"
                 "\"wave_a\":\"sine\","
                 "\"mode\":\"fm\","
-                "\"fm_index\":{"
+                "\"fm_depth\":{"
                 "\"envelope\":{\"points\":[{\"time_seconds\":0.0,\"level\":0.25},{\"time_seconds\":0.1,\"level\":0.75}]},"
                 "\"lfo\":{\"wave\":\"sine\",\"frequency_hz\":2.0,\"min_level\":0.25,\"max_level\":0.5,\"depth\":0.1}"
                 "}}]}";
@@ -1771,7 +1789,7 @@ static void check_clipboard_inline_0()
                 "\"duty_a\":{\"base\":0.25,\"sources\":[{\"source\":\"velocity\",\"op\":\"add\",\"scale\":0.5}]},"
                 "\"duty_b\":{\"base\":0.5,\"sources\":[{\"source\":\"mod_wheel\",\"op\":\"multiply\",\"scale\":-0.25}]},"
                 "\"osc_mix\":{\"base\":0.75,\"sources\":[{\"source\":\"channel_pressure\",\"op\":\"add\",\"scale\":0.1}]},"
-                "\"fm_index\":{\"base\":0.5,\"sources\":[{\"source\":\"aftertouch\",\"op\":\"add\",\"scale\":2.0}]}"
+                "\"fm_depth\":{\"base\":0.5,\"sources\":[{\"source\":\"aftertouch\",\"op\":\"add\",\"scale\":2.0}]}"
                 "}]}";
             Synth::Instrument         routed_instr                                 = {};
             Synth::EnvelopeDescriptor routed_envs[Synth::instrument_max_envelopes] = {};
@@ -1796,13 +1814,13 @@ static void check_clipboard_inline_0()
                 float            scale;
             };
 
-            // fm_index is 0..1 in the document, 0..2*pi radians in the bank,
+            // fm_depth is 0..1 in the document, 0..2*pi radians in the bank,
             // so its expected base carries the radian conversion.
             static const RoutedBindingExpect routed_expect[] = {
-                { Synth::mod_duty0, 0.25f, Synth::ModSource::velocity, Synth::SourceOp::add, 0.5f },
-                { Synth::mod_duty1, 0.5f, Synth::ModSource::mod_wheel, Synth::SourceOp::multiply, -0.25f },
+                { Synth::mod_duty_a, 0.25f, Synth::ModSource::velocity, Synth::SourceOp::add, 0.5f },
+                { Synth::mod_duty_b, 0.5f, Synth::ModSource::mod_wheel, Synth::SourceOp::multiply, -0.25f },
                 { Synth::mod_osc_mix, 0.75f, Synth::ModSource::channel_pressure, Synth::SourceOp::add, 0.1f },
-                { Synth::mod_fm_index, 0.5f * 6.2831853f, Synth::ModSource::aftertouch, Synth::SourceOp::add, 2.0f },
+                { Synth::mod_fm_depth, 0.5f * 6.2831853f, Synth::ModSource::aftertouch, Synth::SourceOp::add, 2.0f },
             };
             const auto check_routed_bindings = [](const Synth::Instrument& instrument) {
                 for (uint32_t r = 0; r < sizeof(routed_expect) / sizeof(routed_expect[0]); ++r) {
@@ -1879,7 +1897,7 @@ static void check_clipboard_inline_0()
                                                                            Synth::SourceOp::multiply,
                                                                            0,
                                                                            -0.25f };
-            doc_instr.layers[0].targets[Synth::mod_duty1].base_value   = 0.5f;
+            doc_instr.layers[0].targets[Synth::mod_duty_b].base_value  = 0.5f;
             doc_instr.layers[0].targets[Synth::mod_osc_mix].base_value = 0.75f;
             // Layer 1: one volume source, its own duty B base.
             doc_instr.layers[1].targets[Synth::mod_volume].base_value = 0.3f;
@@ -1888,7 +1906,7 @@ static void check_clipboard_inline_0()
                                                                           Synth::SourceOp::add,
                                                                           0,
                                                                           0.2f };
-            doc_instr.layers[1].targets[Synth::mod_duty1].base_value  = 0.25f;
+            doc_instr.layers[1].targets[Synth::mod_duty_b].base_value = 0.25f;
             // Layer 2 carries no routing at all.
 
             const std::unique_ptr<Synth::InstrumentBank> desc_bank_storage = std::make_unique<Synth::InstrumentBank>();
@@ -1918,17 +1936,17 @@ static void check_clipboard_inline_0()
             TEST(doc_back.layers[0].targets[Synth::mod_volume].inputs[1].source == Synth::ModSource::mod_wheel);
             TEST(doc_back.layers[0].targets[Synth::mod_volume].inputs[1].op == Synth::SourceOp::multiply);
             TEST(doc_back.layers[0].targets[Synth::mod_volume].inputs[1].scale == -0.25f);
-            TEST(doc_back.layers[0].targets[Synth::mod_duty1].base_value == 0.5f);
+            TEST(doc_back.layers[0].targets[Synth::mod_duty_b].base_value == 0.5f);
             TEST(doc_back.layers[0].targets[Synth::mod_osc_mix].base_value == 0.75f);
             TEST(doc_back.layers[1].targets[Synth::mod_volume].base_value == 0.3f);
             TEST(doc_back.layers[1].targets[Synth::mod_volume].num_inputs == 1);
             TEST(doc_back.layers[1].targets[Synth::mod_volume].inputs[0].source == Synth::ModSource::velocity);
             TEST(doc_back.layers[1].targets[Synth::mod_volume].inputs[0].scale == 0.2f);
-            TEST(doc_back.layers[1].targets[Synth::mod_duty1].base_value == 0.25f);
-            TEST(doc_back.layers[1].targets[Synth::mod_duty1].num_inputs == 0);
+            TEST(doc_back.layers[1].targets[Synth::mod_duty_b].base_value == 0.25f);
+            TEST(doc_back.layers[1].targets[Synth::mod_duty_b].num_inputs == 0);
             TEST(doc_back.layers[2].targets[Synth::mod_volume].base_value == 0.0f);
             TEST(doc_back.layers[2].targets[Synth::mod_volume].num_inputs == 0);
-            TEST(doc_back.layers[2].targets[Synth::mod_duty1].base_value == 0.0f);
+            TEST(doc_back.layers[2].targets[Synth::mod_duty_b].base_value == 0.0f);
             TEST(doc_back.layers[2].targets[Synth::mod_osc_mix].base_value == 0.0f);
         }
 
@@ -2033,13 +2051,13 @@ static void check_clipboard_inline_0()
             "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"mode\":\"fm\",\"mod_ratio\":100.0}]}",
             // spread base above the slider ceiling: the true double value is out of
             // range even though its binary32 narrowing would round back into it
-            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_pitch_spread\":{\"base\":36.0000001}}]}",
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_spread\":{\"base\":36.0000001}}]}",
             // negative spread underflow: the double is below 0 while its binary32
             // narrowing is negative zero, which a post-narrowing check would accept
-            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_pitch_spread\":{\"base\":-1e-50}}]}",
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_spread\":{\"base\":-1e-50}}]}",
             // spread base out of range, plain spellings
-            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_pitch_spread\":{\"base\":37}}]}",
-            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_pitch_spread\":{\"base\":-0.5}}]}",
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_spread\":{\"base\":37}}]}",
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_spread\":{\"base\":-0.5}}]}",
             // duplicate
             "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"wave_a\":\"sawtooth\"}]}",
             // level span overflows the stored delta
@@ -2047,7 +2065,7 @@ static void check_clipboard_inline_0()
             // LFO span overflows the stored delta
             "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"lfo\":{\"wave\":\"sine\",\"frequency_hz\":5.0,\"min_level\":-3e38,\"max_level\":3e38,\"depth\":0.5}}}]}",
             // LFO span overflows the bank-unit conversion
-            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fm_index\":{\"lfo\":{\"wave\":\"sine\",\"frequency_hz\":5.0,\"max_level\":3e38,\"depth\":0.5}}}]}",
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fm_depth\":{\"lfo\":{\"wave\":\"sine\",\"frequency_hz\":5.0,\"max_level\":3e38,\"depth\":0.5}}}]}",
         };
         Synth::Instrument         reference_instr                                 = {};
         Synth::EnvelopeDescriptor reference_envs[Synth::instrument_max_envelopes] = {};
@@ -2157,7 +2175,7 @@ static void check_clipboard_inline_0()
             TEST(zero_instr.layers[0].mod_ratio == 1.0f);
 
             const char* const spread_zero_doc =
-                "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_pitch_spread\":{\"base\":0.0}}]}";
+                "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_spread\":{\"base\":0.0}}]}";
             TEST(Synth::decode_instrument_json(spread_zero_doc,
                                                static_cast<uint32_t>(strlen(spread_zero_doc)),
                                                &zero_instr,
@@ -2168,7 +2186,7 @@ static void check_clipboard_inline_0()
             TEST(zero_instr.layers[0].targets[Synth::mod_fir_spread].base_value == 0.0f);
 
             const char* const spread_max_doc =
-                "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_pitch_spread\":{\"base\":36.0}}]}";
+                "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_spread\":{\"base\":36.0}}]}";
             TEST(Synth::decode_instrument_json(spread_max_doc,
                                                static_cast<uint32_t>(strlen(spread_max_doc)),
                                                &zero_instr,
@@ -2182,7 +2200,7 @@ static void check_clipboard_inline_0()
             // below 2 and must re-quantize to the same raw value.
 
             const char* const spread_env_doc =
-                "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_pitch_spread\":{\"envelope\":{\"points\":[{\"time_seconds\":0.0,\"level\":0.0},{\"time_seconds\":0.1,\"level\":2.0},{\"time_seconds\":0.2,\"level\":30.0}]}}}]}";
+                "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_spread\":{\"envelope\":{\"points\":[{\"time_seconds\":0.0,\"level\":0.0},{\"time_seconds\":0.1,\"level\":2.0},{\"time_seconds\":0.2,\"level\":30.0}]}}}]}";
             Synth::EnvelopeDescriptor spread_envs[Synth::instrument_max_envelopes] = {};
             Synth::LFODescriptor      spread_lfos[Synth::instrument_max_lfos]      = {};
             uint32_t                  spread_env_count                             = 999;
@@ -2241,7 +2259,7 @@ static void check_clipboard_inline_0()
         // Editor dialect: a fractional spread base decodes exactly, and an
         // absent key decodes the zeroed binding.
         const char* const spread_half_doc =
-            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_pitch_spread\":{\"base\":2.5}}]}";
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_spread\":{\"base\":2.5}}]}";
         const char* const no_spread_doc  = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\"}]}";
         const char* const spread_docs[2] = { spread_half_doc, no_spread_doc };
         for (const char* const spread_doc : spread_docs) {
@@ -2296,7 +2314,7 @@ static void check_clipboard_inline_0()
                 Synth::encode_editor_bank_json(&spread_splice_source, spread_payload, sizeof(spread_payload));
             TEST(spread_payload_len > 0);
             auto decode_with_spread_spelling = [&](const char* spelling) {
-                const char* const key = "\"fir_pitch_spread\":{\"base_value\":";
+                const char* const key = "\"fir_spread\":{\"base_value\":";
                 const char* const hit = strstr(spread_payload, key);
                 TEST(hit != nullptr);
                 if (! hit) {
@@ -2339,7 +2357,7 @@ static void check_clipboard_inline_0()
             const uint32_t zero_payload_len =
                 Synth::encode_editor_bank_json(&spread_splice_source, spread_payload, sizeof(spread_payload));
             TEST(zero_payload_len > 0);
-            TEST(strstr(spread_payload, "fir_pitch_spread") == nullptr);
+            TEST(strstr(spread_payload, "fir_spread") == nullptr);
             const std::unique_ptr<Synth::InstrumentEditorBank> zero_decoded_storage =
                 std::make_unique<Synth::InstrumentEditorBank>();
             Synth::InstrumentEditorBank& zero_decoded = *zero_decoded_storage;
@@ -2396,8 +2414,8 @@ static void check_clipboard_inline_0()
                 "\"panning\":{\"base\":0.5,\"lfo\":{\"wave\":\"sine\",\"frequency_hz\":1.66666663,\"duty\":0,"
                 "\"min_level\":-1,\"max_level\":1,\"depth\":0.5,\"depth_source\":\"aftertouch\","
                 "\"rate_scale_ms\":0}},\"duty_a\":{\"base\":0.172000006},\"duty_b\":{\"base\":0.156000003},"
-                "\"osc_mix\":{\"base\":0},\"fm_index\":{\"base\":0},"
-                "\"fir_pitch_spread\":{\"base\":3}}]}";
+                "\"osc_mix\":{\"base\":0},\"fm_depth\":{\"base\":0},"
+                "\"fir_spread\":{\"base\":3}}]}";
             Synth::Instrument         real_instr                                 = {};
             Synth::EnvelopeDescriptor real_envs[Synth::instrument_max_envelopes] = {};
             Synth::LFODescriptor      real_lfos[Synth::instrument_max_lfos]      = {};
@@ -2962,7 +2980,7 @@ static void check_clipboard_inline_0()
             fill_clipboard_sentinels(&dm_attempt);
             TEST(decode_clipboard(&dm_attempt, dm_text, max_portable_records));
             TEST(dm_attempt.env_count == 1);
-            TEST(dm_attempt.instr.layers[0].targets[Synth::mod_duty0].envelope_desc_id == 1);
+            TEST(dm_attempt.instr.layers[0].targets[Synth::mod_duty_a].envelope_desc_id == 1);
             TEST(dm_attempt.layout_count == 1);
             Synth::GraphNodeLayout dm_mapped[max_portable_records] = {};
             uint32_t               dm_mapped_count                 = max_portable_records;
@@ -3788,7 +3806,7 @@ static void check_clipboard_inline_0()
                 "{\"time_seconds\":0.5,\"level\":0.25}]}},"
                 "\"lowpass_cutoff\":{\"base\":2000},\"highpass_cutoff\":{\"base\":500}}],"
                 "\"graph_layout\":["
-                "{\"kind\":\"envelope\",\"layer\":0,\"target\":\"fir_pitch_spread\",\"x\":10,\"y\":11,\"width\":0,\"height\":0},"
+                "{\"kind\":\"envelope\",\"layer\":0,\"target\":\"fir_spread\",\"x\":10,\"y\":11,\"width\":0,\"height\":0},"
                 "{\"kind\":\"lfo\",\"layer\":0,\"target\":\"lowpass_cutoff\",\"depth_source\":\"velocity\",\"rate_source\":\"none\","
                 "\"x\":12,\"y\":13,\"width\":0,\"height\":0},"
                 "{\"kind\":\"envelope\",\"layer\":0,\"target\":\"volume\",\"x\":14,\"y\":15,\"width\":0,\"height\":0}]}");
@@ -3856,11 +3874,11 @@ static void check_clipboard_inline_0()
                 new_doc,
                 sizeof(new_doc),
                 "{\"format\":\"synth-instrument-v1\",\"note_skew_semitones\":0,\"layer_skew_semitones\":0,"
-                "\"layers\":[{\"wave_a\":\"sine\",\"fir_pitch_spread\":{\"base\":3,"
+                "\"layers\":[{\"wave_a\":\"sine\",\"fir_spread\":{\"base\":3,"
                 "\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0.5},"
                 "{\"time_seconds\":0.5,\"level\":0.25}]}}}],"
                 "\"graph_layout\":["
-                "{\"kind\":\"envelope\",\"layer\":0,\"target\":\"fir_pitch_spread\",\"x\":21,\"y\":22,\"width\":0,\"height\":0}]}");
+                "{\"kind\":\"envelope\",\"layer\":0,\"target\":\"fir_spread\",\"x\":21,\"y\":22,\"width\":0,\"height\":0}]}");
             TEST(new_written > 0 && static_cast<uint32_t>(new_written) < sizeof(new_doc));
             Synth::Instrument            new_instr                                 = {};
             Synth::EnvelopeDescriptor    new_envs[Synth::instrument_max_envelopes] = {};
@@ -4830,7 +4848,9 @@ static void check_clipboard_inline_0()
 
         uint32_t required_missing;
         uint32_t exempt_nonnull;
-        sweep_tooltips(graph, osc_tooltip_exempt, &osc_mapping, &required_missing, &exempt_nonnull);
+        OscTooltipContext tooltip_context = { &graph, &osc_mapping };
+
+        sweep_tooltips(graph, osc_tooltip_exempt, &tooltip_context, &required_missing, &exempt_nonnull);
         TEST(required_missing == 0 && exempt_nonnull == 0);
 
         // The effect panes reuse the same graph (each projection clears it), so

@@ -186,8 +186,8 @@
                   "duty_a",
                   "duty_b",
                   "osc_mix",
-                  "fm_index",
-                  "fir_pitch_spread",
+                  "fm_depth",
+                  "fir_spread",
                   "fm_ratio",
                   "pad_tone_a",
                   "pad_tone_b",
@@ -262,8 +262,8 @@
                   "duty_a",
                   "duty_b",
                   "osc_mix",
-                  "fm_index",
-                  "fir_pitch_spread",
+                  "fm_depth",
+                  "fir_spread",
                   "fm_ratio",
                   "pad_tone_a",
                   "pad_tone_b",
@@ -393,8 +393,8 @@
         "duty_a",
         "duty_b",
         "osc_mix",
-        "fm_index",
-        "fir_pitch_spread",
+        "fm_depth",
+        "fir_spread",
         "fm_ratio",
         "pad_tone_a",
         "pad_tone_b",
@@ -421,7 +421,7 @@
         "string_hammer_contact",
         "string_hammer_gain"
       ],
-      "description": "Modulated quantities. Units: volume, panning (0.5 = center), duty_a/duty_b, osc_mix and fm_index (1.0 = full depth) are 0..1; pitch is -24..24 semitones; fir_pitch_spread depends on the layer fir_type: bandpass = spread in semitones 0..36 around the note pitch, one band of up to four (fir_bands); lowpass and highpass = fixed cutoff in Hz 0..22050 with no key tracking, 0 = the edge-off bypassed state; a bandpass bypasses only while every band's spread is zero, so a zero band 0 spread with a positive higher-band spread still filters; fm_ratio is the ratio, slider-bounded 0.125..8 (0 stays bank-legal as the stored unset carrier value). Only 'volume' defaults to 1.0 and 'panning' to 0.5, fm_ratio inherits the layer's stored mod_ratio when its block is absent, and every other base defaults to 0. pad_tone_a/pad_tone_b is the per-oscillator pad spectral tilt in -1..+1: the harmonic exponent is 1 + value (0 = saw-like 1/n spectrum, +1 = mellow 1/n^2, -1 = flat/brightest), inert for non-pad waves. string_damping/string_release_damping and string_dispersion are 0..1 (0 = natural decay) and inert for non-string waves. fir_slope is the FIR window slope as an integer percent 1..100; an unrouted layer carries it in the layer's fir_slope scalar, a routed one in the target block's base."
+      "description": "Modulated quantities. Units: volume, panning (0.5 = center), duty_a/duty_b, osc_mix and fm_depth (1.0 = full depth) are 0..1; pitch is -24..24 semitones; fir_spread depends on the layer fir_type: bandpass = spread in semitones 0..36 around the note pitch, one band of up to four (fir_bands); lowpass and highpass = fixed cutoff in Hz 0..22050 with no key tracking, 0 = the edge-off bypassed state; a bandpass bypasses only while every band's spread is zero, so a zero band 0 spread with a positive higher-band spread still filters; fm_ratio is the ratio, slider-bounded 0.125..8 (0 stays bank-legal as the stored unset carrier value). Only 'volume' defaults to 1.0 and 'panning' to 0.5, fm_ratio inherits the layer's stored mod_ratio when its block is absent, and every other base defaults to 0. pad_tone_a/pad_tone_b is the per-oscillator pad spectral tilt in -1..+1: the harmonic exponent is 1 + value (0 = saw-like 1/n spectrum, +1 = mellow 1/n^2, -1 = flat/brightest), inert for non-pad waves. string_damping/string_release_damping and string_dispersion are 0..1 (0 = natural decay) and inert for non-string waves. fir_slope is the FIR window slope as an integer percent 1..100; an unrouted layer carries it in the layer's fir_slope scalar, a routed one in the target block's base."
     },
     "mod_source": {
       "type": "string",
@@ -516,7 +516,7 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 4,
-          "description": "Active bandpass band count; absent decodes as the stored single band. Bands 1..3 state their four parameters as fir_bandN_offset/spread/gain/slope target blocks; band 0 reuses fir_pitch_spread and fir_slope and adds fir_band0_offset/fir_band0_gain. A band whose block is absent decodes its defaults (offset 0, spread 0, gain 1, slope 100 for bands 1..3); a present block with an omitted base decodes 0, so an explicitly saved gain-0 band stays inactive instead of reloading as the 1.0 default."
+          "description": "Active bandpass band count; absent decodes as the stored single band. Bands 1..3 state their four parameters as fir_bandN_offset/spread/gain/slope target blocks; band 0 reuses fir_spread and fir_slope and adds fir_band0_offset/fir_band0_gain. A band whose block is absent decodes its defaults (offset 0, spread 0, gain 1, slope 100 for bands 1..3); a present block with an omitted base decodes 0, so an explicitly saved gain-0 band stays inactive instead of reloading as the 1.0 default."
         },
         "fir_type": {
           "type": "string",
@@ -527,7 +527,7 @@
             "highpass"
           ],
           "default": "bandpass",
-          "description": "Oscillator filter type. bandpass uses fir_pitch_spread as a spread in semitones (0..36) around the note pitch; lowpass and highpass use it as a fixed cutoff in Hz (0..22050); off disables the filter."
+          "description": "Oscillator filter type. bandpass uses fir_spread as a spread in semitones (0..36) around the note pitch; lowpass and highpass use it as a fixed cutoff in Hz (0..22050); off disables the filter."
         },
         "volume": {
           "$ref": "#/definitions/target_block"
@@ -547,10 +547,10 @@
         "osc_mix": {
           "$ref": "#/definitions/target_block"
         },
-        "fm_index": {
+        "fm_depth": {
           "$ref": "#/definitions/target_block"
         },
-        "fir_pitch_spread": {
+        "fir_spread": {
           "$ref": "#/definitions/target_block"
         },
         "fir_band0_offset": {
